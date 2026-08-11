@@ -1,0 +1,6 @@
+# Notebooks (created in their respective phases):
+#   01_stage_pipeline_walkthrough.ipynb  -- Phase 1 (#6)
+#   02_design_mapping.ipynb               -- Phase 2 (#12)
+#   03_action_diffusion.ipynb             -- Phase 3 (#18)
+#   04_minimind_omni_internals.ipynb      -- Phase 5 (#M9) -- the big one
+#   05_adding_a_new_model.ipynb           -- Phase 6 (#30)

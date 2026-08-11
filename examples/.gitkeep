@@ -1,0 +1,7 @@
+# CLI entry points. Created in their respective phases:
+#   chat.py         -- Phase 2 (#7)
+#   image_gen.py    -- Phase 3 (#13)
+#   image_edit.py   -- Phase 3 (#13)
+#   vla.py          -- Phase 4 (#19)
+#   audio.py        -- Phase 5 (#M8) -- MiniMind-Omni
+#   multi_stage.py  -- Phase 4 (#23) -- now points at MiniMind-Omni

@@ -1,0 +1,7 @@
+# Configs go here. Created in their respective phases:
+#   ar.yaml             -- Phase 2 (#7)
+#   text_to_image.yaml  -- Phase 3 (#13)
+#   image_edit.yaml     -- Phase 3 (#13)
+#   vla.yaml            -- Phase 4 (#19)
+#   audio.yaml          -- Phase 5 (#M8) -- MiniMind-Omni 3-stage
+#   multi_stage_demo.yaml -- deprecated; MiniMind-Omni replaces this

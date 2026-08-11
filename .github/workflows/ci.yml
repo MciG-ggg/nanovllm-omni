@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    name: Lint + Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install package without heavy ML deps; tests should not require GPU.
+          # Heavy deps (vllm, torch CUDA, diffusers, moshi) are guarded by
+          # try/except in module-level imports so unit tests can mock them.
+          pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        run: |
+          ruff check nanovllm_omni/ tests/
+
+      - name: Format check with black
+        run: |
+          black --check nanovllm_omni/ tests/
+
+      - name: Run unit tests (skip smoke)
+        run: |
+          pytest -m "not smoke" -v
+
+  docs-build:
+    name: Docs build smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install mkdocs mkdocs-material
+      - run: |
+          # Lightweight smoke test: confirm mkdocs config parses.
+          # Real build deferred until docs/ has content (Phase 6).
+          python -c "import yaml; yaml.safe_load(open('mkdocs.yml')) if __import__('os').path.exists('mkdocs.yml') else print('mkdocs.yml not yet created -- skipping (deferred to Phase 6)')"

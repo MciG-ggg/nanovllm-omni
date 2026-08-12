@@ -194,9 +194,9 @@ def load_config(path: str | Path) -> tuple[PipelineConfig, DeployConfig]:
 
     Returns:
         A ``(PipelineConfig, DeployConfig)`` tuple. All cross-field
-        invariants (unique stage names, at most one ``ar`` stage,
-        connector endpoints reference defined stages) are validated
-        during construction.
+        invariants (unique stage names, valid kinds, connector
+        endpoints reference defined stages) are validated during
+        construction. Multiple ``ar`` stages are allowed.
 
     Raises:
         FileNotFoundError: ``path`` does not exist.

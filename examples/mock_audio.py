@@ -1,6 +1,10 @@
 """Write deterministic, model-free MiniMind-Omni demo audio to mock_audio.wav."""
 
+import sys
 from pathlib import Path
+
+# Allow `python examples/mock_audio.py` without an editable install.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nanovllm_omni.orchestrator import Orchestrator
 from nanovllm_omni.pipeline import Pipeline

@@ -24,37 +24,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # AR engine: Qwen2.5-VL serving via vllm
-    "vllm>=0.6",
-    # Diffusion engine: SD3.5, Qwen-Image-Edit
-    "diffusers>=0.30",
-    # Omni engine: MiniMind-Omni Thinker + Talker
-    "transformers>=4.50",
-    # Audio codec: Mimi (Kyutai / moshi)
-    "moshi>=0.2",
-    "torchaudio>=2.4",
-    "soundfile>=0.12",
-    # Core
-    "torch>=2.4",
-    "safetensors>=0.4",
     "pyyaml>=6.0",
-    "pydantic>=2.5",
-    # Serving UI
-    "gradio>=5.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
     "ruff>=0.4",
     "black>=24.0",
-    "mypy>=1.10",
-    "pre-commit>=3.7",
-    "jupyter>=1.0",
-    "ipykernel>=6.0",
-    "mkdocs>=1.5",
-    "mkdocs-material>=9.5",
 ]
 
 [project.urls]

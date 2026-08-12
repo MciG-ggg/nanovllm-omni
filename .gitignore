@@ -83,3 +83,7 @@ docs/site/
 
 # OS
 Thumbs.db
+
+.pi/
+
+docs/design-grill.md

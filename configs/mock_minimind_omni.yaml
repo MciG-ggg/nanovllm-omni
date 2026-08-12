@@ -1,0 +1,23 @@
+pipeline:
+  stages:
+    - name: thinker
+      kind: ar
+      model_id: fake/thinker
+    - name: talker
+      kind: ar
+      model_id: fake/talker
+    - name: code2wav
+      kind: audio_decode
+      model_id: fake/code2wav
+  connectors:
+    - source: thinker
+      target: talker
+      payload_type: bridge
+    - source: talker
+      target: code2wav
+      payload_type: codec_tokens
+
+deploy:
+  device: cpu
+  lazy_load: true
+  max_active_stages: 1

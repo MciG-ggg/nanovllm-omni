@@ -62,6 +62,53 @@ Hardware target: **24 GB VRAM** (RTX 4090 / A10G). Lazy model loading via HF Spa
 
 ---
 
+## Configuration
+
+Pipelines are declared in YAML and loaded with `load_config`. The canonical
+schema separates stage topology from deployment settings:
+
+```yaml
+pipeline:
+  stages:
+    - name: thinker
+      kind: ar                 # ar | diffusion | action | audio_decode
+      model_id: example/model
+      model_kwargs:            # optional, passed to the stage loader
+        dtype: bfloat16
+    - name: decoder
+      kind: audio_decode
+      model_id: example/codec
+  connectors:
+    - source: thinker
+      target: decoder
+      payload_type: hidden_states  # optional; defaults to auto
+
+deploy:
+  device: cuda                 # defaults to cuda
+  lazy_load: true              # defaults to true
+  max_active_stages: 1         # defaults to 1
+```
+
+`pipeline.stages` is required and must be non-empty. Stage names must be
+unique and stage kinds must be one of the four values shown above. Multiple
+`ar` stages are allowed so MiniMind-Omni can declare Thinker and Talker as
+separate autoregressive boundaries. Connector endpoints must name declared
+stages. `connectors` and each stage's `model_kwargs` are optional. The loader
+also accepts `deployment` as an alias for `deploy` and the deployment keys at
+the top level for compatibility.
+
+```python
+from nanovllm_omni.config import load_config
+
+pipeline, deploy = load_config("configs/pipeline.yaml")
+print(pipeline.stages[0].model_id)
+print(deploy.device, deploy.lazy_load, deploy.max_active_stages)
+```
+
+`load_config(path)` accepts a string or `pathlib.Path` and returns a
+`(PipelineConfig, DeployConfig)` tuple. Missing deployment values use the
+defaults above; invalid configuration shapes or values raise `ValueError`.
+
 ## Architecture overview
 
 A request flows through a chain of stages, each owning its own model component, scheduler, and KV/cache state. Cross-stage state flows through typed connectors.

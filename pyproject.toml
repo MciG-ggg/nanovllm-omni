@@ -43,10 +43,29 @@ minimind = [
     "soundfile>=0.12",
 ]
 
+# PEP 735 dependency groups. The `minimind` group mirrors the
+# `[minimind]` optional extra so `uv sync` picks it up via
+# `[tool.uv] default-groups` below. CI stays unaffected because it
+# installs via `pip install -e ".[dev]"` and never reads this table.
+[dependency-groups]
+minimind = [
+    "torch>=2.0",
+    "transformers>=4.50",
+    "huggingface_hub>=0.20",
+    "soundfile>=0.12",
+]
+
 [project.urls]
 Homepage = "https://github.com/MciG-ggg/nanovllm-omni"
 Documentation = "https://github.com/MciG-ggg/nanovllm-omni/blob/main/docs/"
 Issues = "https://github.com/MciG-ggg/nanovllm-omni/issues"
+
+[tool.uv]
+# Make `uv sync` install the real-weight MiniMind-O group by default so
+# `python examples/audio.py` works out of the box. CI is unaffected: it
+# uses `pip install -e ".[dev]"` which only reads
+# `[project.optional-dependencies]`, never `[dependency-groups]`.
+default-groups = ["minimind"]
 
 [tool.setuptools]
 packages = [

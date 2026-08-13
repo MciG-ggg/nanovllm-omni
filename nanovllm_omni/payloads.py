@@ -5,6 +5,15 @@ from io import BytesIO
 from struct import pack
 from wave import open as wave_open
 
+# Reference MiniMind-Omni post-EOS forced-padding count. After visible EOS
+# the Thinker runs this many additional steps so the Talker receives enough
+# bridge states to produce a full audio frame. Reference: vLLM-Omni PR #3796.
+THINKER_FORCED_PADDING_DEFAULT = 128
+
+# Audio padding token emitted by the Talker MTP codebook mask. Inactive
+# codebook positions are filled with this id before the next decode step.
+AUDIO_PADDING_TOKEN_ID = 0
+
 
 @dataclass(frozen=True)
 class TokenPayload:
@@ -26,19 +35,58 @@ class TensorPayload:
 
 @dataclass(frozen=True)
 class BridgePayload:
-    """Thinker's tokens and hidden states consumed by the Talker."""
+    """One per-step Thinker output: tokens and hidden states consumed by the Talker."""
 
     tokens: TokenPayload
     hidden_states: TensorPayload
 
 
 @dataclass(frozen=True)
+class ThinkerRun:
+    """Per-request Thinker output: the visible step plus forced padding steps.
+
+    ``bridges[0]`` is the visible step (ending in EOS). ``bridges[1:N+1]``
+    are the ``forced_padding_count`` forced steps emitted after EOS to keep
+    the Talker supplied with bridge states. Total length is
+    ``1 + forced_padding_count``.
+    """
+
+    bridges: tuple[BridgePayload, ...]
+    visible_tokens: TokenPayload
+    eos_token_id: int
+    forced_padding_count: int
+
+    def __post_init__(self) -> None:
+        expected = self.forced_padding_count + 1
+        if len(self.bridges) != expected:
+            raise ValueError(
+                f"ThinkerRun bridges length {len(self.bridges)} does not match "
+                f"1 + forced_padding_count ({expected})"
+            )
+
+
+@dataclass(frozen=True)
 class CodecTokenPayload:
-    """Mimi-like codec tokens emitted by the Talker."""
+    """Mimi-like codec tokens emitted by the Talker.
+
+    ``active_mask`` records which codebook positions are real (not
+    padding) at each frame, in frame-major order. Inactive positions
+    carry ``AUDIO_PADDING_TOKEN_ID``.
+    """
 
     token_ids: tuple[int, ...]
     codebooks: int
+    active_mask: tuple[tuple[bool, ...], ...] = ()
     sample_rate: int = 8_000
+
+    def __post_init__(self) -> None:
+        if self.codebooks < 1:
+            raise ValueError("CodecTokenPayload codebooks must be at least 1")
+        if self.active_mask and len(self.token_ids) != len(self.active_mask) * self.codebooks:
+            raise ValueError(
+                f"CodecTokenPayload token_ids length {len(self.token_ids)} does not match "
+                f"len(active_mask) * codebooks ({len(self.active_mask) * self.codebooks})"
+            )
 
 
 @dataclass(frozen=True)

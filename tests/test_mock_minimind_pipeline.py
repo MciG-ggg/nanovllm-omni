@@ -1,11 +1,21 @@
-"""CPU-only contract test for GitHub issue #2's public pipeline seam."""
+"""CPU-only contract test for the model-free MiniMind-Omni pipeline.
+
+Updated for issue #3: the Thinker now returns a ``ThinkerRun`` carrying
+visible + forced bridges and the Talker returns a ``CodecTokenPayload``
+carrying the MTP codebook active mask.
+"""
 
 from pathlib import Path
 from wave import open as wave_open
 
 from nanovllm_omni.config import load_config
 from nanovllm_omni.orchestrator import Orchestrator
-from nanovllm_omni.payloads import AudioPayload, BridgePayload, CodecTokenPayload
+from nanovllm_omni.payloads import (
+    AUDIO_PADDING_TOKEN_ID,
+    AudioPayload,
+    CodecTokenPayload,
+    ThinkerRun,
+)
 from nanovllm_omni.pipeline import Pipeline
 from nanovllm_omni.stage import FakeCode2Wav, FakeTalker, FakeThinker
 
@@ -46,12 +56,15 @@ def test_mock_minimind_request_traverses_typed_stages_and_returns_playable_audio
 def test_stage_boundaries_expose_required_typed_payloads() -> None:
     _, trace = make_pipeline().run("hello")
 
-    assert isinstance(trace[0][1], BridgePayload)
-    assert trace[0][1].tokens.text == "hello"
-    assert trace[0][1].hidden_states.shape == (5, 1)
+    assert isinstance(trace[0][1], ThinkerRun)
+    assert trace[0][1].visible_tokens.text == "hello"
+    assert trace[0][1].forced_padding_count == 128
+    assert len(trace[0][1].bridges) == trace[0][1].forced_padding_count + 1
     assert isinstance(trace[1][1], CodecTokenPayload)
-    assert trace[1][1].codebooks == 1
+    assert trace[1][1].codebooks >= 1
+    assert trace[1][1].active_mask
     assert isinstance(trace[2][1], AudioPayload)
+    assert AUDIO_PADDING_TOKEN_ID in trace[1][1].token_ids
 
 
 def test_mock_audio_is_deterministic() -> None:

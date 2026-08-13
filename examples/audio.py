@@ -20,8 +20,9 @@ from pathlib import Path
 # Allow `python examples/audio.py` without an editable install.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from nanovllm_omni.config import load_config
 from nanovllm_omni.models import load_minimind_omni_bundle
-from nanovllm_omni.runtime import Orchestrator, Pipeline
+from nanovllm_omni.runtime import Orchestrator, build_pipeline
 
 if __name__ == "__main__":
     # Offline local dirs (WSL air-gap). Override with env if needed.
@@ -34,15 +35,21 @@ if __name__ == "__main__":
 
     import torch
 
-    # Prefer CUDA; on OOM fall back to CPU (4GB laptop GPUs).
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Pipeline topology + deploy profile come from YAML; bundle is the
+    # concrete weight carrier for this model family.
+    cfg, deploy = load_config(Path(__file__).resolve().parents[1] / "configs" / "minimind_omni.yaml")
+
+    # Honour deploy.device when it's a concrete target; otherwise prefer
+    # CUDA if available, fall back to CPU on OOM (4GB laptop GPUs).
+    preferred = deploy.device
+    device = preferred if preferred != "cuda" else ("cuda" if torch.cuda.is_available() else "cpu")
     try:
         bundle = load_minimind_omni_bundle(
             model_id=str(model_id),
             mimi_model_id=str(mimi_id),
             device=device,
         )
-        pipeline = Pipeline((bundle.thinker, bundle.talker, bundle.code2wav))
+        pipeline = build_pipeline(cfg, bundle=bundle)
         result = Orchestrator().submit(
             pipeline, "Hello from the real MiniMind-O pipeline."
         )
@@ -56,7 +63,7 @@ if __name__ == "__main__":
             mimi_model_id=str(mimi_id),
             device="cpu",
         )
-        pipeline = Pipeline((bundle.thinker, bundle.talker, bundle.code2wav))
+        pipeline = build_pipeline(cfg, bundle=bundle)
         result = Orchestrator().submit(
             pipeline, "Hello from the real MiniMind-O pipeline."
         )

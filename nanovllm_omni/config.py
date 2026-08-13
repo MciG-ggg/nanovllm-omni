@@ -101,6 +101,9 @@ class PipelineConfig:
     """
 
     stages: list[StageConfig]
+    # ponytail: not yet consumed by runtime -- execution follows stages order.
+    # Remove if no consumer by the next milestone, or wire when the orchestrator
+    # schedules by edge rather than by list position.
     connectors: list[ConnectorSpec] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -139,7 +142,11 @@ class DeployConfig:
     """
 
     device: str = "cuda"
+    # ponytail: not yet consumed by runtime. Wire when the bundle loader
+    # supports lazy materialization.
     lazy_load: bool = True
+    # ponytail: not yet consumed by runtime. Wire when the orchestrator
+    # schedules more than one stage concurrently.
     max_active_stages: int = 1
 
     def __post_init__(self) -> None:

@@ -98,9 +98,7 @@ def _load_minimind(
     snapshot_dir = _resolve_snapshot(model_id)
     mimi_dir = _resolve_snapshot(mimi_model_id)
     tokenizer = AutoTokenizer.from_pretrained(snapshot_dir, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        snapshot_dir, trust_remote_code=True
-    ).eval()
+    model = AutoModelForCausalLM.from_pretrained(snapshot_dir, trust_remote_code=True).eval()
     # ponytail: half only on CUDA; CPU path stays float32 (4GB laptop GPUs OOM).
     if device != "cpu":
         model = model.half()

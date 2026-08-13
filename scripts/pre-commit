@@ -6,3 +6,8 @@ if [[ -x .venv/bin/ruff ]]; then
 else
   ruff check nanovllm_omni/ tests/
 fi
+if [[ -x .venv/bin/black ]]; then
+  .venv/bin/black --check nanovllm_omni/ tests/
+else
+  black --check nanovllm_omni/ tests/
+fi

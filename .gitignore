@@ -47,7 +47,8 @@ dmypy.json
 
 # IDE / editor
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
 *.swp
 *.swo
 .DS_Store

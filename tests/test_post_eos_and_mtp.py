@@ -114,9 +114,7 @@ class TestThinkerForcedPadding:
 
     def test_visible_step_is_the_first_bridge(self) -> None:
         capturing = _CapturingTalker()
-        pipeline = Pipeline(
-            (FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav())
-        )
+        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
 
         Orchestrator().submit(pipeline, "hello omni")
 
@@ -139,9 +137,7 @@ class TestPerRequestIsolationAndCleanup:
         """Two sequential submits with different prompts carry distinct bridges."""
         orchestrator = Orchestrator()
         capturing = _CapturingTalker()
-        pipeline = Pipeline(
-            (FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav())
-        )
+        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
 
         orchestrator.submit(pipeline, "alpha")
         orchestrator.submit(pipeline, "beta")
@@ -163,9 +159,7 @@ class TestPerRequestIsolationAndCleanup:
         """Concurrent submits with the same prompt still produce independent runs."""
         orchestrator = Orchestrator()
         capturing = _CapturingTalker()
-        pipeline = Pipeline(
-            (FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav())
-        )
+        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
 
         results: list[AudioPayload] = []
         errors: list[BaseException] = []
@@ -230,9 +224,9 @@ class TestTalkerMTPMask:
 
         for t in range(frames):
             for k in range(3):
-                assert codec.active_mask[t][k] == (k <= t), (
-                    f"frame={t} codebook={k}: expected {k <= t}"
-                )
+                assert codec.active_mask[t][k] == (
+                    k <= t
+                ), f"frame={t} codebook={k}: expected {k <= t}"
 
     def test_inactive_codebook_positions_carry_the_audio_padding_token(self) -> None:
         _, trace = make_pipeline(forced_padding_count=5, codebooks=3).run("hello")

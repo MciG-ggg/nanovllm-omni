@@ -113,9 +113,12 @@ def _load_minimind(model_id: str, device: str) -> _LoadedMiniMind:
 
     snapshot_dir = snapshot_download(model_id)
     tokenizer = AutoTokenizer.from_pretrained(snapshot_dir)
-    model = AutoModelForCausalLM.from_pretrained(
-        snapshot_dir, trust_remote_code=True
-    ).half().eval().to(device)
+    model = (
+        AutoModelForCausalLM.from_pretrained(snapshot_dir, trust_remote_code=True)
+        .half()
+        .eval()
+        .to(device)
+    )
     mimi = MimiModel.from_pretrained(snapshot_dir).eval()
     return _LoadedMiniMind(
         model=model,
@@ -128,9 +131,7 @@ def _load_minimind(model_id: str, device: str) -> _LoadedMiniMind:
     )
 
 
-def _run_generation(
-    loaded: _LoadedMiniMind, prompt: str
-) -> tuple[list[int], list[list[int]]]:
+def _run_generation(loaded: _LoadedMiniMind, prompt: str) -> tuple[list[int], list[list[int]]]:
     """Drive MiniMind-O's ``stream_generate`` and collect text + audio codes.
 
     Mirrors the upstream ``eval_omni.eval_sample`` flow: builds a
@@ -247,10 +248,7 @@ class RealTalker(Stage[ThinkerRun, CodecTokenPayload]):
         token_ids: list[int] = []
         for frame_idx, frame in enumerate(frames):
             for codebook_idx, code in enumerate(frame):
-                if (
-                    not active_mask[frame_idx][codebook_idx]
-                    or code >= MIMI_AUDIO_PAD_TOKEN
-                ):
+                if not active_mask[frame_idx][codebook_idx] or code >= MIMI_AUDIO_PAD_TOKEN:
                     token_ids.append(AUDIO_PADDING_TOKEN_ID)
                 else:
                     token_ids.append(int(code))
@@ -284,9 +282,9 @@ class RealCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
             samples: tuple[float, ...] = ()
         else:
             # Re-shape (frames * codebooks,) -> [batch=1, codebooks, frames].
-            codes = torch.tensor(flat, dtype=torch.long).reshape(
-                -1, payload.codebooks
-            ).T.unsqueeze(0)
+            codes = (
+                torch.tensor(flat, dtype=torch.long).reshape(-1, payload.codebooks).T.unsqueeze(0)
+            )
             with torch.no_grad():
                 audio = loaded.mimi.decode(codes).audio_values
             samples = tuple(float(s) for s in audio.squeeze().float().cpu().numpy())

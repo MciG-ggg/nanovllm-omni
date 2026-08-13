@@ -72,6 +72,7 @@ packages = [
     "nanovllm_omni",
     "nanovllm_omni.diffusion",
     "nanovllm_omni.models",
+    "nanovllm_omni.runtime",
     "nanovllm_omni.serving",
 ]
 

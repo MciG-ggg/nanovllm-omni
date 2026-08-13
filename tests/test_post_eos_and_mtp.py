@@ -4,25 +4,122 @@ Each test asserts behavior observable through the public pipeline seam
 (``Orchestrator.submit`` / ``Pipeline.run``) plus the typed payloads the
 seam emits. Internal counters, the per-request state object, and any
 private orchestrator attributes are not inspected.
+
+Deterministic stage stubs live in this file only (not in the package).
 """
 
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
+from math import sin, tau
 from typing import Any
 
 import pytest
 
-from nanovllm_omni.orchestrator import Orchestrator
 from nanovllm_omni.payloads import (
     AUDIO_PADDING_TOKEN_ID,
     THINKER_FORCED_PADDING_DEFAULT,
     AudioPayload,
+    BridgePayload,
     CodecTokenPayload,
+    TensorPayload,
     ThinkerRun,
+    TokenPayload,
 )
-from nanovllm_omni.pipeline import Pipeline
-from nanovllm_omni.stage import FakeCode2Wav, FakeTalker, FakeThinker
+from nanovllm_omni.runtime import Orchestrator, Pipeline
+from nanovllm_omni.stage import Stage
+
+
+# --------------------------------------------------------------------------- #
+# local stubs (package no longer ships Fake* stages)                          #
+# --------------------------------------------------------------------------- #
+
+
+def _build_active_mask(frames: int, codebooks: int) -> tuple[tuple[bool, ...], ...]:
+    return tuple(tuple(k <= t for k in range(codebooks)) for t in range(frames))
+
+
+@dataclass
+class _StubThinker(Stage[str, ThinkerRun]):
+    name: str = "thinker"
+    forced_padding_count: int = THINKER_FORCED_PADDING_DEFAULT
+    eos_token_id: int = AUDIO_PADDING_TOKEN_ID
+
+    def execute(self, payload: str) -> ThinkerRun:
+        prompt_ids = tuple(payload.encode("utf-8")) or (0,)
+        visible_ids = prompt_ids + (self.eos_token_id,)
+        visible_bridge = BridgePayload(
+            tokens=TokenPayload(token_ids=visible_ids, text=payload),
+            hidden_states=TensorPayload(
+                values=tuple(token / 255 for token in visible_ids),
+                shape=(len(visible_ids), 1),
+            ),
+        )
+        forced_bridges: list[BridgePayload] = []
+        for step in range(self.forced_padding_count):
+            forced_bridges.append(
+                BridgePayload(
+                    tokens=TokenPayload(
+                        token_ids=(self.eos_token_id,),
+                        text="",
+                        metadata={"forced": "true", "step": str(step)},
+                    ),
+                    hidden_states=TensorPayload(
+                        values=((self.eos_token_id + step + 1) / 255,),
+                        shape=(1, 1),
+                    ),
+                )
+            )
+        return ThinkerRun(
+            bridges=(visible_bridge, *forced_bridges),
+            visible_tokens=visible_bridge.tokens,
+            eos_token_id=self.eos_token_id,
+            forced_padding_count=self.forced_padding_count,
+        )
+
+
+@dataclass
+class _StubTalker(Stage[ThinkerRun, CodecTokenPayload]):
+    name: str = "talker"
+    codebooks: int = 4
+
+    def execute(self, payload: ThinkerRun) -> CodecTokenPayload:
+        frames = len(payload.bridges)
+        active_mask = _build_active_mask(frames, self.codebooks)
+        token_ids: list[int] = []
+        for frame_idx, bridge in enumerate(payload.bridges):
+            bridge_seed = sum(bridge.hidden_states.values) or 1
+            for codebook_idx in range(self.codebooks):
+                if active_mask[frame_idx][codebook_idx]:
+                    token_ids.append((bridge_seed + frame_idx + codebook_idx) % 256)
+                else:
+                    token_ids.append(AUDIO_PADDING_TOKEN_ID)
+        return CodecTokenPayload(
+            token_ids=tuple(token_ids),
+            codebooks=self.codebooks,
+            active_mask=active_mask,
+        )
+
+
+@dataclass
+class _StubCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
+    name: str = "code2wav"
+    duration_seconds: float = 0.1
+
+    def execute(self, payload: CodecTokenPayload) -> AudioPayload:
+        seed = sum(payload.token_ids) or 1
+        frames = round(payload.sample_rate * self.duration_seconds)
+        frequency = 220 + seed % 440
+        samples = tuple(
+            0.2 * sin(tau * frequency * frame / payload.sample_rate) for frame in range(frames)
+        )
+        return AudioPayload(
+            samples=samples,
+            sample_rate=payload.sample_rate,
+            metadata={"format": "pcm_s16le", "source": "stub-code2wav"},
+        )
+
 
 # --------------------------------------------------------------------------- #
 # helpers                                                                     #
@@ -35,9 +132,9 @@ def make_pipeline(
 ) -> Pipeline:
     return Pipeline(
         (
-            FakeThinker(forced_padding_count=forced_padding_count),
-            FakeTalker(codebooks=codebooks),
-            FakeCode2Wav(),
+            _StubThinker(forced_padding_count=forced_padding_count),
+            _StubTalker(codebooks=codebooks),
+            _StubCode2Wav(),
         )
     )
 
@@ -97,9 +194,9 @@ class TestThinkerForcedPadding:
         capturing = _CapturingTalker()
         pipeline = Pipeline(
             (
-                FakeThinker(forced_padding_count=6),
+                _StubThinker(forced_padding_count=6),
                 capturing,
-                FakeCode2Wav(),
+                _StubCode2Wav(),
             )
         )
 
@@ -114,7 +211,7 @@ class TestThinkerForcedPadding:
 
     def test_visible_step_is_the_first_bridge(self) -> None:
         capturing = _CapturingTalker()
-        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
+        pipeline = Pipeline((_StubThinker(forced_padding_count=4), capturing, _StubCode2Wav()))
 
         Orchestrator().submit(pipeline, "hello omni")
 
@@ -137,7 +234,7 @@ class TestPerRequestIsolationAndCleanup:
         """Two sequential submits with different prompts carry distinct bridges."""
         orchestrator = Orchestrator()
         capturing = _CapturingTalker()
-        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
+        pipeline = Pipeline((_StubThinker(forced_padding_count=4), capturing, _StubCode2Wav()))
 
         orchestrator.submit(pipeline, "alpha")
         orchestrator.submit(pipeline, "beta")
@@ -159,7 +256,7 @@ class TestPerRequestIsolationAndCleanup:
         """Concurrent submits with the same prompt still produce independent runs."""
         orchestrator = Orchestrator()
         capturing = _CapturingTalker()
-        pipeline = Pipeline((FakeThinker(forced_padding_count=4), capturing, FakeCode2Wav()))
+        pipeline = Pipeline((_StubThinker(forced_padding_count=4), capturing, _StubCode2Wav()))
 
         results: list[AudioPayload] = []
         errors: list[BaseException] = []
@@ -191,7 +288,7 @@ class TestPerRequestIsolationAndCleanup:
 
     def test_state_is_cleared_after_mid_pipeline_failure(self) -> None:
         orchestrator = Orchestrator()
-        pipeline = Pipeline((FakeThinker(), _RaisingTalker(), FakeCode2Wav()))
+        pipeline = Pipeline((_StubThinker(), _RaisingTalker(), _StubCode2Wav()))
 
         with pytest.raises(RuntimeError):
             orchestrator.submit(pipeline, "hello")
@@ -256,19 +353,19 @@ class TestTalkerMTPMask:
 
 
 # --------------------------------------------------------------------------- #
-# AC #5 + #6: external-behavior tests, mock audio still runnable              #
+# AC #5 + #6: external-behavior tests                                         #
 # --------------------------------------------------------------------------- #
 
 
 class TestPublicPipelineSeam:
-    """The mock audio path stays runnable through the public pipeline seam."""
+    """Stub audio path stays runnable through the public pipeline seam."""
 
     def test_submit_returns_playable_audio_through_public_seam(self) -> None:
         result = Orchestrator().submit(make_pipeline(), "hello omni")
 
         assert isinstance(result.audio, AudioPayload)
         assert result.audio.sample_rate == 8_000
-        assert result.audio.metadata == {"format": "pcm_s16le", "source": "fake-code2wav"}
+        assert result.audio.metadata == {"format": "pcm_s16le", "source": "stub-code2wav"}
         assert len(result.audio.samples) == 800
         assert result.stage_names == ("thinker", "talker", "code2wav")
 

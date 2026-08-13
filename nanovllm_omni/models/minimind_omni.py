@@ -4,7 +4,7 @@ Implements the three logical stages (Thinker, Talker, Code2Wav) for the
 real MiniMind-O weights while preserving the existing public pipeline
 seam. The upstream model performs Thinker + Talker in a single
 ``stream_generate`` pass, so the loaded model is shared between
-``RealThinker`` and ``RealTalker`` via a lazy handle; the Thinker stashes
+``MinimindThinker`` and ``MinimindTalker`` via a lazy handle; the Thinker stashes
 per-frame audio codes on the handle and the Talker reads them.
 
 Weights are downloaded from the Hugging Face Hub on first execute (not
@@ -32,6 +32,7 @@ from nanovllm_omni.stage import Stage
 # Default Hugging Face Hub id for MiniMind-O. Weights are ~1 GB and are
 # not committed to the repository -- they are downloaded on first use.
 DEFAULT_MINIMIND_MODEL_ID = "jingyaogong/minimind-3o"
+DEFAULT_MIMI_MODEL_ID = "kyutai/mimi"
 
 # MiniMind-O's audio codec vocab uses id >= 2049 to signal "stop / no
 # code". We surface that as the typed audio padding token the Talker MTP
@@ -50,8 +51,8 @@ MIMI_SAMPLE_RATE = 24_000
 class _LoadedMiniMind:
     """A loaded MiniMind-O model + tokenizer + Mimi codec bundle.
 
-    Holds the heavy state shared by ``RealThinker`` / ``RealTalker`` /
-    ``RealCode2Wav`` so weights download + load exactly once per bundle.
+    Holds the heavy state shared by ``MinimindThinker`` / ``MinimindTalker`` /
+    ``MinimindCode2Wav`` so weights download + load exactly once per bundle.
     ``last_audio_frames`` is the per-request cache the Thinker writes
     after one ``stream_generate`` pass and the Talker reads.
     """
@@ -69,17 +70,32 @@ class _LoadedMiniMind:
     torch: Any = None
 
 
+def _resolve_snapshot(model_id: str) -> str:
+    """Use a local directory as-is; otherwise download from the HF Hub."""
+    from pathlib import Path
+
+    path = Path(model_id)
+    if path.is_dir():
+        return str(path)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model_id)
+
+
 class _LazyHandle:
     """Lazily-resolved shared MiniMind-O bundle.
 
-    ``RealThinker`` / ``RealTalker`` / ``RealCode2Wav`` constructed via
+    ``MinimindThinker`` / ``MinimindTalker`` / ``MinimindCode2Wav`` constructed via
     ``load_minimind_omni_bundle`` share a single instance so the first
     ``execute`` triggers exactly one download + load and every later
     call reuses the same in-memory weights.
     """
 
-    def __init__(self, model_id: str, device: str | None) -> None:
+    def __init__(
+        self, model_id: str, device: str | None, mimi_model_id: str = DEFAULT_MIMI_MODEL_ID
+    ) -> None:
         self.model_id = model_id
+        self.mimi_model_id = mimi_model_id
         self.device = device
         self._loaded: _LoadedMiniMind | None = None
 
@@ -93,7 +109,7 @@ class _LazyHandle:
                     "install with `pip install nanovllm-omni[minimind]`"
                 ) from exc
             device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
-            self._loaded = _load_minimind(self.model_id, device)
+            self._loaded = _load_minimind(self.model_id, device, self.mimi_model_id)
         return self._loaded
 
     def reset(self) -> None:
@@ -105,21 +121,29 @@ class _LazyHandle:
         self._loaded = None
 
 
-def _load_minimind(model_id: str, device: str) -> _LoadedMiniMind:
-    """Download (if needed) and load MiniMind-O + Mimi from the HF Hub."""
+def _load_minimind(
+    model_id: str,
+    device: str,
+    mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
+) -> _LoadedMiniMind:
+    """Load MiniMind-O + Mimi from local dirs or the HF Hub."""
     import torch
-    from huggingface_hub import snapshot_download
     from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
 
-    snapshot_dir = snapshot_download(model_id)
-    tokenizer = AutoTokenizer.from_pretrained(snapshot_dir)
-    model = (
-        AutoModelForCausalLM.from_pretrained(snapshot_dir, trust_remote_code=True)
-        .half()
-        .eval()
-        .to(device)
-    )
-    mimi = MimiModel.from_pretrained(snapshot_dir).eval()
+    snapshot_dir = _resolve_snapshot(model_id)
+    mimi_dir = _resolve_snapshot(mimi_model_id)
+    tokenizer = AutoTokenizer.from_pretrained(snapshot_dir, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        snapshot_dir, trust_remote_code=True
+    ).eval()
+    # ponytail: half only on CUDA; CPU path stays float32 (4GB laptop GPUs OOM).
+    if device != "cpu":
+        model = model.half()
+    model = model.to(device)
+    mimi = MimiModel.from_pretrained(mimi_dir).eval()
+    if device != "cpu":
+        mimi = mimi.half()
+    mimi = mimi.to(device)
     return _LoadedMiniMind(
         model=model,
         tokenizer=tokenizer,
@@ -171,8 +195,8 @@ def _run_generation(loaded: _LoadedMiniMind, prompt: str) -> tuple[list[int], li
     return text_tokens, audio_frames
 
 
-class RealThinker(Stage[str, ThinkerRun]):
-    """Real-weight MiniMind-O Thinker.
+class MinimindThinker(Stage[str, ThinkerRun]):
+    """MiniMind-O Thinker.
 
     Drives the upstream ``stream_generate`` and returns a ``ThinkerRun``
     whose single bridge carries the visible text. ``forced_padding_count``
@@ -221,12 +245,12 @@ class RealThinker(Stage[str, ThinkerRun]):
         )
 
 
-class RealTalker(Stage[ThinkerRun, CodecTokenPayload]):
-    """Real-weight MiniMind-O Talker.
+class MinimindTalker(Stage[ThinkerRun, CodecTokenPayload]):
+    """MiniMind-O Talker.
 
     Reads the per-frame audio codes the Thinker stashed on the shared
     handle and converts them into a ``CodecTokenPayload`` with the same
-    delayed MTP active mask used by the fake Talker:
+    delayed MTP active mask:
 
     * ``active_mask[t][k] = k <= t`` (delayed activation per codebook)
     * inactive positions are filled with ``AUDIO_PADDING_TOKEN_ID``
@@ -260,8 +284,8 @@ class RealTalker(Stage[ThinkerRun, CodecTokenPayload]):
         )
 
 
-class RealCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
-    """Real-weight Mimi decode stage.
+class MinimindCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
+    """Mimi decode stage.
 
     Runs ``MimiModel.decode`` on the Talker's codec tokens and returns a
     24 kHz mono waveform typed as ``AudioPayload``. Inactive / padding
@@ -283,7 +307,9 @@ class RealCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
         else:
             # Re-shape (frames * codebooks,) -> [batch=1, codebooks, frames].
             codes = (
-                torch.tensor(flat, dtype=torch.long).reshape(-1, payload.codebooks).T.unsqueeze(0)
+                torch.tensor(flat, dtype=torch.long, device=loaded.device)
+                .reshape(-1, payload.codebooks)
+                .T.unsqueeze(0)
             )
             with torch.no_grad():
                 audio = loaded.mimi.decode(codes).audio_values
@@ -296,31 +322,33 @@ class RealCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
 
 
 @dataclass
-class RealMiniMindBundle:
-    """Bundle of three real-weight MiniMind-O stages sharing one loaded model."""
+class MinimindBundle:
+    """Bundle of three MiniMind-O stages sharing one loaded model."""
 
-    thinker: RealThinker
-    talker: RealTalker
-    code2wav: RealCode2Wav
+    thinker: MinimindThinker
+    talker: MinimindTalker
+    code2wav: MinimindCode2Wav
     model_id: str
 
 
 def load_minimind_omni_bundle(
     model_id: str = DEFAULT_MINIMIND_MODEL_ID,
     device: str | None = None,
-) -> RealMiniMindBundle:
-    """Return the three real-weight stages sharing one lazy MiniMind-O bundle.
+    mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
+) -> MinimindBundle:
+    """Return the three MiniMind-O stages sharing one lazy bundle.
 
     Weights download + load on the first ``execute`` (lazy loading), not
     on bundle construction, so a pipeline can be assembled in
     environments without HF access. Pass an explicit ``device`` to pin
     CPU / CUDA at construction time; otherwise it follows ``torch.cuda.
-    is_available()``.
+    is_available()``. Local directories are accepted for ``model_id`` /
+    ``mimi_model_id`` (offline / air-gapped runs).
     """
-    handle = _LazyHandle(model_id=model_id, device=device)
-    return RealMiniMindBundle(
-        thinker=RealThinker(handle),
-        talker=RealTalker(handle),
-        code2wav=RealCode2Wav(handle),
+    handle = _LazyHandle(model_id=model_id, device=device, mimi_model_id=mimi_model_id)
+    return MinimindBundle(
+        thinker=MinimindThinker(handle),
+        talker=MinimindTalker(handle),
+        code2wav=MinimindCode2Wav(handle),
         model_id=model_id,
     )

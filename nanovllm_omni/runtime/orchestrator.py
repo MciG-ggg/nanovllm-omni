@@ -19,7 +19,7 @@ from nanovllm_omni.payloads import (
     BridgePayload,
     ThinkerRun,
 )
-from nanovllm_omni.pipeline import Pipeline
+from nanovllm_omni.runtime.pipeline import Pipeline
 
 
 class _PostEOSPhase(StrEnum):

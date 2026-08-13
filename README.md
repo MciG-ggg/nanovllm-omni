@@ -136,14 +136,14 @@ Three concrete deployments demonstrate the design:
 | vllm-omni component | nanovllm-omni location | What we simplified |
 |---|---|---|
 | `AsyncOmniEngine` | `runtime.py::Engine` | No background event loop; synchronous driver |
-| `Orchestrator` | `orchestrator.py` | No streaming cancellation state machine |
+| `Orchestrator` | `runtime/orchestrator.py` | No streaming cancellation state machine |
 | `StageRuntime` | `runtime.py::StageRuntime` | Single-process, single-device only; no cross-node |
 | `OmniConnector` | `connector.py` | Shared-memory transport only; no Mooncake/Mori/Yuanrong |
 | `PipelineConfig` + `DeployConfig` | `config.py` | Dataclass + YAML; CLI override via pydantic |
 | `VllmOmniARStageConfig` | `stage.py::ARStage` | Direct `vllm.LLM` wrap; no model parallelism config |
 | `OmniDiffusionConfig` | `diffusion/scheduler.py` | Request-level batching only; no CUDA graph |
 | `MiniMindOmniForConditionalGeneration` | `models/audio.py` | Reference PR #3796; per-stage registration |
-| Post-EOS bridge state | `orchestrator.py::PerRequestPostEOSState` | Per-request counter only |
+| Post-EOS bridge state | `runtime/orchestrator.py::PerRequestPostEOSState` | Per-request counter only |
 | MTP codebook active mask | `models/audio.py::TalkerMTP` | ~80 LOC direct port |
 
 Full table: [docs/design_mapping.md](docs/design_mapping.md) (filled in Week 5).
@@ -169,28 +169,17 @@ nanovllm-omni/
 ├── nanovllm_omni/           # Main package
 │   ├── config.py            # PipelineConfig + DeployConfig
 │   ├── stage.py             # Stage ABC + AR/Diffusion/Action/AudioDecode
-│   ├── pipeline.py          # Pipeline = ordered stages + connectors
-│   ├── orchestrator.py      # Cross-stage request routing + per-request state
-│   ├── runtime.py           # StageRuntime lifecycle + lazy loading
-│   ├── connector.py         # Stage-to-stage transport (token + tensor payloads)
-│   ├── diffusion/
-│   │   ├── sampler.py       # Minimal flow matching + DDPM
-│   │   ├── scheduler.py     # Diffusion request-level batching
-│   │   └── audio_codec.py   # Mimi codec decoder (for MiniMind-Omni)
+│   ├── payloads.py          # Typed cross-stage payloads
+│   ├── runtime/             # Core driver (not Gradio)
+│   │   ├── pipeline.py      # Ordered stage execution + trace
+│   │   └── orchestrator.py  # Request lifecycle + post-EOS state
 │   ├── models/
-│   │   ├── ar.py            # Qwen2.5-VL-3B via vllm
-│   │   ├── diffusion.py     # SD3.5-medium + Qwen-Image-Edit
-│   │   ├── vla.py           # InternVLA-A1
-│   │   └── audio.py         # MiniMind-Omni (Thinker/Talker/Code2Wav)
-│   └── serving/
-│       ├── app.py           # Gradio entry + lazy model dispatch
-│       ├── chat.py          # Chat tab
-│       ├── image.py         # T2I + Edit tabs
-│       ├── vla.py           # VLA tab
-│       └── audio.py         # Audio tab (MiniMind-Omni)
+│   │   └── minimind_omni.py # MiniMind-O Thinker/Talker/Code2Wav
+│   ├── diffusion/           # Diffusion helpers (phase 3+)
+│   └── serving/             # Gradio UI only (app/chat/image/vla/audio)
 ├── configs/                 # YAML stage configs
 ├── examples/                # Single-file scripts (CLI entry)
-├── notebooks/               # 5 design walkthroughs
+├── notebooks/               # Design walkthroughs + MiniMind-O local
 ├── tests/                   # Unit + manual smoke tests
 ├── docs/                    # architecture.md, design_mapping.md, deployment.md
 └── ...

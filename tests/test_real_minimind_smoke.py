@@ -16,14 +16,13 @@ from __future__ import annotations
 import pytest
 
 from nanovllm_omni.models import load_minimind_omni_bundle
-from nanovllm_omni.orchestrator import Orchestrator
 from nanovllm_omni.payloads import (
     AUDIO_PADDING_TOKEN_ID,
     AudioPayload,
     CodecTokenPayload,
     ThinkerRun,
 )
-from nanovllm_omni.pipeline import Pipeline
+from nanovllm_omni.runtime import Orchestrator, Pipeline
 from nanovllm_omni.stage import Stage
 
 pytestmark = [

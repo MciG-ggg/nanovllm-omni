@@ -13,12 +13,12 @@ loaders (for MiniMind-Omni, which is small enough to bring up ourselves).
 
 from nanovllm_omni.models.minimind_omni import (
     DEFAULT_MINIMIND_MODEL_ID,
-    RealMiniMindBundle,
+    MinimindBundle,
     load_minimind_omni_bundle,
 )
 
 __all__ = [
     "DEFAULT_MINIMIND_MODEL_ID",
-    "RealMiniMindBundle",
+    "MinimindBundle",
     "load_minimind_omni_bundle",
 ]

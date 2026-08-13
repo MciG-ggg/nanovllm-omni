@@ -81,9 +81,18 @@ logs/
 docs/_build/
 docs/site/
 
+# Generated audio (examples/audio.py → audio.wav)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Local design notes / specs
+docs/design-grill.md
+docs/specs/
+
 # OS
 Thumbs.db
 
 .pi/
-
-docs/design-grill.md

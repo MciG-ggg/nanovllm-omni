@@ -2,15 +2,12 @@
 
 Implements the three logical stages (Thinker, Talker, Code2Wav) for the
 real MiniMind-O weights while preserving the existing public pipeline
-seam. The upstream model performs Thinker + Talker in a single
-``stream_generate`` pass, so the loaded model is shared between
-``MinimindThinker`` and ``MinimindTalker`` via a lazy handle; the Thinker stashes
-per-frame audio codes on the handle and the Talker reads them.
+seam.
 
-Weights are downloaded from the Hugging Face Hub on first execute (not
-on bundle construction) so the package remains importable without
-``torch`` / ``transformers`` and so CI can keep running the model-free
-suite without network access.
+Nano middle-form (issue #11 / vLLM-Omni PR #3796 semantics, not runtime):
+Thinker emits typed post-EOS bridges (default 128 pads); Talker consumes
+``ThinkerRun.bridges`` only (no shared-handle audio stash) and applies a
+tail watchdog after the last Thinker bridge.
 """
 
 from __future__ import annotations
@@ -20,6 +17,8 @@ from typing import Any
 
 from nanovllm_omni.payloads import (
     AUDIO_PADDING_TOKEN_ID,
+    TALKER_MAX_STEPS_AFTER_LAST_THINKER_TOKEN,
+    THINKER_FORCED_PADDING_DEFAULT,
     AudioPayload,
     BridgePayload,
     CodecTokenPayload,
@@ -29,49 +28,27 @@ from nanovllm_omni.payloads import (
 )
 from nanovllm_omni.stage import Stage
 
-# Default Hugging Face Hub id for MiniMind-O. Weights are ~1 GB and are
-# not committed to the repository -- they are downloaded on first use.
 DEFAULT_MINIMIND_MODEL_ID = "jingyaogong/minimind-3o"
 DEFAULT_MIMI_MODEL_ID = "kyutai/mimi"
 
-# MiniMind-O's audio codec vocab uses id >= 2049 to signal "stop / no
-# code". We surface that as the typed audio padding token the Talker MTP
-# mask uses, so downstream consumers see one canonical padding id.
 MIMI_AUDIO_PAD_TOKEN = 2049
-
-# Number of Mimi codebook layers emitted per audio frame (Talker MTP
-# heads in ``MiniMindOmni.TalkerHead``).
 MIMI_CODEBOOKS = 8
-
-# Sample rate Mimi decodes to (matches MiniMind-O's published rate).
 MIMI_SAMPLE_RATE = 24_000
 
 
 @dataclass
 class _LoadedMiniMind:
-    """A loaded MiniMind-O model + tokenizer + Mimi codec bundle.
-
-    Holds the heavy state shared by ``MinimindThinker`` / ``MinimindTalker`` /
-    ``MinimindCode2Wav`` so weights download + load exactly once per bundle.
-    ``last_audio_frames`` is the per-request cache the Thinker writes
-    after one ``stream_generate`` pass and the Talker reads.
-    """
+    """Loaded MiniMind-O + tokenizer + Mimi; shared by the three stages."""
 
     model: Any
     tokenizer: Any
     mimi: Any
     device: str
     model_id: str
-    last_audio_frames: list[list[int]]
-    # Ponytail: keep the imported torch module on the bundle so the
-    # downstream stages do not need a second `import torch` (which would
-    # raise ``ModuleNotFoundError`` without our clean RuntimeError
-    # message).
     torch: Any = None
 
 
 def _resolve_snapshot(model_id: str) -> str:
-    """Use a local directory as-is; otherwise download from the HF Hub."""
     from pathlib import Path
 
     path = Path(model_id)
@@ -83,13 +60,7 @@ def _resolve_snapshot(model_id: str) -> str:
 
 
 class _LazyHandle:
-    """Lazily-resolved shared MiniMind-O bundle.
-
-    ``MinimindThinker`` / ``MinimindTalker`` / ``MinimindCode2Wav`` constructed via
-    ``load_minimind_omni_bundle`` share a single instance so the first
-    ``execute`` triggers exactly one download + load and every later
-    call reuses the same in-memory weights.
-    """
+    """Lazily-resolved shared MiniMind-O bundle (weights load on first use)."""
 
     def __init__(
         self, model_id: str, device: str | None, mimi_model_id: str = DEFAULT_MIMI_MODEL_ID
@@ -103,7 +74,7 @@ class _LazyHandle:
         if self._loaded is None:
             try:
                 import torch
-            except ImportError as exc:  # pragma: no cover - smoke test path only
+            except ImportError as exc:  # pragma: no cover
                 raise RuntimeError(
                     "torch is required to load real MiniMind-O weights; "
                     "install with `pip install nanovllm-omni[minimind]`"
@@ -113,11 +84,6 @@ class _LazyHandle:
         return self._loaded
 
     def reset(self) -> None:
-        """Release the loaded bundle so the next call re-downloads.
-
-        Optional explicit cleanup hook; the orchestrator does not require
-        it because per-request state is already cleared in its ``finally``.
-        """
         self._loaded = None
 
 
@@ -126,7 +92,6 @@ def _load_minimind(
     device: str,
     mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
 ) -> _LoadedMiniMind:
-    """Load MiniMind-O + Mimi from local dirs or the HF Hub."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
 
@@ -150,21 +115,12 @@ def _load_minimind(
         mimi=mimi,
         device=device,
         model_id=model_id,
-        last_audio_frames=[],
         torch=torch,
     )
 
 
 def _run_generation(loaded: _LoadedMiniMind, prompt: str) -> tuple[list[int], list[list[int]]]:
-    """Drive MiniMind-O's ``stream_generate`` and collect text + audio codes.
-
-    Mirrors the upstream ``eval_omni.eval_sample`` flow: builds a
-    chat-template prompt and iterates ``model.generate(stream=True,
-    return_audio_codes=True)``, accumulating both yield outputs. The
-    generator yields ``(text_tokens, audio_frame)`` pairs; ``text_tokens``
-    is the cumulative sequence and ``audio_frame`` is the per-step list
-    of 8 codebook ints (or ``None`` for steps without a complete frame).
-    """
+    """Drive MiniMind-O ``generate`` and collect text tokens + audio frames."""
     torch = loaded.torch
 
     messages = [{"role": "user", "content": prompt}]
@@ -195,83 +151,142 @@ def _run_generation(loaded: _LoadedMiniMind, prompt: str) -> tuple[list[int], li
     return text_tokens, audio_frames
 
 
-class MinimindThinker(Stage[str, ThinkerRun]):
-    """MiniMind-O Thinker.
+def _pack_audio_onto_bridges(
+    bridges: list[BridgePayload],
+    audio_frames: list[list[int]],
+) -> tuple[BridgePayload, ...]:
+    """Attach flat codec ids onto typed bridges (connector-only, no handle stash).
 
-    Drives the upstream ``stream_generate`` and returns a ``ThinkerRun``
-    whose single bridge carries the visible text. ``forced_padding_count``
-    is 0: MiniMind-O does not force post-EOS padding (the audio path
-    stops per-layer on the codec stop token, not via a fixed post-EOS
-    length). The orchestrator's state machine handles ``forced_padding_count
-    <= 0`` by walking ``PENDING -> VISIBLE_EOS -> DOWNSTREAM_READY`` in
-    one step.
+    Frame ``i`` goes on bridge ``i``. Overflow frames (beyond ``len(bridges)``)
+    are flattened onto the last bridge so Talker can still recover them.
     """
+    if not bridges:
+        return ()
+    packed: list[BridgePayload] = []
+    n = len(bridges)
+    for i, bridge in enumerate(bridges):
+        if i < len(audio_frames) and i < n - 1:
+            codes = tuple(int(c) for c in audio_frames[i])
+        elif i == n - 1:
+            # Last bridge gets its own frame plus any overflow frames.
+            rest = audio_frames[i:] if i < len(audio_frames) else []
+            codes = tuple(int(c) for frame in rest for c in frame)
+        else:
+            codes = ()
+        packed.append(
+            BridgePayload(
+                tokens=bridge.tokens,
+                hidden_states=bridge.hidden_states,
+                audio_codes=codes,
+            )
+        )
+    return tuple(packed)
+
+
+def frames_from_bridges(
+    bridges: tuple[BridgePayload, ...],
+    codebooks: int = MIMI_CODEBOOKS,
+) -> list[list[int]]:
+    """Recover per-frame codebook lists from typed bridge ``audio_codes``."""
+    frames: list[list[int]] = []
+    for bridge in bridges:
+        codes = list(bridge.audio_codes)
+        if not codes:
+            continue
+        if len(codes) % codebooks != 0:
+            # Truncate a ragged tail rather than invent pads mid-frame.
+            codes = codes[: len(codes) - (len(codes) % codebooks)]
+        for offset in range(0, len(codes), codebooks):
+            frames.append(codes[offset : offset + codebooks])
+    return frames
+
+
+def apply_talker_watchdog(
+    frames: list[list[int]],
+    thinker_bridge_count: int,
+    max_steps_after_last: int = TALKER_MAX_STEPS_AFTER_LAST_THINKER_TOKEN,
+) -> list[list[int]]:
+    """Keep bridge-conditioned frames; cap post-bridge tail (PR #3796 watchdog).
+
+    Negative ``max_steps_after_last`` disables the limit.
+    """
+    if max_steps_after_last < 0:
+        return frames
+    limit = thinker_bridge_count + max_steps_after_last
+    if len(frames) <= limit:
+        return frames
+    return frames[:limit]
+
+
+class MinimindThinker(Stage[str, ThinkerRun]):
+    """MiniMind-O Thinker with nano post-EOS bridge stream (default 128 pads)."""
 
     name = "thinker"
-    forced_padding_count = 0
+    forced_padding_count = THINKER_FORCED_PADDING_DEFAULT
 
     def __init__(self, handle: _LazyHandle) -> None:
         self._handle = handle
 
     def execute(self, payload: str) -> ThinkerRun:
         loaded = self._handle()
-        # Reset the shared per-request audio cache before generation so a
-        # partial failure on a prior request cannot leak into this one.
-        loaded.last_audio_frames = []
-        try:
-            text_tokens, audio_frames = _run_generation(loaded, payload)
-        except Exception:
-            loaded.last_audio_frames = []
-            raise
-        loaded.last_audio_frames = audio_frames
+        text_tokens, audio_frames = _run_generation(loaded, payload)
         text = loaded.tokenizer.decode(text_tokens, skip_special_tokens=True)
-        # Ponytail: hidden-state values are a thin typed stand-in for the
-        # real bridge hidden state. The connector contract cares about
-        # the BridgePayload shape; downstream consumers only need the
-        # text token ids for the Talker (real Talker reads audio_frames
-        # from the shared handle, not from this tensor).
-        bridge = BridgePayload(
+        eos = loaded.tokenizer.eos_token_id
+        visible = BridgePayload(
             tokens=TokenPayload(token_ids=tuple(text_tokens), text=text),
             hidden_states=TensorPayload(
                 values=tuple(float(t) for t in text_tokens[:1]) or (0.0,),
                 shape=(max(len(text_tokens), 1), 1),
             ),
         )
+        forced: list[BridgePayload] = []
+        for step in range(self.forced_padding_count):
+            forced.append(
+                BridgePayload(
+                    tokens=TokenPayload(
+                        token_ids=(eos,),
+                        text="",
+                        metadata={"forced": "true", "step": str(step)},
+                    ),
+                    hidden_states=TensorPayload(
+                        values=(float(eos + step + 1),),
+                        shape=(1, 1),
+                    ),
+                )
+            )
+        bridges = _pack_audio_onto_bridges([visible, *forced], audio_frames)
         return ThinkerRun(
-            bridges=(bridge,),
-            visible_tokens=bridge.tokens,
-            eos_token_id=loaded.tokenizer.eos_token_id,
-            forced_padding_count=0,
+            bridges=bridges,
+            visible_tokens=visible.tokens,
+            eos_token_id=eos,
+            forced_padding_count=self.forced_padding_count,
         )
 
 
 class MinimindTalker(Stage[ThinkerRun, CodecTokenPayload]):
-    """MiniMind-O Talker.
-
-    Reads the per-frame audio codes the Thinker stashed on the shared
-    handle and converts them into a ``CodecTokenPayload`` with the same
-    delayed MTP active mask:
-
-    * ``active_mask[t][k] = k <= t`` (delayed activation per codebook)
-    * inactive positions are filled with ``AUDIO_PADDING_TOKEN_ID``
-    * codes >= ``MIMI_AUDIO_PAD_TOKEN`` (2049) are mapped to padding
-    """
+    """MiniMind-O Talker: bridges only + MTP mask + post-bridge watchdog."""
 
     name = "talker"
     codebooks = MIMI_CODEBOOKS
+    max_steps_after_last_thinker_token = TALKER_MAX_STEPS_AFTER_LAST_THINKER_TOKEN
 
-    def __init__(self, handle: _LazyHandle) -> None:
+    def __init__(self, handle: _LazyHandle | None = None) -> None:
+        # handle kept for bundle API symmetry; Talker no longer reads it.
         self._handle = handle
 
     def execute(self, payload: ThinkerRun) -> CodecTokenPayload:
-        loaded = self._handle()
-        frames = loaded.last_audio_frames
+        frames = apply_talker_watchdog(
+            frames_from_bridges(payload.bridges, self.codebooks),
+            thinker_bridge_count=len(payload.bridges),
+            max_steps_after_last=self.max_steps_after_last_thinker_token,
+        )
         active_mask = tuple(
             tuple(k <= t for k in range(self.codebooks)) for t in range(len(frames))
         )
         token_ids: list[int] = []
         for frame_idx, frame in enumerate(frames):
-            for codebook_idx, code in enumerate(frame):
+            for codebook_idx in range(self.codebooks):
+                code = frame[codebook_idx] if codebook_idx < len(frame) else MIMI_AUDIO_PAD_TOKEN
                 if not active_mask[frame_idx][codebook_idx] or code >= MIMI_AUDIO_PAD_TOKEN:
                     token_ids.append(AUDIO_PADDING_TOKEN_ID)
                 else:
@@ -285,13 +300,7 @@ class MinimindTalker(Stage[ThinkerRun, CodecTokenPayload]):
 
 
 class MinimindCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
-    """Mimi decode stage.
-
-    Runs ``MimiModel.decode`` on the Talker's codec tokens and returns a
-    24 kHz mono waveform typed as ``AudioPayload``. Inactive / padding
-    positions are already ``AUDIO_PADDING_TOKEN_ID`` (0); MimiModel
-    treats 0 as the legitimate "no code" symbol.
-    """
+    """Mimi decode stage → 24 kHz mono ``AudioPayload``."""
 
     name = "code2wav"
 
@@ -305,7 +314,6 @@ class MinimindCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
         if not flat:
             samples: tuple[float, ...] = ()
         else:
-            # Re-shape (frames * codebooks,) -> [batch=1, codebooks, frames].
             codes = (
                 torch.tensor(flat, dtype=torch.long, device=loaded.device)
                 .reshape(-1, payload.codebooks)
@@ -323,8 +331,6 @@ class MinimindCode2Wav(Stage[CodecTokenPayload, AudioPayload]):
 
 @dataclass
 class MinimindBundle:
-    """Bundle of three MiniMind-O stages sharing one loaded model."""
-
     thinker: MinimindThinker
     talker: MinimindTalker
     code2wav: MinimindCode2Wav
@@ -336,15 +342,6 @@ def load_minimind_omni_bundle(
     device: str | None = None,
     mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
 ) -> MinimindBundle:
-    """Return the three MiniMind-O stages sharing one lazy bundle.
-
-    Weights download + load on the first ``execute`` (lazy loading), not
-    on bundle construction, so a pipeline can be assembled in
-    environments without HF access. Pass an explicit ``device`` to pin
-    CPU / CUDA at construction time; otherwise it follows ``torch.cuda.
-    is_available()``. Local directories are accepted for ``model_id`` /
-    ``mimi_model_id`` (offline / air-gapped runs).
-    """
     handle = _LazyHandle(model_id=model_id, device=device, mimi_model_id=mimi_model_id)
     return MinimindBundle(
         thinker=MinimindThinker(handle),

@@ -18,6 +18,7 @@ import pytest
 from nanovllm_omni.models import load_minimind_omni_bundle
 from nanovllm_omni.payloads import (
     AUDIO_PADDING_TOKEN_ID,
+    THINKER_FORCED_PADDING_DEFAULT,
     AudioPayload,
     CodecTokenPayload,
     ThinkerRun,
@@ -57,14 +58,16 @@ def test_real_minimind_pipeline_runs_one_request() -> None:
 
 
 def test_real_minimind_thinker_emits_thinker_run() -> None:
-    """AC #2 + #3: Thinker stage emits a typed ThinkerRun with one bridge."""
+    """Issue #11: Thinker emits visible + 128 forced bridges on the real path."""
     _, trace = _pipeline(_bundle()).run("Hello.")
 
     thinker_output = trace[0][1]
     assert isinstance(thinker_output, ThinkerRun)
-    assert thinker_output.forced_padding_count == 0
-    assert len(thinker_output.bridges) == 1
+    assert thinker_output.forced_padding_count == THINKER_FORCED_PADDING_DEFAULT
+    assert len(thinker_output.bridges) == THINKER_FORCED_PADDING_DEFAULT + 1
     assert thinker_output.bridges[0].tokens.text  # non-empty visible text
+    for forced in thinker_output.bridges[1:]:
+        assert forced.tokens.metadata.get("forced") == "true"
 
 
 def test_real_minimind_talker_emits_mtp_mask() -> None:

@@ -10,6 +10,10 @@ from wave import open as wave_open
 # bridge states to produce a full audio frame. Reference: vLLM-Omni PR #3796.
 THINKER_FORCED_PADDING_DEFAULT = 128
 
+# Talker decode steps allowed after the last Thinker bridge (PR #3796).
+# Counts only the post-bridge tail; negative disables the watchdog.
+TALKER_MAX_STEPS_AFTER_LAST_THINKER_TOKEN = 192
+
 # Audio padding token emitted by the Talker MTP codebook mask. Inactive
 # codebook positions are filled with this id before the next decode step.
 AUDIO_PADDING_TOKEN_ID = 0
@@ -35,10 +39,16 @@ class TensorPayload:
 
 @dataclass(frozen=True)
 class BridgePayload:
-    """One per-step Thinker output: tokens and hidden states consumed by the Talker."""
+    """One per-step Thinker output: tokens and hidden states consumed by the Talker.
+
+    ``audio_codes`` optionally carries Mimi codebook ids for this bridge step
+    (flat ``codebooks``-sized chunks). Nano middle-form: typed connector only —
+    no shared-handle stash between Thinker and Talker.
+    """
 
     tokens: TokenPayload
     hidden_states: TensorPayload
+    audio_codes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

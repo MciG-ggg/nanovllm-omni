@@ -2,22 +2,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: mock_audio.py (issue #2 demo)",
+      "name": "Python: audio.py (MiniMind-O)",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/mock_audio.py",
-      "console": "integratedTerminal",
-      "justMyCode": true
-    },
-    {
-      "name": "Python: pytest test_mock_minimind_pipeline.py",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "pytest",
-      "args": [
-        "tests/test_mock_minimind_pipeline.py",
-        "-v"
-      ],
+      "program": "${workspaceFolder}/examples/audio.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true
     },
@@ -26,6 +15,7 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
+      "python": "${workspaceFolder}/.venv/bin/python",
       "args": [
         "${file}",
         "-x",

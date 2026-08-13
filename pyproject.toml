@@ -33,6 +33,15 @@ dev = [
     "ruff>=0.4",
     "black>=24.0",
 ]
+# Real-weight MiniMind-O path: required for examples/audio.py and the
+# `pytest -m smoke` suite. ~1 GB checkpoint is downloaded from the HF
+# Hub on first execute, not at install time.
+minimind = [
+    "torch>=2.0",
+    "transformers>=4.50",
+    "huggingface_hub>=0.20",
+    "soundfile>=0.12",
+]
 
 [project.urls]
 Homepage = "https://github.com/MciG-ggg/nanovllm-omni"

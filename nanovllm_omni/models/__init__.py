@@ -10,5 +10,14 @@ loaders (for MiniMind-Omni, which is small enough to bring up ourselves).
     vla.py       -- InternVLA-A1                            (Phase 4)
     audio.py     -- MiniMind-Omni (thinker/talker/code2wav) (Phase 5)
 """
+from nanovllm_omni.models.minimind_omni import (
+    DEFAULT_MINIMIND_MODEL_ID,
+    RealMiniMindBundle,
+    load_minimind_omni_bundle,
+)
 
-__all__ = []
+__all__ = [
+    "DEFAULT_MINIMIND_MODEL_ID",
+    "RealMiniMindBundle",
+    "load_minimind_omni_bundle",
+]

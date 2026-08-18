@@ -1,22 +1,10 @@
-"""OpenAI-shaped HTTP adapter for the MiniMind-Omni 3-stage pipeline.
+"""OpenAI-shaped HTTP adapter for the MiniMind-Omni audio pipeline.
 
-Maps ``POST /v1/chat/completions`` to ``Orchestrator.submit(pipeline, text)``
-and returns the decoded ``AudioPayload`` as base64 WAV embedded in a
-``ChatCompletion``-shaped JSON response. Stdlib only -- no fastapi,
-no uvicorn, no pydantic.
-
-What this is NOT, by design (see ``docs/design_mapping.md``):
-
-  * A complete OpenAI-compatible server. vllm-omni's
-    ``vllm_omni/entrypoints/openai/`` directory is ~20k LOC across 40
-    files; this file is the design-mapping complement.
-  * Multimodal input (image_url / input_audio / video_url / file).
-  * Streaming (stream=true is silently treated as false), tool calling,
-    response_format, logprobs, chat template rendering, token counting,
-    usage, cancellation, metrics, middleware.
-
-Add each of the above only when a deployment actually needs it.
+Maps ``POST /v1/chat/completions`` to the aligned ``Omni`` API and returns
+audio as base64 WAV embedded in a ``ChatCompletion``-shaped JSON response.
+Stdlib only -- no fastapi, no uvicorn, no pydantic.
 """
+
 
 from __future__ import annotations
 

@@ -1,24 +1,13 @@
-"""MiniMind-Omni aligned model package."""
-
-from dataclasses import dataclass
+"""MiniMind-Omni aligned model package exports."""
 
 from .pipeline import MINIMIND_OMNI_PIPELINE, PIPELINE
-from .stages import create_bundle, create_stages
-
-DEFAULT_MINIMIND_MODEL_ID = "jingyaogong/minimind-3o"
-
-
-@dataclass
-class MinimindBundle:
-    thinker: object
-    talker: object
-    code2wav: object
-
-
-def load_minimind_omni_bundle(model_id=DEFAULT_MINIMIND_MODEL_ID, device=None, **kwargs):
-    """Return a bundle placeholder; runtime integrations may provide stages."""
-    return MinimindBundle(thinker=None, talker=None, code2wav=None)
-
+from .stages import (
+    DEFAULT_MINIMIND_MODEL_ID,
+    MinimindBundle,
+    create_bundle,
+    create_stages,
+    load_minimind_omni_bundle,
+)
 
 __all__ = [
     "DEFAULT_MINIMIND_MODEL_ID",

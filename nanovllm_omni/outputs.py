@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from typing import Any
-from .payloads import AudioPayload
 
 @dataclass(frozen=True)
 class OmniRequestOutput:

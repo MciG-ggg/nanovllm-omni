@@ -31,8 +31,8 @@ from typing import Any
 from uuid import uuid4
 
 from nanovllm_omni import Omni, SamplingParams
-from nanovllm_omni.config import load_deploy_config
-from nanovllm_omni.payloads import AudioPayload
+from nanovllm_omni.config_registry import load_deploy_config
+from nanovllm_omni.outputs import OmniRequestOutput
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
 

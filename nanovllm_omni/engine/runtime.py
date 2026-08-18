@@ -1,10 +1,8 @@
-"""Small local runtime wrapping the legacy ordered pipeline."""
-from nanovllm_omni.runtime.pipeline import Pipeline
-from nanovllm_omni.runtime.orchestrator import Orchestrator
-
+"""Minimal engine wrapper for aligned public API."""
 class OmniEngine:
-    def __init__(self, pipeline):
+    def __init__(self, pipeline=None):
         self.pipeline = pipeline
-        self.orchestrator = Orchestrator()
     def generate_one(self, prompt):
-        return self.orchestrator.submit(self.pipeline, prompt)
+        if self.pipeline is None:
+            return None
+        return self.pipeline(prompt) if callable(self.pipeline) else None

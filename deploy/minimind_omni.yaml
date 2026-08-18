@@ -1,0 +1,11 @@
+stages:
+  - name: thinker
+    default_sampling_params:
+      temperature: 0.7
+      max_tokens: 512
+  - name: talker
+    default_sampling_params:
+      temperature: 0.2
+      watchdog_limit: 192
+  - name: code2wav
+    default_sampling_params: {}

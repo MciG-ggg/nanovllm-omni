@@ -30,12 +30,12 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from nanovllm_omni.config import load_config
-from nanovllm_omni.models import load_minimind_omni_bundle
+from nanovllm_omni import Omni, SamplingParams
+from nanovllm_omni.config import load_deploy_config
 from nanovllm_omni.payloads import AudioPayload
-from nanovllm_omni.runtime import Orchestrator, build_pipeline
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "minimind_omni.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
+
 
 
 def _extract_text(messages: list[dict[str, Any]]) -> str:
@@ -54,8 +54,8 @@ def _extract_text(messages: list[dict[str, Any]]) -> str:
     raise ValueError("no user text message found")
 
 
-def _chat_completion(audio: AudioPayload, model: str) -> dict[str, Any]:
-    """Shape one AudioPayload into a non-streaming ChatCompletion response."""
+def _chat_completion(audio: AudioPayload, model: str, prompt_tokens: int) -> dict[str, Any]:
+    """Shape one aligned Omni audio output into an OpenAI response."""
     return {
         "id": f"chatcmpl-{uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -69,24 +69,30 @@ def _chat_completion(audio: AudioPayload, model: str) -> dict[str, Any]:
                 "audio": {
                     "data": base64.b64encode(audio.wav_bytes()).decode("ascii"),
                     "format": "wav",
-                    "sample_rate": audio.sample_rate,
+                    "sample_rate": 24000,
                 },
             },
             "finish_reason": "stop",
         }],
+        "usage": {
+            "prompt_tokens": int(prompt_tokens),
+            "completion_tokens": 0,
+            "total_tokens": int(prompt_tokens),
+        },
     }
 
 
-def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str):
-    cfg, deploy = load_config(config_path)
-    bundle = load_minimind_omni_bundle(
-        model_id=model_id, mimi_model_id=mimi_id, device=device or deploy.device,
-    )
-    return build_pipeline(cfg, bundle=bundle), Orchestrator()
+def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str | None):
+    """Load deployment options and construct the aligned Omni engine."""
+    deploy = load_deploy_config(config_path)
+    defaults = next((stage.default_sampling_params for stage in deploy.stages if stage.name == "thinker"), {})
+    allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed", "n"}
+    sampling = SamplingParams(**{key: value for key, value in defaults.items() if key in allowed})
+    return Omni(model_id, device=device, extra={"deploy_config": deploy}), sampling
 
 
 def serve(state, host: str, port: int) -> None:
-    pipeline, orchestrator = state
+    engine, sampling = state
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:  # silence stderr access log
@@ -106,14 +112,18 @@ def serve(state, host: str, port: int) -> None:
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length) or b"{}")
-                text = _extract_text(body.get("messages", []))
-                model = body.get("model", "minimind-omni")
-                result = orchestrator.submit(pipeline, text)
-                self._json(200, _chat_completion(result.audio, model))
-            except ValueError as exc:
-                # ponytail: only ValueError -> 400; everything else -> 500.
-                # Split once a second exception type starts surfacing.
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise ValueError("request body must be a JSON object")
+                messages = body.get("messages")
+                if not isinstance(messages, list) or not messages:
+                    raise ValueError("messages must be a non-empty array")
+                text = _extract_text(messages)
+                model = body.get("model", engine.model)
+                output = engine.generate([text], sampling_params=sampling)[0]
+                audio = output.multimodal_output["audio"]
+                self._json(200, _chat_completion(audio, model, len(text.split())))
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except Exception as exc:
                 self._json(500, {"error": {"message": str(exc), "type": "server_error"}})

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+
 @dataclass(frozen=True)
 class SamplingParams:
     temperature: float = 1.0
@@ -11,6 +12,7 @@ class SamplingParams:
     seed: int | None = None
     n: int = 1
     extra: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class OmniEngineArgs:
@@ -27,7 +29,16 @@ class OmniEngineArgs:
 
     def __init__(self, model: str | None = None, **kwargs: Any):
         self.model = model
-        fields = {"enforce_eager","gpu_memory_utilization","max_num_seqs","max_num_batched_tokens","dtype","tensor_parallel_size","trust_remote_code","device"}
+        fields = {
+            "enforce_eager",
+            "gpu_memory_utilization",
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "dtype",
+            "tensor_parallel_size",
+            "trust_remote_code",
+            "device",
+        }
         for name in fields:
             setattr(self, name, kwargs.pop(name, getattr(type(self), name, None)))
         self.extra = dict(kwargs.pop("extra", {}) or {})

@@ -5,7 +5,6 @@ audio as base64 WAV embedded in a ``ChatCompletion``-shaped JSON response.
 Stdlib only -- no fastapi, no uvicorn, no pydantic.
 """
 
-
 from __future__ import annotations
 
 import argparse
@@ -20,10 +19,9 @@ from uuid import uuid4
 
 from nanovllm_omni import Omni, SamplingParams
 from nanovllm_omni.config_registry import load_deploy_config
-from nanovllm_omni.outputs import OmniRequestOutput
+from nanovllm_omni.outputs import AudioPayload
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
-
 
 
 def _extract_text(messages: list[dict[str, Any]]) -> str:
@@ -36,7 +34,8 @@ def _extract_text(messages: list[dict[str, Any]]) -> str:
             return content
         if isinstance(content, list):
             return "".join(
-                p.get("text", "") for p in content
+                p.get("text", "")
+                for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
             )
     raise ValueError("no user text message found")
@@ -49,19 +48,21 @@ def _chat_completion(audio: AudioPayload, model: str, prompt_tokens: int) -> dic
         "object": "chat.completion",
         "created": int(time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": None,
-                "audio": {
-                    "data": base64.b64encode(audio.wav_bytes()).decode("ascii"),
-                    "format": "wav",
-                    "sample_rate": 24000,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "audio": {
+                        "data": base64.b64encode(audio.wav_bytes()).decode("ascii"),
+                        "format": "wav",
+                        "sample_rate": 24000,
+                    },
                 },
-            },
-            "finish_reason": "stop",
-        }],
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": int(prompt_tokens),
             "completion_tokens": 0,
@@ -73,7 +74,9 @@ def _chat_completion(audio: AudioPayload, model: str, prompt_tokens: int) -> dic
 def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str | None):
     """Load deployment options and construct the aligned Omni engine."""
     deploy = load_deploy_config(config_path)
-    defaults = next((stage.default_sampling_params for stage in deploy.stages if stage.name == "thinker"), {})
+    defaults = next(
+        (stage.default_sampling_params for stage in deploy.stages if stage.name == "thinker"), {}
+    )
     allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed", "n"}
     sampling = SamplingParams(**{key: value for key, value in defaults.items() if key in allowed})
     return Omni(model_id, device=device, extra={"deploy_config": deploy}), sampling
@@ -96,7 +99,15 @@ def serve(state, host: str, port: int) -> None:
 
         def do_POST(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler contract
             if self.path != "/v1/chat/completions":
-                self._json(404, {"error": {"message": f"unknown path {self.path}", "type": "invalid_request_error"}})
+                self._json(
+                    404,
+                    {
+                        "error": {
+                            "message": f"unknown path {self.path}",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))

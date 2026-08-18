@@ -35,7 +35,10 @@ def test_pipeline_registry_resolves_minimind():
 
 def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     path = tmp_path / "deploy.yaml"
-    path.write_text("stages:\n  - name: thinker\n    default_sampling_params:\n      temperature: 0.7\n", encoding="utf-8")
+    path.write_text(
+        "stages:\n  - name: thinker\n    default_sampling_params:\n      temperature: 0.7\n",
+        encoding="utf-8",
+    )
     deploy = load_deploy_config(path)
     assert isinstance(deploy, DeployConfig)
     merged = merge_pipeline_deploy(resolve_pipeline_config("minimind_o"), deploy)

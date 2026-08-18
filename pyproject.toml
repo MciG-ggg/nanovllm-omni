@@ -70,9 +70,11 @@ default-groups = ["minimind"]
 [tool.setuptools]
 packages = [
     "nanovllm_omni",
-    "nanovllm_omni.diffusion",
+    "nanovllm_omni.config",
+    "nanovllm_omni.engine",
+    "nanovllm_omni.entrypoints",
     "nanovllm_omni.models",
-    "nanovllm_omni.runtime",
+    "nanovllm_omni.models.minimind_omni",
     "nanovllm_omni.serving",
 ]
 

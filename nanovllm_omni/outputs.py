@@ -1,5 +1,22 @@
 from dataclasses import dataclass
 from typing import Any
+import io
+import wave
+
+@dataclass(frozen=True)
+class AudioPayload:
+    data: bytes
+    sample_rate: int = 24000
+    def wav_bytes(self) -> bytes:
+        if self.data[:4] == b"RIFF":
+            return self.data
+        out = io.BytesIO()
+        with wave.open(out, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(self.sample_rate)
+            wav.writeframes(self.data)
+        return out.getvalue()
 
 @dataclass(frozen=True)
 class OmniRequestOutput:
@@ -9,9 +26,9 @@ class OmniRequestOutput:
     error: str | None = None
 
     @classmethod
-    def from_pipeline(cls, output: Any, request_id: str = ""):
+    def from_pipeline(cls, output: Any, request_id: str = "", final_output_type: str = "audio"):
         audio = output.audio if hasattr(output, "audio") else output
-        return cls(request_id=request_id, outputs=output, multimodal_output={"audio": audio})
+        return cls(request_id=request_id, outputs=output, multimodal_output={final_output_type: audio})
     @classmethod
     def from_diffusion(cls, output: Any, request_id: str = ""):
         return cls(request_id=request_id, outputs=output, multimodal_output={"image": output})

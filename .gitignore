@@ -97,3 +97,6 @@ docs/specs/
 Thumbs.db
 
 .pi/
+
+# Local planning scratch
+.scratch/

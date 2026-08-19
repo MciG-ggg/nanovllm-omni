@@ -33,14 +33,18 @@ dev = [
     "ruff>=0.4",
     "black>=24.0",
 ]
-# Real-weight MiniMind-O path: required for examples/audio.py and the
+# Real-weight MiniMind-O path: required for examples/minimind_omni.py and the
 # `pytest -m smoke` suite. ~1 GB checkpoint is downloaded from the HF
-# Hub on first execute, not at install time.
+# Hub on first execute, not at install time. funasr/librosa/onnxruntime are
+# peer deps of the MiniMind trust_remote_code modeling files.
 minimind = [
     "torch>=2.0",
     "transformers>=4.50",
     "huggingface_hub>=0.20",
     "soundfile>=0.12",
+    "librosa>=0.10",
+    "onnxruntime>=1.16",
+    "funasr>=1.0",
 ]
 
 # PEP 735 dependency groups. The `minimind` group mirrors the
@@ -53,6 +57,9 @@ minimind = [
     "transformers>=4.50",
     "huggingface_hub>=0.20",
     "soundfile>=0.12",
+    "librosa>=0.10",
+    "onnxruntime>=1.16",
+    "funasr>=1.0",
 ]
 
 [project.urls]

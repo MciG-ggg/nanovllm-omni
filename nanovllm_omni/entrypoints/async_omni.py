@@ -1,7 +1,7 @@
-from .base import OmniBase
+from .omni import Omni
 
 
-class AsyncOmni(OmniBase):
+class AsyncOmni(Omni):
     async def generate(self, prompts, sampling_params=None, use_tqdm=True):
         if isinstance(prompts, str):
             prompts = [prompts]

@@ -79,7 +79,10 @@ def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str | N
     )
     allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed", "n"}
     sampling = SamplingParams(**{key: value for key, value in defaults.items() if key in allowed})
-    return Omni(model_id, device=device, extra={"deploy_config": deploy}), sampling
+    return (
+        Omni(model_id, device=device, mimi_model_id=mimi_id, extra={"deploy_config": deploy}),
+        sampling,
+    )
 
 
 def serve(state, host: str, port: int) -> None:

@@ -1,7 +1,112 @@
 import io
 import wave
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, TypeVar
+
+_T = TypeVar("_T")
+
+
+def _is_tensor(value: Any) -> bool:
+    """Detect torch tensors without making torch a base-package dependency."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    return isinstance(value, torch.Tensor)
+
+
+@dataclass(eq=False)
+class MultimodalPayload(Mapping[str, Any]):
+    """Mapping-compatible container for tensor outputs and metadata.
+
+    Tensor values are kept separate from metadata, while lookup remains
+    dictionary-compatible for existing vLLM-Omni consumers.
+    """
+
+    tensors: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def primary_tensor(self) -> Any | None:
+        return next(iter(self.tensors.values()), None)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.tensors and not self.metadata
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self.tensors:
+            return self.tensors[key]
+        if key in self.metadata:
+            return self.metadata[key]
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self.tensors
+        yield from self.metadata
+
+    def __len__(self) -> int:
+        return len(self.tensors) + len(self.metadata)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.tensors or key in self.metadata
+
+    def __bool__(self) -> bool:
+        return not self.is_empty
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, MultimodalPayload):
+            return self.tensors == other.tensors and self.metadata == other.metadata
+        if isinstance(other, Mapping):
+            return self.to_dict() == dict(other)
+        return NotImplemented
+
+    def to_dict(self) -> dict[str, Any]:
+        result = dict(self.tensors)
+        result.update(self.metadata)
+        return result
+
+    def merged_with(self, incoming: "MultimodalPayload") -> "MultimodalPayload":
+        """Return a payload with incoming values appended/replaced by category."""
+        if self.is_empty:
+            return incoming
+        for target, values in (
+            (self.tensors, incoming.tensors),
+            (self.metadata, incoming.metadata),
+        ):
+            for key, value in values.items():
+                if key not in target:
+                    target[key] = value
+                elif isinstance(target[key], list):
+                    target[key].append(value)
+                else:
+                    target[key] = [target[key], value]
+        return self
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "MultimodalPayload | None":
+        if not data:
+            return None
+        tensors = {key: value for key, value in data.items() if _is_tensor(value)}
+        metadata = {key: value for key, value in data.items() if not _is_tensor(value)}
+        return cls(tensors=tensors, metadata=metadata)
+
+    @classmethod
+    def from_raw(cls, payload: Any, modality_key: str) -> "MultimodalPayload | None":
+        if isinstance(payload, cls):
+            return payload
+        if isinstance(payload, Mapping):
+            remapped = {
+                (
+                    modality_key
+                    if key in {"model_outputs", "hidden"} and modality_key != "hidden"
+                    else key
+                ): value
+                for key, value in payload.items()
+            }
+            return cls.from_dict(remapped)
+        return cls.from_dict({modality_key: payload})
 
 
 @dataclass(frozen=True)
@@ -25,19 +130,22 @@ class AudioPayload:
 class OmniRequestOutput:
     request_id: str = ""
     outputs: Any = None
-    multimodal_output: dict[str, Any] | None = None
+    multimodal_output: MultimodalPayload | None = None
     error: str | None = None
 
     @classmethod
     def from_pipeline(cls, output: Any, request_id: str = "", final_output_type: str = "audio"):
-        audio = output.audio if hasattr(output, "audio") else output
-        return cls(
-            request_id=request_id, outputs=output, multimodal_output={final_output_type: audio}
-        )
+        value = output.audio if hasattr(output, "audio") else output
+        payload = MultimodalPayload.from_dict({final_output_type: value})
+        return cls(request_id=request_id, outputs=output, multimodal_output=payload)
 
     @classmethod
     def from_diffusion(cls, output: Any, request_id: str = ""):
-        return cls(request_id=request_id, outputs=output, multimodal_output={"image": output})
+        return cls(
+            request_id=request_id,
+            outputs=output,
+            multimodal_output=MultimodalPayload.from_dict({"image": output}),
+        )
 
     @classmethod
     def from_error(cls, error: str, request_id: str = ""):

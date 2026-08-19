@@ -29,6 +29,11 @@ class OmniBase:
     def _resolve_pipeline(self) -> PipelineConfig:
         if self._pipeline is None:
             pipeline = resolve_pipeline_config(self.model)
+            # Local MiniMind-O snapshots do not have a registry string alias;
+            # treat an existing model directory as the built-in MiniMind-O
+            # family while preserving normal registry lookup for HF handles.
+            if pipeline is None and Path(self.model).is_dir():
+                pipeline = resolve_pipeline_config("minimind_o")
             if pipeline is None:
                 raise ValueError(
                     f"No pipeline registered for model {self.model!r}. "

@@ -60,6 +60,8 @@ minimind = [
     "librosa>=0.10",
     "onnxruntime>=1.16",
     "funasr>=1.0",
+    # int8 stretch for TK-015 -- optional; install explicitly if you want it.
+    "bitsandbytes>=0.43",
 ]
 
 [project.urls]

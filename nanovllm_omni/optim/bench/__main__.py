@@ -8,6 +8,9 @@ Subcommands:
   per-stage kernel breakdown (top kernels, kernel count, n_steps).
 * ``trace-nsys``      -- re-invoke ``_nsys-inner`` under ``nsys profile``.
 * ``_nsys-inner``     -- private inner command used by ``trace-nsys``.
+
+TK-015 adds ``--compile`` (torch.compile wrapper) and ``--int8``
+(bitsandbytes int8 quantisation of MLP linears) flags.
 """
 
 from __future__ import annotations
@@ -27,6 +30,22 @@ from .trace import (
     trace_profile_top_kernels,
 )
 
+INT8_SKIP_MSG = (
+    "int8 stretch skipped -- install bitsandbytes to enable " "(`uv pip install bitsandbytes`)"
+)
+
+
+def _maybe_apply_int8(bundle: object, enable: bool) -> None:
+    """Quantise ``bundle.model`` MLP linears to int8 (bnb); skip cleanly when missing."""
+    if not enable:
+        return
+    from nanovllm_omni.optim.compile import has_bnb, quantize_thinker_int8
+
+    if not has_bnb():
+        print(INT8_SKIP_MSG, file=sys.stderr)
+        return
+    quantize_thinker_int8(bundle.model)
+
 
 def _load_bundle(args: argparse.Namespace):
     from nanovllm_omni.models.minimind_omni import create_bundle
@@ -34,7 +53,12 @@ def _load_bundle(args: argparse.Namespace):
     kwargs: dict[str, str] = {}
     if args.mimi:
         kwargs["mimi_model_id"] = args.mimi
-    return create_bundle(model_id=args.model, device=args.device, **kwargs)
+    bundle = create_bundle(model_id=args.model, device=args.device, **kwargs)
+    # int8 must come BEFORE compile: torch.compile would otherwise trace
+    # through the un-quantised linears and produce graphs that don't match
+    # the swapped-in bnb.Linear8bitLt modules.
+    _maybe_apply_int8(bundle, enable=getattr(args, "int8", False))
+    return bundle
 
 
 def _resolve_prompts(arg: str | None) -> list[BenchPrompt]:
@@ -56,6 +80,7 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
         "seed": args.seed,
+        "compile": getattr(args, "compile", False),
     }
 
 
@@ -186,6 +211,10 @@ def cmd_trace_nsys(args: argparse.Namespace) -> int:
     if args.max_tokens is not None:
         target.extend(["--max-tokens", str(args.max_tokens)])
     target.extend(["--seed", str(args.seed)])
+    if getattr(args, "compile", False):
+        target.append("--compile")
+    if getattr(args, "int8", False):
+        target.append("--int8")
 
     cmd = [
         nsys,
@@ -228,6 +257,16 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--seed", type=int, default=42)
     common.add_argument(
         "--open-thinking", action="store_true", help="Pass open_thinking=True to model.generate"
+    )
+    common.add_argument(
+        "--compile",
+        action="store_true",
+        help="Wrap the thinker with torch.compile(mode='reduce-overhead' on CUDA).",
+    )
+    common.add_argument(
+        "--int8",
+        action="store_true",
+        help="Quantise MLP linears to bitsandbytes int8 (skipped silently if bnb absent).",
     )
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")

@@ -1,56 +1,116 @@
-"""CSV writer + markdown table renderer for RunResult rows."""
+"""CSV writer + markdown table renderer for RunResult rows (TK-011)."""
 
 from __future__ import annotations
 
 import csv
+import statistics
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+
+from .runner import RunResult
 
 CSV_COLUMNS: tuple[str, ...] = (
-    "prompt",
+    "prompt_id",
+    "seed",
+    "run_idx",
     "tokenize_ms",
     "generate_ms",
     "decode_ms",
     "wav_ms",
     "total_ms",
-    "n_tokens",
-    "n_samples",
-    "max_mem_bytes",
-    "wav_bytes",
+    "frames",
+    "vram_mb",
 )
 
 
-def write_csv(rows: Iterable[dict[str, Any]], path: str | Path) -> Path:
-    """Write rows to ``path`` as CSV; parent dirs are created if needed."""
+def write_csv(results: Iterable[RunResult], path: str | Path) -> Path:
+    """Write RunResult rows to ``path`` as CSV; parent dirs are created if needed."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(CSV_COLUMNS))
         writer.writeheader()
-        for row in rows:
-            writer.writerow({col: row.get(col, "") for col in CSV_COLUMNS})
+        for r in results:
+            writer.writerow(
+                {
+                    "prompt_id": r.prompt_id,
+                    "seed": r.seed,
+                    "run_idx": r.run_idx,
+                    "tokenize_ms": f"{r.times.tokenize_ms:.6f}",
+                    "generate_ms": f"{r.times.generate_ms:.6f}",
+                    "decode_ms": f"{r.times.decode_ms:.6f}",
+                    "wav_ms": f"{r.times.wav_ms:.6f}",
+                    "total_ms": f"{r.times.total_ms:.6f}",
+                    "frames": r.frames,
+                    "vram_mb": f"{r.vram_peak_mb:.3f}",
+                }
+            )
     return p
 
 
-def markdown_table(
-    rows: Sequence[dict[str, Any]],
-    columns: Sequence[str] | None = None,
-) -> str:
-    """Render rows as a GitHub-flavored markdown table."""
-    cols = list(columns) if columns is not None else list(CSV_COLUMNS)
-    if not rows:
-        return "| " + " | ".join(cols) + " |\n| " + " | ".join(["---"] * len(cols)) + " |\n"
-    out: list[str] = []
-    out.append("| " + " | ".join(cols) + " |")
-    out.append("| " + " | ".join(["---"] * len(cols)) + " |")
-    for row in rows:
-        cells = [_fmt(row.get(c, "")) for c in cols]
-        out.append("| " + " | ".join(cells) + " |")
-    return "\n".join(out) + "\n"
+def _median(values: list[float]) -> float:
+    return statistics.median(values) if values else 0.0
 
 
-def _fmt(value: Any) -> str:
-    if isinstance(value, float):
-        return f"{value:.2f}"
-    return str(value)
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * pct / 100.0
+    f = int(k)
+    c = min(f + 1, len(s) - 1)
+    return s[f] + (s[c] - s[f]) * (k - f)
+
+
+def markdown_table(results: Sequence[RunResult]) -> str:
+    """Per-prompt aggregate table per spec.
+
+    Columns: ``prompt_id | tokenize_median | generate_median | decode_median
+    | wav_median | total_median | total_p95 | total_min | frames | vram_mb``.
+    """
+    by_prompt: dict[str, list[RunResult]] = {}
+    for r in results:
+        by_prompt.setdefault(r.prompt_id, []).append(r)
+
+    cols = (
+        "prompt_id",
+        "tokenize_median",
+        "generate_median",
+        "decode_median",
+        "wav_median",
+        "total_median",
+        "total_p95",
+        "total_min",
+        "frames",
+        "vram_mb",
+    )
+
+    lines = [
+        "| " + " | ".join(cols) + " |",
+        "| " + " | ".join(["---"] * len(cols)) + " |",
+    ]
+    for prompt_id in sorted(by_prompt):
+        rs = by_prompt[prompt_id]
+        tok = [r.times.tokenize_ms for r in rs]
+        gen = [r.times.generate_ms for r in rs]
+        dec = [r.times.decode_ms for r in rs]
+        wav = [r.times.wav_ms for r in rs]
+        tot = [r.times.total_ms for r in rs]
+        frames = [float(r.frames) for r in rs]
+        vram = [r.vram_peak_mb for r in rs]
+        cells = (
+            prompt_id,
+            f"{_median(tok):.2f}",
+            f"{_median(gen):.2f}",
+            f"{_median(dec):.2f}",
+            f"{_median(wav):.2f}",
+            f"{_median(tot):.2f}",
+            f"{_percentile(tot, 95):.2f}",
+            f"{min(tot):.2f}",
+            f"{int(_median(frames))}",
+            f"{_median(vram):.2f}",
+        )
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"

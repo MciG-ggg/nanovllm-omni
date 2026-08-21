@@ -114,15 +114,23 @@ def tokenize_for_generate(
     tokenizer: Any,
     prompt: str,
     open_thinking: bool,
+    *,
+    messages: list[dict[str, str]] | None = None,
 ) -> Any:
     """Apply the chat template and produce a 1xT ``input_ids`` tensor.
 
     Labeled ``tokenize`` for the benchmark harness; pure CPU, no model call.
+
+    ``messages`` is an optional pre-built chat messages list (system +
+    user, etc.). When omitted, the helper wraps ``prompt`` as a single
+    user message -- the same path that ``generate_audio`` uses for the
+    MiniMind-O single-prompt API.
     """
     import torch
 
     with torch.profiler.record_function("tokenize"):
-        messages = [{"role": "user", "content": prompt}]
+        if messages is None:
+            messages = [{"role": "user", "content": prompt}]
         try:
             text = tokenizer.apply_chat_template(
                 messages,

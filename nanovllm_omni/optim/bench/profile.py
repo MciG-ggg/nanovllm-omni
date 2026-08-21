@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -59,6 +58,5 @@ def nsys_command(
 
 def run_nsys(output: str | Path, target_args: list[str], **kwargs: Any) -> int:
     """Spawn ``nsys profile`` around ``target_args`` and wait for it."""
-    env = os.environ.copy()
     cmd = nsys_command(output, target_args=target_args, **kwargs)
-    return subprocess.call(cmd, env=env)
+    return subprocess.call(cmd)

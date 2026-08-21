@@ -1,102 +1,89 @@
-"""Stage timing + result dataclasses for the four-helper pipeline."""
+"""Stage timing + result dataclasses for the four-helper pipeline (TK-011)."""
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .prompts import BENCH_PROMPTS
+from .prompts import BenchPrompt
 
 
 @dataclass(frozen=True)
 class StageTimes:
-    """Wall-clock seconds for the four stages of one ``generate_audio`` call."""
+    """Per-stage wall-clock milliseconds for one ``run_one`` call."""
 
-    tokenize: float = 0.0
-    generate: float = 0.0
-    decode: float = 0.0
-    wav: float = 0.0
+    tokenize_ms: float = 0.0
+    generate_ms: float = 0.0
+    decode_ms: float = 0.0
+    wav_ms: float = 0.0
 
     @property
-    def total(self) -> float:
-        return self.tokenize + self.generate + self.decode + self.wav
-
-    def as_dict(self) -> dict[str, float]:
-        return {
-            "tokenize_ms": self.tokenize * 1000.0,
-            "generate_ms": self.generate * 1000.0,
-            "decode_ms": self.decode * 1000.0,
-            "wav_ms": self.wav * 1000.0,
-            "total_ms": self.total * 1000.0,
-        }
+    def total_ms(self) -> float:
+        return self.tokenize_ms + self.generate_ms + self.decode_ms + self.wav_ms
 
 
 @dataclass(frozen=True)
 class RunResult:
-    """One ``generate_audio`` run: timings, sizes, max CUDA memory, audio bytes."""
+    """One timed ``run_one`` invocation: timings, frame count, VRAM peak, audio bytes."""
 
-    prompt: str
-    stages: StageTimes
-    n_tokens: int
-    n_samples: int
-    max_mem_bytes: int
-    wav_bytes: bytes = b""
-
-    def as_csv_row(self) -> dict[str, Any]:
-        row = {"prompt": self.prompt}
-        row.update(self.stages.as_dict())
-        row["n_tokens"] = self.n_tokens
-        row["n_samples"] = self.n_samples
-        row["max_mem_bytes"] = self.max_mem_bytes
-        row["wav_bytes"] = len(self.wav_bytes)
-        return row
+    prompt_id: str
+    seed: int
+    run_idx: int
+    times: StageTimes
+    frames: int
+    vram_peak_mb: float
+    audio_bytes: bytes = b""
 
 
-# Ponytail: per-run max_memory is cheap; reset only if CUDA is reachable.
 def _maybe_reset_cuda_peak() -> None:
-    try:
-        import torch
+    import torch
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-    except ImportError:
-        pass
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
 
-def _peak_mem_bytes() -> int:
-    try:
-        import torch
+def _vram_peak_mb() -> float:
+    import torch
 
-        if torch.cuda.is_available():
-            return int(torch.cuda.max_memory_allocated())
-    except ImportError:
-        pass
-    return 0
+    if torch.cuda.is_available():
+        return torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+    return 0.0
 
 
-def _call_with_timing(
-    label: str, fn: Callable[..., Any], *args: Any, **kwargs: Any
-) -> tuple[Any, float]:
-    """Time ``fn`` with ``time.perf_counter`` and return (result, seconds)."""
-    t0 = time.perf_counter()
-    out = fn(*args, **kwargs)
-    return out, time.perf_counter() - t0
+def _normalize_prompt(prompt: BenchPrompt | str) -> BenchPrompt:
+    """Accept a BenchPrompt or a raw string; return BenchPrompt."""
+    if isinstance(prompt, BenchPrompt):
+        return prompt
+    return BenchPrompt(id="ad-hoc", text=str(prompt))
+
+
+def _ms_since(t0: float) -> float:
+    return (time.perf_counter() - t0) * 1000.0
 
 
 def run_one(
     bundle: Any,
-    prompt: str,
+    prompt: BenchPrompt | str,
     *,
-    max_tokens: int = 16,
+    seed: int = 42,
+    max_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.9,
     open_thinking: bool = False,
-    run_id: int = 0,
+    run_idx: int = 0,
+    max_tokens_tolerance: int = 4,
 ) -> RunResult:
-    """Drive one prompt through the four helpers and record timings."""
-    # Local imports keep the bench package importable on CPU-only CI.
+    """Drive one prompt through the four helpers and record per-stage times.
+
+    Seeds torch's RNG so repeated calls with the same ``seed`` produce the
+    same audio bytes (the upstream MiniMind generate loop consults torch
+    RNG via the temperature/top_p sampling). Resets and reads the CUDA peak
+    memory counter when CUDA is available.
+
+    Raises ``ValueError`` if the model yields more than ``max_tokens +
+    max_tokens_tolerance`` audio frames (i.e. ``max_tokens`` was not honored).
+    """
     import torch
 
     from nanovllm_omni.models.minimind_omni.stages import (
@@ -106,26 +93,32 @@ def run_one(
         tokenize_for_generate,
     )
 
-    eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+    p = _normalize_prompt(prompt)
+    torch.manual_seed(seed)
     _maybe_reset_cuda_peak()
 
-    t = StageTimes()
+    eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+
     samples: Any = None
-    frames: list[list[int]] = []
-
     with torch.no_grad():
-        input_ids, t_tokenize = _call_with_timing(
-            "tokenize",
-            tokenize_for_generate,
-            bundle.tokenizer,
-            prompt,
-            open_thinking,
-        )
+        t0 = time.perf_counter()
+        if p.system is not None:
+            input_ids = tokenize_for_generate(
+                bundle.tokenizer,
+                p.text,
+                open_thinking,
+                messages=[
+                    {"role": "system", "content": p.system},
+                    {"role": "user", "content": p.text},
+                ],
+            )
+        else:
+            input_ids = tokenize_for_generate(bundle.tokenizer, p.text, open_thinking)
         input_ids = input_ids.to(bundle.device)
+        t_tokenize_ms = _ms_since(t0)
 
-        frames, t_generate = _call_with_timing(
-            "generate",
-            run_generate,
+        t0 = time.perf_counter()
+        frames = run_generate(
             bundle.model,
             input_ids,
             max_new_tokens=max_tokens,
@@ -134,57 +127,53 @@ def run_one(
             eos_token_id=eos_token_id,
             open_thinking=open_thinking,
         )
+        t_generate_ms = _ms_since(t0)
 
-        if frames:
-            samples, t_decode = _call_with_timing(
-                "decode", decode_audio, bundle.mimi, frames, bundle.device
-            )
+        if not frames:
+            t_decode_ms = 0.0
         else:
-            t_decode = 0.0
+            t0 = time.perf_counter()
+            samples = decode_audio(bundle.mimi, frames, bundle.device)
+            t_decode_ms = _ms_since(t0)
+
+    if len(frames) > max_tokens + max_tokens_tolerance:
+        raise ValueError(
+            f"max_tokens={max_tokens} not honored: "
+            f"got {len(frames)} frames (tolerance {max_tokens_tolerance})"
+        )
 
     if frames and samples is not None:
-        wav_bytes, t_wav = _call_with_timing("wav", encode_wav, samples)
+        t0 = time.perf_counter()
+        wav_bytes = encode_wav(samples)
+        t_wav_ms = _ms_since(t0)
     else:
-        wav_bytes, t_wav = b"", 0.0
+        wav_bytes, t_wav_ms = b"", 0.0
 
-    t = StageTimes(
-        tokenize=t_tokenize,
-        generate=t_generate,
-        decode=t_decode,
-        wav=t_wav,
-    )
     return RunResult(
-        prompt=prompt,
-        stages=t,
-        n_tokens=sum(len(f) for f in frames),
-        n_samples=int(samples.shape[0]) if samples is not None else 0,
-        max_mem_bytes=_peak_mem_bytes(),
-        wav_bytes=wav_bytes,
+        prompt_id=p.id,
+        seed=seed,
+        run_idx=run_idx,
+        times=StageTimes(
+            tokenize_ms=t_tokenize_ms,
+            generate_ms=t_generate_ms,
+            decode_ms=t_decode_ms,
+            wav_ms=t_wav_ms,
+        ),
+        frames=len(frames),
+        vram_peak_mb=_vram_peak_mb(),
+        audio_bytes=wav_bytes,
     )
 
 
 def run_n(
     bundle: Any,
-    prompts: tuple[str, ...] | None = None,
+    prompt: BenchPrompt | str,
     *,
     n: int = 5,
     warmup: int = 1,
     **kwargs: Any,
 ) -> list[RunResult]:
-    """Run ``n`` cold iterations over ``prompts`` (default :data:`BENCH_PROMPTS`).
-
-    ``warmup`` iterations are run before timing and discarded; ``run_id`` is
-    stamped onto each result for downstream CSV de-duplication. Returns
-    ``n * len(prompts)`` results in prompt-major order.
-    """
-    prompts = prompts if prompts is not None else BENCH_PROMPTS
+    """Run ``warmup`` discarded iterations then ``n`` timed iterations of one prompt."""
     for _ in range(max(warmup, 0)):
-        for prompt in prompts:
-            run_one(bundle, prompt, **kwargs)
-    results: list[RunResult] = []
-    run_id = 0
-    for _ in range(n):
-        for prompt in prompts:
-            results.append(run_one(bundle, prompt, run_id=run_id, **kwargs))
-            run_id += 1
-    return results
+        run_one(bundle, prompt, **kwargs)
+    return [run_one(bundle, prompt, run_idx=i, **kwargs) for i in range(n)]

@@ -180,8 +180,11 @@ def run_generate(
             open_thinking=open_thinking,
         )
         for _text_ids, audio_frame in stream:
-            if audio_frame and len(audio_frame) == 8:
-                frames.append(audio_frame)
+            # ``generate.step`` shows up as a sub-event of ``generate`` in the
+            # Kineto trace so per-iteration cost is visible in chrome://tracing.
+            with torch.profiler.record_function("generate.step"):
+                if audio_frame and len(audio_frame) == 8:
+                    frames.append(audio_frame)
         return frames
 
 

@@ -154,6 +154,211 @@ def test_run_one_returns_valid_wav():
         assert fh.getnframes() > 0
 
 
+def test_stage_times_has_cuda_fields_and_overhead():
+    """StageTimes tracks per-stage GPU time and derives CPU dispatch overhead."""
+    from nanovllm_omni.optim.bench import StageTimes, run_one
+
+    r = run_one(_bundle(), _short_prompt(), max_tokens=4)
+    # On the CPU stub bundle the cuda fields are 0 (CUDA unavailable).
+    assert r.times.generate_cuda_ms >= 0
+    assert r.times.decode_cuda_ms >= 0
+    # cpu_dispatch_ms is wall minus cuda; must be non-negative.
+    assert r.times.cpu_dispatch_ms >= 0
+
+    # Direct construction: wall > cuda -> positive dispatch overhead.
+    s = StageTimes(
+        tokenize_ms=1.0,
+        generate_ms=100.0,
+        decode_ms=20.0,
+        wav_ms=0.5,
+        generate_cuda_ms=90.0,
+        decode_cuda_ms=15.0,
+    )
+    assert s.cpu_dispatch_ms == pytest.approx(15.0)
+    assert s.total_cuda_ms == pytest.approx(105.0)
+
+
+def test_run_result_as_csv_row_has_detail_columns():
+    """RunResult.as_csv_row emits the four per-stage detail columns."""
+    from nanovllm_omni.optim.bench import run_one
+
+    r = run_one(_bundle(), _short_prompt(), max_tokens=4)
+    row = r.as_csv_row()
+    # CUDA *can* be available on the host even with a CPU stub bundle; we just
+    # assert the fields are present and parseable. On a real GPU the values
+    # become meaningful (cuda_ms > 0).
+    for col in ("generate_cuda_ms", "decode_cuda_ms", "cpu_dispatch_ms", "generate_per_step_ms"):
+        assert col in row
+        assert float(row[col]) >= 0
+    # Per-step is wall / frames; we got 2 frames from the stub.
+    assert float(row["generate_per_step_ms"]) > 0
+
+
+def test_parse_kineto_trace_groups_kernels_under_stage_events():
+    """parse_kineto_trace returns one StageProfile per record_function stage."""
+    import json
+    import tempfile
+
+    from nanovllm_omni.optim.bench.trace import parse_kineto_trace
+
+    events = [
+        # Stage events (user_annotation, ph=X)
+        {
+            "name": "generate",
+            "ph": "X",
+            "cat": "user_annotation",
+            "ts": 0,
+            "dur": 1000,
+            "tid": 1,
+            "pid": 0,
+            "args": {"id": 1},
+        },
+        {
+            "name": "decode",
+            "ph": "X",
+            "cat": "user_annotation",
+            "ts": 1100,
+            "dur": 200,
+            "tid": 1,
+            "pid": 0,
+            "args": {"id": 2},
+        },
+        # Children of generate (CUDA kernels).
+        {
+            "name": "aten::addmm",
+            "ph": "X",
+            "cat": "kernel",
+            "ts": 10,
+            "dur": 100,
+            "tid": 0,
+            "pid": 1,
+            "args": {"kernel": "sgemm", "grid": [128, 1, 1], "block": [256, 1, 1]},
+        },
+        {
+            "name": "aten::addmm",
+            "ph": "X",
+            "cat": "kernel",
+            "ts": 200,
+            "dur": 200,
+            "tid": 0,
+            "pid": 1,
+            "args": {"kernel": "sgemm"},
+        },
+        {
+            "name": "aten::softmax",
+            "ph": "X",
+            "cat": "kernel",
+            "ts": 500,
+            "dur": 50,
+            "tid": 0,
+            "pid": 1,
+            "args": {"kernel": "softmax"},
+        },
+        # generate.step sub-events: 3 iterations.
+        {
+            "name": "generate.step",
+            "ph": "X",
+            "cat": "user_annotation",
+            "ts": 20,
+            "dur": 90,
+            "tid": 1,
+            "pid": 0,
+            "args": {"id": 10},
+        },
+        {
+            "name": "generate.step",
+            "ph": "X",
+            "cat": "user_annotation",
+            "ts": 220,
+            "dur": 180,
+            "tid": 1,
+            "pid": 0,
+            "args": {"id": 11},
+        },
+        {
+            "name": "generate.step",
+            "ph": "X",
+            "cat": "user_annotation",
+            "ts": 510,
+            "dur": 40,
+            "tid": 1,
+            "pid": 0,
+            "args": {"id": 12},
+        },
+        # Child of decode (one kernel).
+        {
+            "name": "aten::conv2d",
+            "ph": "X",
+            "cat": "kernel",
+            "ts": 1150,
+            "dur": 80,
+            "tid": 0,
+            "pid": 1,
+            "args": {"kernel": "conv2d"},
+        },
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
+        json.dump({"traceEvents": events}, fh)
+        path = fh.name
+
+    profile = parse_kineto_trace(path)
+    assert len(profile.stages) == 2
+
+    gen = profile.by_stage("generate")
+    assert gen is not None
+    assert gen.wall_us == 1000
+    assert gen.n_steps == 3
+    assert gen.kernel_count == 3
+    assert gen.total_kernel_us == 350
+    top = gen.top_kernels[0]
+    assert top.name == "aten::addmm"
+    assert top.total_us == 300
+    assert top.count == 2
+
+    dec = profile.by_stage("decode")
+    assert dec is not None
+    assert dec.wall_us == 200
+    assert dec.kernel_count == 1
+    assert dec.n_steps == 0
+
+
+def test_trace_profile_markdown_renders_table():
+    from nanovllm_omni.optim.bench.trace import (
+        KernelStat,
+        StageProfile,
+        TraceProfile,
+        trace_profile_markdown,
+    )
+
+    tp = TraceProfile(
+        stages=(
+            StageProfile(
+                name="generate",
+                wall_us=1000.0,
+                kernel_count=3,
+                total_kernel_us=350.0,
+                top_kernels=(
+                    KernelStat(name="aten::addmm", total_us=300.0, count=2),
+                    KernelStat(name="aten::softmax", total_us=50.0, count=1),
+                ),
+                n_steps=3,
+            ),
+            StageProfile(
+                name="decode",
+                wall_us=200.0,
+                kernel_count=1,
+                total_kernel_us=80.0,
+                top_kernels=(KernelStat(name="aten::conv2d", total_us=80.0, count=1),),
+            ),
+        )
+    )
+    md = trace_profile_markdown(tp)
+    assert "| stage |" in md
+    assert "| generate |" in md
+    assert "| decode |" in md
+    assert "aten::addmm" in md
+
+
 # ---------------------------------------------------------------------------
 # Smoke tests (require GPU + real model weights; skipped with ``-m "not smoke"``)
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from pathlib import Path
 from .runner import RunResult
 
 CSV_COLUMNS: tuple[str, ...] = (
+    # Spec columns (issue #23).
     "prompt_id",
     "seed",
     "run_idx",
@@ -20,6 +21,11 @@ CSV_COLUMNS: tuple[str, ...] = (
     "total_ms",
     "frames",
     "vram_mb",
+    # Per-stage detail (TK-011 follow-up).
+    "generate_cuda_ms",
+    "decode_cuda_ms",
+    "cpu_dispatch_ms",
+    "generate_per_step_ms",
 )
 
 
@@ -31,20 +37,7 @@ def write_csv(results: Iterable[RunResult], path: str | Path) -> Path:
         writer = csv.DictWriter(fh, fieldnames=list(CSV_COLUMNS))
         writer.writeheader()
         for r in results:
-            writer.writerow(
-                {
-                    "prompt_id": r.prompt_id,
-                    "seed": r.seed,
-                    "run_idx": r.run_idx,
-                    "tokenize_ms": f"{r.times.tokenize_ms:.6f}",
-                    "generate_ms": f"{r.times.generate_ms:.6f}",
-                    "decode_ms": f"{r.times.decode_ms:.6f}",
-                    "wav_ms": f"{r.times.wav_ms:.6f}",
-                    "total_ms": f"{r.times.total_ms:.6f}",
-                    "frames": r.frames,
-                    "vram_mb": f"{r.vram_peak_mb:.3f}",
-                }
-            )
+            writer.writerow(r.as_csv_row())
     return p
 
 
@@ -109,6 +102,61 @@ def markdown_table(results: Sequence[RunResult]) -> str:
             f"{_median(tot):.2f}",
             f"{_percentile(tot, 95):.2f}",
             f"{min(tot):.2f}",
+            f"{int(_median(frames))}",
+            f"{_median(vram):.2f}",
+        )
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def markdown_table_detail(results: Sequence[RunResult]) -> str:
+    """Extended per-prompt aggregate that includes per-stage GPU/CPU breakdown.
+
+    Adds columns for ``generate_cuda_median``, ``decode_cuda_median``,
+    ``cpu_dispatch_median`` and ``generate_per_step_median`` on top of the
+    spec-compliant ``markdown_table``.
+    """
+    by_prompt: dict[str, list[RunResult]] = {}
+    for r in results:
+        by_prompt.setdefault(r.prompt_id, []).append(r)
+
+    cols = (
+        "prompt_id",
+        "generate_median",
+        "decode_median",
+        "total_median",
+        "generate_cuda_median",
+        "decode_cuda_median",
+        "cpu_dispatch_median",
+        "generate_per_step_median",
+        "frames",
+        "vram_mb",
+    )
+
+    lines = [
+        "| " + " | ".join(cols) + " |",
+        "| " + " | ".join(["---"] * len(cols)) + " |",
+    ]
+    for prompt_id in sorted(by_prompt):
+        rs = by_prompt[prompt_id]
+        gen = [r.times.generate_ms for r in rs]
+        dec = [r.times.decode_ms for r in rs]
+        tot = [r.times.total_ms for r in rs]
+        gen_cuda = [r.times.generate_cuda_ms for r in rs]
+        dec_cuda = [r.times.decode_cuda_ms for r in rs]
+        cpu_disp = [r.times.cpu_dispatch_ms for r in rs]
+        per_step = [r.times.generate_ms / r.frames if r.frames else 0.0 for r in rs]
+        frames = [float(r.frames) for r in rs]
+        vram = [r.vram_peak_mb for r in rs]
+        cells = (
+            prompt_id,
+            f"{_median(gen):.2f}",
+            f"{_median(dec):.2f}",
+            f"{_median(tot):.2f}",
+            f"{_median(gen_cuda):.2f}",
+            f"{_median(dec_cuda):.2f}",
+            f"{_median(cpu_disp):.2f}",
+            f"{_median(per_step):.2f}",
             f"{int(_median(frames))}",
             f"{_median(vram):.2f}",
         )

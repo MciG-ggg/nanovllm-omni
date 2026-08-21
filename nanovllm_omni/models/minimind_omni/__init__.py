@@ -6,15 +6,23 @@ from .stages import (
     MinimindBundle,
     create_bundle,
     create_stages,
+    decode_audio,
+    encode_wav,
     load_minimind_omni_bundle,
+    run_generate,
+    tokenize_for_generate,
 )
 
 __all__ = [
     "DEFAULT_MINIMIND_MODEL_ID",
     "MinimindBundle",
+    "decode_audio",
+    "encode_wav",
     "load_minimind_omni_bundle",
     "MINIMIND_OMNI_PIPELINE",
     "PIPELINE",
     "create_bundle",
     "create_stages",
+    "run_generate",
+    "tokenize_for_generate",
 ]

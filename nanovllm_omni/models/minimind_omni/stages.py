@@ -3,10 +3,18 @@
 Loads the HF trust_remote_code MiniMindOmni checkpoint and runs its built-in
 Thinker→Talker stream (`generate(..., return_audio_codes=True)`), then decodes
 Mimi codebook frames to 24 kHz mono PCM via `MimiModel.decode`.
+
+The four ``tokenize_for_generate`` / ``run_generate`` / ``decode_audio`` /
+``encode_wav`` helpers are the public seam used by the Session-1 benchmark
+harness (``nanovllm_omni.optim.bench``). Each helper opens a
+``torch.profiler.record_function`` range whose name matches the bench
+subpackage's CSV columns.
 """
 
 from __future__ import annotations
 
+import io
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,14 +61,6 @@ def _pick_device(device: str | None) -> str:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
-
-
-def _float_to_pcm16(samples: Any) -> bytes:
-    import numpy as np
-
-    arr = np.asarray(samples, dtype=np.float32).reshape(-1)
-    arr = np.clip(arr, -1.0, 1.0)
-    return (arr * 32767.0).astype("<i2").tobytes()
 
 
 def load_minimind_omni_bundle(
@@ -110,6 +110,115 @@ def create_stages(model_id: str, device: str | None = None, **kwargs: Any):
     return bundle.thinker, bundle.talker, bundle.code2wav
 
 
+def tokenize_for_generate(
+    tokenizer: Any,
+    prompt: str,
+    open_thinking: bool,
+) -> Any:
+    """Apply the chat template and produce a 1xT ``input_ids`` tensor.
+
+    Labeled ``tokenize`` for the benchmark harness; pure CPU, no model call.
+    """
+    import torch
+
+    with torch.profiler.record_function("tokenize"):
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                open_thinking=open_thinking,
+            )
+        except TypeError:
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        # Device is supplied by the caller in the generate_audio path; the
+        # helper itself stays device-agnostic so unit tests can stub it.
+        return torch.tensor(
+            tokenizer(text).data["input_ids"],
+            dtype=torch.long,
+        )[None, ...]
+
+
+def run_generate(
+    model: Any,
+    input_ids: Any,
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    eos_token_id: Any | None,
+    open_thinking: bool,
+) -> list[list[int]]:
+    """Stream ``model.generate`` and collect Mimi codebook frames.
+
+    Returns a list of 8-token frames (one per yielded audio chunk) that the
+    codec stage consumes. Labeled ``generate`` for the benchmark harness.
+    """
+    import torch
+
+    with torch.profiler.record_function("generate"):
+        frames: list[list[int]] = []
+        stream = model.generate(
+            input_ids,
+            eos_token_id,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=True,
+            return_audio_codes=True,
+            open_thinking=open_thinking,
+        )
+        for _text_ids, audio_frame in stream:
+            if audio_frame and len(audio_frame) == 8:
+                frames.append(audio_frame)
+        return frames
+
+
+def decode_audio(
+    mimi: Any,
+    audio_frames: list[list[int]],
+    device: str,
+) -> Any:
+    """Decode collected Mimi codebook frames to a float numpy array on CPU.
+
+    Labeled ``decode`` for the benchmark harness. Moves codes to ``device``,
+    runs ``mimi.decode`` under no_grad, then returns ``np.ndarray``.
+    """
+    import torch
+
+    with torch.profiler.record_function("decode"):
+        codes = torch.tensor(audio_frames, dtype=torch.long, device=device).T.unsqueeze(0)
+        filtered = torch.where(codes >= MIMI_CODE_VOCAB_LIMIT, torch.zeros_like(codes), codes)
+        with torch.no_grad():
+            audio = mimi.decode(filtered).audio_values
+        return audio.squeeze().float().cpu().numpy()
+
+
+def encode_wav(samples: Any, sample_rate: int = 24_000) -> bytes:
+    """Wrap float audio into a 16-bit mono PCM WAV byte string.
+
+    Labeled ``wav`` for the benchmark harness. Uses stdlib ``wave`` only;
+    accepts anything numpy can coerce to float32.
+    """
+    import numpy as np
+    import torch
+
+    with torch.profiler.record_function("wav"):
+        arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+        arr = np.clip(arr, -1.0, 1.0)
+        pcm = (arr * 32767.0).astype("<i2").tobytes()
+        out = io.BytesIO()
+        with wave.open(out, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(pcm)
+        return out.getvalue()
+
+
 def generate_audio(
     bundle: MinimindBundle,
     prompt: str,
@@ -119,55 +228,29 @@ def generate_audio(
     top_p: float = 0.9,
     open_thinking: bool = False,
 ) -> AudioPayload:
-    """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``."""
+    """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``.
+
+    Public entry point used by both the Omni entrypoint and the bench
+    harness. The four helper calls happen inside a single ``no_grad`` block
+    so CUDA memory peaks are not doubled by intermediate allocations.
+    """
     import torch
 
-    model = bundle.model
-    tokenizer = bundle.tokenizer
-    device = bundle.device
-    mimi = bundle.mimi
-
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        inputs_text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            open_thinking=open_thinking,
-        )
-    except TypeError:
-        inputs_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    input_ids = torch.tensor(
-        tokenizer(inputs_text).data["input_ids"],
-        dtype=torch.long,
-        device=device,
-    )[None, ...]
-
-    audio_frames: list[list[int]] = []
+    eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
     with torch.no_grad():
-        stream = model.generate(
+        input_ids = tokenize_for_generate(bundle.tokenizer, prompt, open_thinking).to(bundle.device)
+        frames = run_generate(
+            bundle.model,
             input_ids,
-            tokenizer.eos_token_id,
             max_new_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            stream=True,
-            return_audio_codes=True,
+            eos_token_id=eos_token_id,
             open_thinking=open_thinking,
         )
-        for _text_ids, audio_frame in stream:
-            if audio_frame and len(audio_frame) == 8:
-                audio_frames.append(audio_frame)
+        if not frames:
+            return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)
+        samples = decode_audio(bundle.mimi, frames, bundle.device)
+        wav_bytes = encode_wav(samples, sample_rate=MIMI_SAMPLE_RATE)
 
-    if not audio_frames:
-        # Empty but valid silent WAV keeps the seam contract intact.
-        return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)
-
-    codes = torch.tensor(audio_frames, dtype=torch.long, device=device).T.unsqueeze(0)
-    filtered = torch.where(codes >= MIMI_CODE_VOCAB_LIMIT, torch.zeros_like(codes), codes)
-    with torch.no_grad():
-        audio = mimi.decode(filtered).audio_values
-    pcm = _float_to_pcm16(audio.squeeze().float().cpu().numpy())
-    return AudioPayload(data=pcm, sample_rate=MIMI_SAMPLE_RATE)
+    return AudioPayload(data=wav_bytes, sample_rate=MIMI_SAMPLE_RATE)

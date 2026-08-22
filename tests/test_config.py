@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from nanovllm_omni.config import (
     DeployConfig,
     OmniEngineArgs,
@@ -10,6 +12,11 @@ from nanovllm_omni.config import (
     merge_pipeline_deploy,
     resolve_pipeline_config,
 )
+from nanovllm_omni.config_registry import (
+    StageExecutionType,
+    resolve_stage_factory,
+)
+from tests import _stage_factories as fac
 
 
 def test_engine_args_accepts_deploy_kwargs():
@@ -54,8 +61,8 @@ def test_stage_config_is_frozen():
     cfg = StageConfig(
         stage_id=0,
         name="thinker",
-        kind="ar",
-        factory=lambda deploy, args: None,
+        kind=StageExecutionType.LLM_AR,
+        factory="tests._stage_factories:thinker_simple",
     )
     try:
         cfg.name = "talker"
@@ -102,13 +109,16 @@ def test_register_pipeline_adds_entry():
         register_pipeline,
     )
 
-    def my_factory(deploy, args):
-        return None
-
     fake = PipelineConfig(
         name="fake_o",
         stages=(
-            StageConfig(stage_id=0, name="only", kind="ar", factory=my_factory, is_terminal=True),
+            StageConfig(
+                stage_id=0,
+                name="only",
+                kind=StageExecutionType.LLM_AR,
+                factory="tests._stage_factories:thinker_simple",
+                is_terminal=True,
+            ),
         ),
         default_deploy_config_name="fake_o.yaml",
     )
@@ -117,3 +127,90 @@ def test_register_pipeline_adds_entry():
         assert resolve_pipeline_config("fake_o") is fake
     finally:
         OMNI_PIPELINES.pop("fake_o", None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (TK-016) contract tests: StageExecutionType enum + string-path
+# factory resolution. See /docs/aligned_interfaces.md and SPEC.md
+# "Module structure".
+# ---------------------------------------------------------------------------
+
+
+def test_stage_execution_type_has_vllm_omni_taxonomy():
+    # vllm-omni's StageExecutionType taxonomy: LLM_AR / LLM_GENERATION /
+    # DIFFUSION / CODEC. StrEnum so members compare equal to legacy strings.
+    assert {e.name for e in StageExecutionType} == {
+        "LLM_AR",
+        "LLM_GENERATION",
+        "DIFFUSION",
+        "CODEC",
+    }
+    assert StageExecutionType.LLM_AR == "ar"
+    assert StageExecutionType.LLM_GENERATION == "generation"
+    assert StageExecutionType.DIFFUSION == "diffusion"
+    assert StageExecutionType.CODEC == "codec"
+
+
+def test_stage_config_kind_rejects_string_literal():
+    with pytest.raises(TypeError, match="StageExecutionType"):
+        StageConfig(
+            stage_id=0,
+            name="x",
+            kind="ar",  # type: ignore[arg-type]
+            factory="tests._stage_factories:thinker_simple",
+        )
+
+
+def test_stage_config_factory_must_be_string_path():
+    with pytest.raises(TypeError, match="dotted-path string"):
+        StageConfig(
+            stage_id=0,
+            name="x",
+            kind=StageExecutionType.LLM_AR,
+            factory=fac.thinker_simple,  # type: ignore[arg-type]
+        )
+
+
+def test_stage_config_bad_factory_form_raises_value_error():
+    with pytest.raises(ValueError, match="package.module:attr"):
+        StageConfig(
+            stage_id=0,
+            name="x",
+            kind=StageExecutionType.LLM_AR,
+            factory="no_colon_separator",
+        )
+
+
+def test_stage_config_missing_attribute_raises_at_construction():
+    with pytest.raises(AttributeError, match="has no attribute"):
+        StageConfig(
+            stage_id=0,
+            name="x",
+            kind=StageExecutionType.LLM_AR,
+            factory="tests._stage_factories:does_not_exist",
+        )
+
+
+def test_stage_config_unimportable_module_raises_at_construction():
+    with pytest.raises(ImportError, match="cannot import module"):
+        StageConfig(
+            stage_id=0,
+            name="x",
+            kind=StageExecutionType.LLM_AR,
+            factory="definitely_not_a_real_module:_x",
+        )
+
+
+def test_resolve_stage_factory_returns_callable():
+    fn = resolve_stage_factory("nanovllm_omni.models.minimind_omni.thinker:_thinker_stage")
+    assert callable(fn)
+
+
+def test_resolve_stage_factory_rejects_empty_path():
+    with pytest.raises(ValueError, match="non-empty string"):
+        resolve_stage_factory("")
+
+
+def test_resolve_stage_factory_rejects_missing_colon():
+    with pytest.raises(ValueError, match="package.module:attr"):
+        resolve_stage_factory("nanovllm_omni.models.minimind_omni.thinker")

@@ -9,6 +9,10 @@ Design basis: 10-round grill session. vllm-omni's StagePool and
 Orchestrator are designed for multi-replica routing and cross-stage
 request lifecycle management; neither is needed for nanovllm-omni's
 single-process, single-GPU scope. See /docs/aligned_interfaces.md.
+
+Phase 2 (TK-016): stage factories and ``process_input`` hooks are
+dotted-path strings on ``StageConfig``; this runner resolves them via
+``resolve_stage_factory`` once per pipeline on first ``run``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from nanovllm_omni.config_registry import (
     DeployConfig,
     PipelineConfig,
     merge_pipeline_deploy,
+    resolve_stage_factory,
 )
 from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
 
@@ -46,7 +51,8 @@ class PipelineRunner:
     def _ensure_stages(self) -> list[Any]:
         if self._stage_instances is None:
             self._stage_instances = [
-                stage.factory(self.deploy, self.args) for stage in self.pipeline.stages
+                resolve_stage_factory(stage.factory)(self.deploy, self.args)
+                for stage in self.pipeline.stages
             ]
         return self._stage_instances
 
@@ -102,7 +108,7 @@ class PipelineRunner:
         payload: Any = prompt
         for (stage_cfg, stage_defaults), instance in zip(self._merged, stages, strict=True):
             if stage_cfg.process_input is not None:
-                payload = stage_cfg.process_input(payload, prompt)
+                payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
             payload = instance(payload, stage_sampling)
         return payload

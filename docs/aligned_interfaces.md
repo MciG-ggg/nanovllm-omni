@@ -13,6 +13,8 @@ The public nanovllm-omni API follows the corresponding vllm-omni interfaces wher
 | `nanovllm_omni.config_registry.StageConfig` (new) | `vllm_omni.config.StagePipelineConfig` |
 | `nanovllm_omni.config_registry.DeployConfig` | `vllm_omni.config.DeployConfig` |
 | `nanovllm_omni.config_registry.DeployStageConfig` | `vllm_omni.config.StageDeployConfig` |
+| `nanovllm_omni.config_registry.StageExecutionType` (TK-016 phase 2) | `vllm_omni.config.StageExecutionType` |
+| `nanovllm_omni.config_registry.resolve_stage_factory` (TK-016 phase 2) | `vllm_omni.config.resolve_stage_factory` |
 | `nanovllm_omni.engine.runner.PipelineRunner` (new) | no vllm-omni analog (replaces `StagePool` role for single-GPU) |
 | `nanovllm_omni.engine.executor.PipelineExecutor` (new) | no vllm-omni analog (replaces `Orchestrator` role for single-process) |
 
@@ -27,7 +29,6 @@ This is consumer-visible interface alignment, not an identical implementation. T
 - Vision understanding (LLaVA / InternVL — single-stage vision-language fused models).
 - FastAPI / uvicorn / Pydantic / plugin entry points.
 - Multi-Arm action policies, robot control loops, simulators.
-- Dotted-path reflective resolution (`custom_process_input_func` as a string): we use direct Python callables.
 - `hf_config_predicate` for HF-config-based model-type disambiguation: we use one-key-per-model-family.
 
 These omissions are deliberate scope boundaries, not compatibility bugs. They are documented at the ticket level so future contributors can re-open them when the scope changes.
@@ -40,9 +41,9 @@ The minimal field set for `StageConfig` after TICKET-02 (see `.scratch/aligned-i
 |---|---|---|---|
 | `stage_id` | `int` | Stable ordering of stages within a pipeline | All models |
 | `name` | `str` | Human-readable identifier (e.g. `"thinker"`, `"dit"`) | All models |
-| `kind` | `str` | Execution class: `"ar"`, `"codec"`, `"diffusion"` (no enum — string for future extensibility) | All models |
-| `factory` | `Callable[..., Any]` | Builds the stage instance. Direct import, not dotted path. | All models |
-| `process_input` | `Callable \| None` | Bridge conversion from previous stage's output. `None` defaults to identity. | minimind_o (TICKET-05), reserved for future multi-stage models |
+| `kind` | `StageExecutionType` | Execution class: `LLM_AR`, `LLM_GENERATION`, `DIFFUSION`, `CODEC`. `StrEnum` mirroring vllm-omni. | All models |
+| `factory` | `str` | Dotted-path to the stage factory callable (`"package.module:attr"`). Resolved lazily via `resolve_stage_factory`. | All models |
+| `process_input` | `str \| None` | Dotted-path to the bridge hook (`"package.module:attr"`), or `None` for identity pass-through. | minimind_o (TICKET-05), reserved for future multi-stage models |
 | `input_sources` | `tuple[int, ...]` | Stage ids whose outputs feed this stage. Empty for the first stage. | All models |
 | `is_terminal` | `bool` | Marks the final stage whose output is the user-facing result. | All models |
 | `final_output_type` | `str \| None` | One of `"audio"`, `"video"`, `"image"`, `"text"`, `"actions"`. Drives `OmniRequestOutput.multimodal_output` key. | All models |

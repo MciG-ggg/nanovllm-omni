@@ -3,27 +3,29 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from nanovllm_omni.config_registry import (
     DeployConfig,
     PipelineConfig,
     StageConfig,
+    StageExecutionType,
 )
 from nanovllm_omni.engine.executor import PipelineExecutor
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
+from nanovllm_omni.engine_args import OmniEngineArgs
 
 
 def _make_executor(max_concurrent: int = 1) -> PipelineExecutor:
-    def factory(deploy: Any, args: Any) -> Any:
-        def forward(payload: Any, sampling: SamplingParams) -> Any:
-            return f"out({payload})"
-
-        return forward
-
     pipeline = PipelineConfig(
         name="t",
-        stages=(StageConfig(0, "s", "ar", factory, is_terminal=True),),
+        stages=(
+            StageConfig(
+                0,
+                "s",
+                StageExecutionType.LLM_AR,
+                "tests._stage_factories:executor_simple",
+                is_terminal=True,
+            ),
+        ),
         default_deploy_config_name="t.yaml",
     )
     args = OmniEngineArgs(model="m", device="cpu")

@@ -1,6 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
+
+# Reference-only upstream model source.
+nanovllm_omni/vendor/
 *$py.class
 *.so
 .Python

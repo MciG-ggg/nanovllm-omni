@@ -129,6 +129,7 @@ def run_generate(
                 open_thinking=open_thinking,
             )
         else:
+            # TODO: delete
             # Keep lightweight/test doubles compatible with the public seam.
             stream = model.generate(
                 input_ids,

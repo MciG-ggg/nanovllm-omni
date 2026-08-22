@@ -3,7 +3,7 @@ id: TASK_AUTO_0002
 state: in_progress
 phase: done
 created_at: 2026-08-22T04:34:01.602Z
-updated_at: 2026-08-22T04:41:36.766Z
+updated_at: 2026-08-22T04:42:10.212Z
 title: 继续
 ---
 
@@ -19,7 +19,7 @@ A1: 继续 the in-flight task — finish the still-open SPEC acceptance (verify/
 ## tasks
 
 - [x] TASK_0002  Verify and backfill test_sampling_params.py against the accepted SamplingParams surface — confirm defaults, validation, and round-trips | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build
-- [ ] Verify and backfill test_engine_args.py against the accepted engine-args parsing and validation — cover required/optional fields and error paths | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build
+- [ ] TASK_0003  Verify and backfill test_engine_args.py against the accepted engine-args parsing and validation — cover required/optional fields and error paths | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build
 - [ ] Verify and backfill test_omni_request_output.py against the accepted OmniRequestOutput shape — cover fields, aliases, and serialization | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build
 - [ ] Verify and backfill test_pipeline_registry.py — assert engine-args/config wiring to registered components and unknown-key handling | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build
 - [ ] Verify and backfill test_pipeline_runner.py — drive a request end-to-end through the stages and assert an OmniRequestOutput with post-EOS behavior stubbed per spec | decisions (explicit user choices — these OVERRIDE the spec doc wherever they conflict; follow them exactly): finish the still-open acceptance before touching the deferred TICKET-05 feature build

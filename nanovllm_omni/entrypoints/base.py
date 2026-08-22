@@ -75,7 +75,7 @@ class OmniBase:
         MiniMind-O bundle directly. New code should use the runner instead.
         """
         if self._bundle is None:
-            from ..models.minimind_omni.stages import load_minimind_omni_bundle
+            from ..models.minimind_omni import load_minimind_omni_bundle
 
             extra = dict(self.engine_args.extra or {})
             mimi_model_id = extra.pop("mimi_model_id", None) or extra.pop("mimi", None)

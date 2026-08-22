@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nanovllm_omni.models.minimind_omni.stages import MinimindBundle, generate_audio
+from nanovllm_omni.models.minimind_omni import MinimindBundle, generate_audio
 from nanovllm_omni.outputs import AudioPayload
 
 

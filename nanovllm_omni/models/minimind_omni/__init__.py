@@ -1,28 +1,38 @@
-"""MiniMind-Omni aligned model package exports."""
+"""MiniMind-Omni aligned model package exports.
 
-from .pipeline import MINIMIND_OMNI_PIPELINE, PIPELINE
-from .stages import (
+Public surface is preserved from the previous single-file layout:
+``MinimindBundle``, ``create_bundle``, ``generate_audio``, etc. all still
+import from ``nanovllm_omni.models.minimind_omni``. The internals are now
+split per stage (``bundle.py`` / ``thinker.py`` / ``talker.py`` /
+``code2wav.py``).
+"""
+
+from .bundle import (
+    DEFAULT_MIMI_MODEL_ID,
     DEFAULT_MINIMIND_MODEL_ID,
+    MIMI_SAMPLE_RATE,
     MinimindBundle,
     create_bundle,
     create_stages,
-    decode_audio,
-    encode_wav,
     load_minimind_omni_bundle,
-    run_generate,
-    tokenize_for_generate,
 )
+from .code2wav import decode_audio, encode_wav
+from .pipeline import MINIMIND_OMNI_PIPELINE, PIPELINE
+from .thinker import generate_audio, run_generate, tokenize_for_generate
 
 __all__ = [
     "DEFAULT_MINIMIND_MODEL_ID",
-    "MinimindBundle",
-    "decode_audio",
-    "encode_wav",
-    "load_minimind_omni_bundle",
+    "DEFAULT_MIMI_MODEL_ID",
+    "MIMI_SAMPLE_RATE",
     "MINIMIND_OMNI_PIPELINE",
+    "MinimindBundle",
     "PIPELINE",
     "create_bundle",
     "create_stages",
+    "decode_audio",
+    "encode_wav",
+    "generate_audio",
+    "load_minimind_omni_bundle",
     "run_generate",
     "tokenize_for_generate",
 ]

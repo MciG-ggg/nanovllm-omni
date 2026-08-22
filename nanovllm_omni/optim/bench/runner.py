@@ -161,7 +161,7 @@ def run_one(
     """
     import torch
 
-    from nanovllm_omni.models.minimind_omni.stages import (
+    from nanovllm_omni.models.minimind_omni import (
         decode_audio,
         encode_wav,
         run_generate,

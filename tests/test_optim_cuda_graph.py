@@ -313,3 +313,70 @@ def test_replay_short_circuits_on_memoised_failure():
     for _ in range(5):
         assert cache.replay(_codes(8)) is None
     assert inner_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# TK-016 phase 3.c: generic graph_wrap (the "CUDA graph wrapper")
+# ---------------------------------------------------------------------------
+
+
+def test_graph_wrap_returns_plain_on_cpu(monkeypatch):
+    """On a CPU-only host graph_wrap must return fn unchanged (no wrapper)."""
+    import torch as _torch
+
+    monkeypatch.setattr(_torch.cuda, "is_available", lambda: False)
+    from nanovllm_omni.optim.cuda_graph import graph_wrap
+
+    fn = lambda x: x  # noqa: E731
+    assert graph_wrap(fn) is fn
+
+
+@requires_cuda
+def test_graph_wrap_captures_and_replays_bit_identical():
+    """The wrapped fn, called twice (capture then replay), matches eager."""
+    from nanovllm_omni.optim.cuda_graph import graph_wrap
+
+    fn = lambda x: x.float().sin().mul(2.0)  # noqa: E731
+    wrapped = graph_wrap(fn)
+    x = torch.randn(4, 16, device="cuda")
+    eager = fn(x)
+    capture_out = wrapped(x)
+    replay_out = wrapped(x)
+    assert torch.equal(capture_out, eager)
+    assert torch.equal(replay_out, eager)
+    s = wrapped.stats()
+    assert s["graphs_captured"] == 1
+    assert s["graph_calls"] >= 1
+    assert s["eager_calls"] == 0
+
+
+@requires_cuda
+def test_graph_wrap_is_idempotent():
+    """Wrapping an already-wrapped fn is a no-op."""
+    from nanovllm_omni.optim.cuda_graph import graph_wrap
+
+    w1 = graph_wrap(lambda c: c.float() * 1.0)
+    assert graph_wrap(w1) is w1
+
+
+@requires_cuda
+def test_graph_wrap_memoizes_capture_failure():
+    """A non-capture-safe fn falls back to eager; failure is memoised."""
+    from nanovllm_omni.optim.cuda_graph import graph_wrap
+
+    calls = {"n": 0}
+
+    def flaky(x):
+        calls["n"] += 1
+        if calls["n"] == 4:  # warmup 1-3 pass; capture attempt fails
+            raise RuntimeError("synthetic non-capture-safe op")
+        return x.float() * 1.0
+
+    wrapped = graph_wrap(flaky, name="flaky")
+    x = torch.zeros(2, 3, device="cuda")
+    for _ in range(5):
+        wrapped(x)
+    s = wrapped.stats()
+    assert s["capture_failures"] == 1
+    assert s["graphs_captured"] == 0
+    assert s["eager_calls"] == 5

@@ -37,6 +37,12 @@ This module exposes:
   capture / replay failure. All other attributes delegate to the
   inner mimi model.
 * :func:`graph_compile_mimi` -- entry point used by the bench CLI.
+* :class:`GraphFunction` / :func:`graph_wrap` -- TK-016 phase 3.c generic
+  "CUDA graph wrapper": runs any single-tensor, capture-friendly callable
+  through per-shape CUDA Graph replay with eager fallback. Consumer of the
+  phase 3.b capture-friendliness patch (``MiniMindOmni.forward`` captures
+  and replays bit-identical at fixed shapes); mimi.decode itself is not
+  capturable on the installed codec and always falls back to eager.
 """
 
 from __future__ import annotations
@@ -261,3 +267,143 @@ def graph_compile_mimi(mimi: Any) -> Any:
     if getattr(mimi, _GRAPH_MARKER, False):
         return mimi
     return GraphedMimi(mimi)
+
+
+_GRAPH_FN_MARKER = "_nano_graph_wrap_v1"
+
+
+class _GraphFnSlot:
+    """Static buffers + captured graph for one wrapped-fn input shape."""
+
+    __slots__ = ("graph", "input_buf", "output_buf")
+
+    def __init__(
+        self,
+        graph: torch.cuda.CUDAGraph,
+        input_buf: torch.Tensor,
+        output_buf: torch.Tensor,
+    ) -> None:
+        self.graph = graph
+        self.input_buf = input_buf
+        self.output_buf = output_buf
+
+
+class GraphFunction:
+    """Per-input-shape CUDA Graph wrapper for a capture-friendly ``fn``.
+
+    Wraps ``fn(input: Tensor) -> Tensor`` so repeated calls with the same
+    input shape replay through a captured CUDA graph. One graph per distinct
+    ``input.shape``, persistent input buffer, cloned output buffer, eager
+    fallback on any capture / replay failure (memoised per shape).
+
+    This is the generic form of :class:`MimiDecodeGraphCache` (which is
+    specialised to ``mimi.decode`` -> ``out.audio_values``) and the
+    TK-016 phase 3.c "CUDA graph wrapper": the reusable piece that runs any
+    single-tensor, capture-friendly callable through CUDA Graph replay
+    (e.g. ``MiniMindOmni.forward`` at a fixed shape after the phase 3.b
+    capture-friendliness patch). On a CPU-only host :func:`graph_wrap`
+    returns ``fn`` unchanged, so callers can use it unconditionally.
+    """
+
+    # ponytail: class-level sentinel, identity-based, stored in _slots on
+    # capture failure so repeated same-shape calls short-circuit to eager
+    # instead of re-running the 3-warmup + sync + capture-attempt cycle.
+    _FAILED: object = object()
+
+    def __init__(self, fn: Any, *, name: str = "fn") -> None:
+        self._fn = fn
+        self._name = name
+        self._slots: dict[tuple[int, ...], object] = {}
+        self._capture_failure_count: int = 0
+        self._eager_calls: int = 0
+        self._graph_calls: int = 0
+        object.__setattr__(self, _GRAPH_FN_MARKER, True)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        key = tuple(x.shape)
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._capture(x, key)
+        if slot is self._FAILED:
+            self._eager_calls += 1
+            return self._fn(x)
+        slot.input_buf.copy_(x)  # type: ignore[union-attr]
+        try:
+            slot.graph.replay()  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("%s graph replay failed shape=%s: %s", self._name, key, exc)
+            # Replay failure is potentially transient; drop the slot so the
+            # next call re-captures, and fall back to eager this call.
+            self._slots.pop(key, None)
+            self._eager_calls += 1
+            return self._fn(x)
+        self._graph_calls += 1
+        return slot.output_buf.clone()  # type: ignore[union-attr]
+
+    def _capture(
+        self,
+        x: torch.Tensor,
+        key: tuple[int, ...],
+    ) -> object:
+        if not torch.cuda.is_available():
+            _log.info("skipping %s CUDA graph capture on CPU-only host", self._name)
+            self._slots[key] = self._FAILED
+            self._capture_failure_count += 1
+            return self._FAILED
+
+        input_buf = torch.empty_like(x, memory_format=torch.contiguous_format)
+        input_buf.copy_(x)
+        side = _cuda_side_stream()
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                _ = self._fn(input_buf)
+        side.synchronize()
+        torch.cuda.current_stream().wait_stream(side)
+
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph, stream=side):
+                output_buf = self._fn(input_buf).clone()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("%s graph capture failed shape=%s: %s", self._name, key, exc)
+            torch.cuda.current_stream().wait_stream(side)
+            self._slots[key] = self._FAILED
+            self._capture_failure_count += 1
+            return self._FAILED
+
+        torch.cuda.current_stream().wait_stream(side)
+        graph.replay()  # one initial replay to bind all pointers
+        torch.cuda.synchronize()
+        slot = _GraphFnSlot(graph=graph, input_buf=input_buf, output_buf=output_buf)
+        self._slots[key] = slot
+        _log.info(
+            "%s captured CUDA graph for shape=%s (output=%s)",
+            self._name,
+            key,
+            tuple(output_buf.shape),
+        )
+        return slot
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "eager_calls": self._eager_calls,
+            "graph_calls": self._graph_calls,
+            "capture_failures": self._capture_failure_count,
+            "graphs_captured": len([k for k, v in self._slots.items() if v is not self._FAILED]),
+        }
+
+
+def graph_wrap(fn: Any, *, name: str = "fn") -> Any:
+    """Wrap a capture-friendly ``fn(input: Tensor) -> Tensor`` with CUDA Graph replay.
+
+    The TK-016 phase 3.c "CUDA graph wrapper". Idempotent (wrapping an
+    already-wrapped callable is a no-op). On a CPU-only host, or for a
+    callable that is not capture-safe, the wrapper records nothing and
+    just runs ``fn`` eagerly -- capture is attempted lazily on first
+    same-shape call and any failure falls back to eager. Callers that
+    want the graph should call it with a capture-friendly body (e.g.
+    ``MiniMindOmni.forward`` at a fixed shape after the phase 3.b patch).
+    """
+    if not torch.cuda.is_available() or getattr(fn, _GRAPH_FN_MARKER, False):
+        return fn
+    return GraphFunction(fn, name=name)

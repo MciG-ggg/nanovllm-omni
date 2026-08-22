@@ -113,6 +113,12 @@ def load_minimind_omni_bundle(
     if device != "cpu":
         model = model.half()
     model = model.to(device)
+    # TK-016 3.b: materialize RoPE eagerly so the forward's lazy-init guard
+    # (a device->host scalar read that invalidates CUDA graph capture) never
+    # fires during inference. Must run AFTER .half()/.to(device) so the
+    # buffers come out fp32-on-device exactly like the old lazy branch
+    # produced (audio.wav parity MD5).
+    model.materialize_rope(device)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
     if device != "cpu":

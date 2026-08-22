@@ -1,20 +1,23 @@
 """CUDA Graph capture for capture-safe sub-paths in nanovllm-omni.
 
-The main ``MiniMindOmni.forward`` is NOT capture-safe on this model --
-its forward contains:
+The main ``MiniMindOmni.forward`` was NOT capture-safe on this model --
+the blocker was a data-dependent ``if self.thinker.freqs_cos[0, 0] == 0:``
+lazy-init check that reads a device tensor scalar (forces a CUDA sync;
+rejected by ``torch.cuda.graph``). A ``sum(...)`` MOE aux-loss generator
+and the ``out.audio_logits`` list were thought to be additional blockers,
+but on the MiniMind-O checkpoint (``use_moe=False``) they capture cleanly
+and replay bit-identical to eager.
 
-* a data-dependent ``if self.thinker.freqs_cos[0, 0] == 0:`` check
-  (forces a CUDA sync to read the tensor scalar; rejected by
-  ``torch.cuda.graph``);
-* a ``sum(l.mlp.aux_loss for l in ...)`` MOE aux-loss accumulation
-  whose Python generator produces a dynamic allocation pattern;
-* a ``out.audio_logits`` list of 8 tensors stored as a dynamic-shape
-  attribute on a HF output container.
+TK-016 phase 3.b removed the real blocker: ``bundle.py`` now calls the
+vendored model's ``materialize_rope()`` after load, and the forward guard
+is a CPU-side ``getattr(self, "_rope_materialized", False)`` flag with no
+device->host read. Verified on WSL: ``MiniMindOmni.forward`` captures
+under ``torch.cuda.graph`` (both prefill and a use_cache decode step) and
+replays bit-identical to eager, with audio.wav parity MD5 preserved.
 
-All three fail with ``cudaErrorStreamCaptureInvalidated``. vllm-omni
-PR #3796 confirms the same blocker for their MiniMind-O integration
-("Cannot copy between CPU and CUDA tensors during CUDA graph
-capture") and uses ``enforce_eager=True`` for the main forward.
+vllm-omni PR #3796 uses ``enforce_eager=True`` for their MiniMind-O
+integration; nanovllm-omni's phase 3.c wrapper will attempt capture and
+fall back to eager on any failure.
 
 The capture-safe sub-path we can graph is ``mimi.decode(codes)`` --
 a single static-shape call invoked once per ``run_one`` with the

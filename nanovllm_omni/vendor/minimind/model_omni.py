@@ -120,6 +120,36 @@ class MiniMindOmni(MiniMindForCausalLM):
         object.__setattr__(self, 'vision_encoder', vision_encoder)
         object.__setattr__(self, 'vision_processor', vision_processor)
 
+    def materialize_rope(self, device=None) -> None:
+        """Eagerly place thinker + talker RoPE buffers (capture-safe).
+
+        The forward's lazy-init read ``self.thinker.freqs_cos[0, 0]`` is a
+        device->host scalar transfer that invalidates CUDA graph capture.
+        bundle.py materializes the buffers once after model load and sets
+        ``_rope_materialized``; the forward guard then never fires during
+        inference (or capture).
+
+        Values match the old lazy branch exactly (fp32 precompute, moved to
+        ``device`` without a dtype cast), so audio.wav parity MD5 is
+        preserved. TK-016 phase 3.b.
+        """
+        target = torch.device(device) if device is not None else self.thinker.freqs_cos.device
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim=self.config.head_dim,
+            end=self.config.max_position_embeddings,
+            rope_base=self.config.rope_theta,
+            rope_scaling=self.config.rope_scaling,
+        )
+        self.thinker.freqs_cos, self.thinker.freqs_sin = freqs_cos.to(target), freqs_sin.to(target)
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            dim=self.talker.talker_config.head_dim,
+            end=self.config.max_position_embeddings,
+            rope_base=self.config.rope_theta,
+            rope_scaling=self.config.rope_scaling,
+        )
+        self.talker.freqs_cos, self.talker.freqs_sin = freqs_cos.to(target), freqs_sin.to(target)
+        self._rope_materialized = True
+
     @staticmethod
     def load_sensevoice(path):
         if not os.path.exists(path):
@@ -255,13 +285,13 @@ class MiniMindOmni(MiniMindForCausalLM):
         n_thinker, n_talker = len(self.thinker.layers), len(self.talker.layers)
         past_key_values = past_key_values or ([None] * (n_thinker + n_talker))
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
-        if self.thinker.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
-            self.thinker.freqs_cos, self.thinker.freqs_sin = freqs_cos.to(input_ids.device), freqs_sin.to(input_ids.device)
-        if self.talker.freqs_cos[0, 0] == 0:
-            freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.talker.talker_config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
-            self.talker.freqs_cos, self.talker.freqs_sin = freqs_cos.to(input_ids.device), freqs_sin.to(input_ids.device)
+        # Recompute RoPE buffers lost during meta-device init (transformers>=5.x),
+        # guarded by a CPU-side flag so no device->host read happens here --
+        # required for CUDA graph capture. bundle.py calls materialize_rope()
+        # eagerly after load, so this branch is not taken during inference.
+        # TK-016 phase 3.b.
+        if not getattr(self, "_rope_materialized", False):
+            self.materialize_rope(input_ids.device)
         presents = []
 
         # ======= Thinker: text-only input, output text logits =======

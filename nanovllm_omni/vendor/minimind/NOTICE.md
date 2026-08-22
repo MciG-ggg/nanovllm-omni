@@ -8,11 +8,23 @@ Hugging Face checkpoint:
 - `model_minimind.py` — base `MiniMindConfig` and the underlying MiniMindForCausalLM transformer.
 
 Both files are byte-for-byte identical to upstream at the snapshot whose
-audio.wav parity MD5 was `536fad2aba93d7b5df76067195dca26c`. No edits have
-been applied. If you need to upgrade the vendored copy to a newer
-upstream commit, re-run the parity script and confirm the MD5 stays
-identical (the LM weights live in `pytorch_model.bin` and are loaded
-separately; only the modeling code is vendored here).
+audio.wav parity MD5 was `536fad2aba93d7b5df76067195dca26c`, **except** the
+single TK-016 phase 3.b patch below. If you need to upgrade the vendored
+copy to a newer upstream commit, re-apply the patch (the LM weights live
+in `pytorch_model.bin` and are loaded separately; only the modeling code
+is vendored here).
+
+## Local patches
+
+- **TK-016 phase 3.b (cuda-graph capture-friendly)**: `model_omni.py`
+  adds `MiniMindOmni.materialize_rope()`, and the forward's two
+  lazy-init RoPE checks (`if self.thinker.freqs_cos[0, 0] == 0:`, a
+  device->host scalar read) are replaced by a CPU-side
+  `getattr(self, "_rope_materialized", False)` guard. `bundle.py` calls
+  `materialize_rope(device)` eagerly after load. Semantically neutral --
+  audio.wav parity MD5 `536fad2aba93d7b5df76067195dca26c` is preserved,
+  and the forward now captures under `torch.cuda.graph` with bit-identical
+  eager vs replay output.
 
 ## Why vendored
 

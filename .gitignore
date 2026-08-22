@@ -101,3 +101,6 @@ Thumbs.db
 # Local planning scratch
 .scratch/
 .pi-tasks/
+
+# Project skills: shared (ci-safe-delivery) tracked; local dev-loop stays ignored
+.agents/skills/nanovllm-omni-wsl-loop/

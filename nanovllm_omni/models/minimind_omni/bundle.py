@@ -81,6 +81,9 @@ def load_minimind_omni_bundle(
     if device != "cpu":
         model = model.half()
     model = model.to(device)
+    from .attention import enable_sdpa_decode
+
+    enable_sdpa_decode(model)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
     if device != "cpu":

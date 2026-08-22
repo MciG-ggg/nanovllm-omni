@@ -85,10 +85,13 @@ packages = [
     "nanovllm_omni.models",
     "nanovllm_omni.models.minimind_omni",
     "nanovllm_omni.serving",
+    "nanovllm_omni.vendor",
+    "nanovllm_omni.vendor.minimind",
 ]
 
 [tool.setuptools.package-data]
 nanovllm_omni = ["configs/*.yaml"]
+"nanovllm_omni.vendor.minimind" = ["NOTICE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -107,9 +110,21 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]  # line length handled by formatter
 
+[tool.ruff.lint.per-file-ignores]
+# Vendored upstream code: byte-for-byte copy from jingyaogong/minimind-3o.
+# Lint / format would drift the file from upstream; exclude so future
+# vendoring upgrades stay easy (re-copy without re-formatting).
+"nanovllm_omni/vendor/**" = ["ALL"]
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+
+# Vendored upstream code: never reformat (would break parity with upstream).
+extend-exclude = '''
+/(
+    nanovllm_omni/vendor
+)/'''
 
 [tool.mypy]
 python_version = "3.11"

@@ -104,3 +104,6 @@ Thumbs.db
 
 # Project skills: shared (ci-safe-delivery) tracked; local dev-loop stays ignored
 .agents/skills/nanovllm-omni-wsl-loop/
+
+# Experiment perf artifacts are local-only; never committed (decided 2026-08-22)
+docs/perf/

@@ -23,8 +23,11 @@ def _sample_audio_codes(
         for previous in audio_codes[layer][-3:]:
             logits[row, previous] /= 1.05
     top_values, top_indices = logits.topk(50, dim=-1)
-    sampled = torch.multinomial(functional.softmax(top_values, dim=-1), 1)
-    codes = top_indices.gather(1, sampled).flatten().tolist()
+    probabilities = functional.softmax(top_values, dim=-1)
+    # Keep one multinomial call per stream: batching this call changes the
+    # Philox draw order and therefore changes subsequent text samples.
+    sampled = torch.cat([torch.multinomial(probabilities[row], 1) for row in range(len(active))])
+    codes = top_indices.gather(1, sampled[:, None]).flatten().tolist()
     return dict(zip(active, codes, strict=True))
 
 

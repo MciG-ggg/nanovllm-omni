@@ -28,9 +28,28 @@ def _sdpa_forward(
 
     module = __import__(type(self).__module__, fromlist=["apply_rotary_pos_emb"])
     query, key = module.apply_rotary_pos_emb(query, key, *position_embeddings)
-    if past_key_value is not None:
-        key = torch.cat([past_key_value[0], key], dim=1)
-        value = torch.cat([past_key_value[1], value], dim=1)
+    past_len = past_key_value[0].shape[1] if past_key_value is not None else 0
+    needed = past_len + seq_len
+    cache = getattr(self, "_nanovllm_kv_cache", None)
+    if cache is None or cache[0].shape[0] != batch_size or cache[0].shape[1] < needed:
+        capacity = max(needed, 128 if cache is None else cache[0].shape[1] * 2)
+        new_key = torch.empty(
+            batch_size,
+            capacity,
+            self.n_local_kv_heads,
+            self.head_dim,
+            dtype=key.dtype,
+            device=key.device,
+        )
+        new_value = torch.empty_like(new_key)
+        if cache is not None and past_len:
+            new_key[:, :past_len].copy_(cache[0][:, :past_len])
+            new_value[:, :past_len].copy_(cache[1][:, :past_len])
+        cache = (new_key, new_value)
+        self._nanovllm_kv_cache = cache
+    cache[0][:, past_len:needed].copy_(key)
+    cache[1][:, past_len:needed].copy_(value)
+    key, value = cache[0][:, :needed], cache[1][:, :needed]
     past = (key, value) if use_cache else None
 
     query = query.transpose(1, 2)
@@ -71,7 +90,7 @@ def _sdpa_forward(
 
 
 def enable_sdpa_decode(model: Any) -> int:
-    """Use PyTorch SDPA for one-token KV-cache decode on MiniMind attention."""
+    """Use PyTorch SDPA and a reusable KV buffer for MiniMind decode."""
     classes = {
         layer.self_attn.__class__
         for stack in (model.thinker.layers, model.talker.layers)

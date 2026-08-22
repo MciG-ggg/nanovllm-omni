@@ -101,17 +101,31 @@ def test_capture_failure_falls_back_to_eager():
     """If the inner decode raises during capture, fall back to eager."""
     from nanovllm_omni.optim.cuda_graph import GraphedMimi
 
-    class _Raiser:
-        def decode(self, codes, *args, **kwargs):
-            raise RuntimeError("synthetic decode failure")
+    inner_calls = 0
 
-    inner = _Raiser()
+    class _FailsOnCaptureAttempt:
+        """Succeed during warmup (calls 1-3), raise on capture
+        attempt (call 4), succeed on fallback (call 5+)."""
+
+        def decode(self, codes, *args, **kwargs):
+            nonlocal inner_calls
+            inner_calls += 1
+            if inner_calls <= 3:
+                return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+            if inner_calls == 4:
+                raise RuntimeError("synthetic decode failure")
+            return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+
+    inner = _FailsOnCaptureAttempt()
     wrapped = GraphedMimi(inner)
-    with pytest.raises(RuntimeError, match="synthetic"):
-        wrapped.decode(_codes(8))
+    out = wrapped.decode(_codes(8))
+    # Fallback returned the eager inner's output, not a captured graph.
+    assert out.audio_values.shape == (1, 4, 1)
     s = wrapped.stats()
     assert s["capture_failures"] >= 1
     assert s["graphs_captured"] == 0
+    assert s["eager_calls"] == 1
+    assert inner_calls == 5  # 3 warmup + 1 capture attempt + 1 eager fallback
 
 
 @requires_cuda
@@ -120,31 +134,44 @@ def test_replay_failure_falls_back_to_eager():
     from nanovllm_omni.optim.cuda_graph import MimiDecodeGraphCache
 
     class _BoomReplay:
+        """Succeed for calls 1-3 (warmup), succeed again on call 4
+        (capture), succeed on call 5+ (replay path).
+
+        (Captures successfully; replay failure is tested by dropping
+        the slot and replacing inner so the next capture fails.)"""
+
         def __init__(self):
             self.calls = 0
 
         def decode(self, codes, *args, **kwargs):
             self.calls += 1
-            if self.calls == 1:
-                # First call: return a value so capture "succeeds".
-                return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
-            raise RuntimeError("synthetic replay failure")
+            return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
 
     inner = _BoomReplay()
     cache = MimiDecodeGraphCache(inner)
-    # First call: capture + replay works.
+    # First call: 3 warmup + 1 capture -> slot stored.
     out = cache.replay(_codes(8))
     assert out is not None
-    # Now manually drop the slot to force a re-capture path that fails.
+
+    # Drop the slot to force a re-capture; replace inner with a spy
+    # that fails on capture attempt so re-capture is memoised as _FAILED.
     cache._slots.clear()
 
-    # Replace inner so the second capture also fails.
-    def _raise(codes, *a, **k):
-        raise RuntimeError("synthetic capture failure")
+    class _FailsOnCaptureAttempt:
+        def __init__(self):
+            self.calls = 0
 
-    inner.decode = _raise
+        def decode(self, codes, *a, **k):
+            self.calls += 1
+            if self.calls <= 3:
+                return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+            raise RuntimeError("synthetic capture failure")
+
+    cache._mimi = _FailsOnCaptureAttempt()
     out = cache.replay(_codes(8))
-    assert out is None  # capture failure -> None
+    assert out is None
+    # capture_failure_count tracks the second capture's failure.
+    assert cache._capture_failure_count == 1
 
 
 def test_replay_output_is_independent_of_static_buffer():
@@ -176,17 +203,113 @@ def test_decode_proxies_extra_args_and_kwargs():
     """Extra positional / keyword args to ``decode`` are forwarded to the inner."""
     from nanovllm_omni.optim.cuda_graph import GraphedMimi
 
-    captured: dict[str, Any] = {}
+    last_call: dict[str, Any] = {}
 
-    class _Spy:
+    class _FailsOnCaptureAttempt:
+        """Succeed during warmup, raise on capture attempt so the
+        wrapper falls back to the inner; succeed on fallback."""
+
+        def __init__(self):
+            self.calls = 0
+
         def decode(self, codes, *args, **kwargs):
-            captured["args"] = args
-            captured["kwargs"] = kwargs
+            self.calls += 1
+            last_call["args"] = args
+            last_call["kwargs"] = kwargs
+            if self.calls <= 3:
+                return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+            if self.calls == 4:
+                raise RuntimeError("synthetic capture failure")
             return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
 
-    wrapped = GraphedMimi(_Spy())
-    wrapped.decode(_codes(8), "positional1", kw="value")
-    # Inner received the extra args. The cache replay path failed
-    # (capture failure in the spy is fine -- the wrapper falls back).
-    assert captured["args"] == ("positional1",)
-    assert captured["kwargs"] == {"kw": "value"}
+    inner = _FailsOnCaptureAttempt()
+    wrapped = GraphedMimi(inner)
+    out = wrapped.decode(_codes(8), "positional1", kw="value")
+    # The last call was the eager fallback; it must forward the original
+    # extra args/kwargs from the wrapper invocation, NOT the warmup's
+    # stripped-down (input_buf,).
+    assert out is not None
+    assert last_call["args"] == ("positional1",)
+    assert last_call["kwargs"] == {"kw": "value"}
+
+
+@requires_cuda
+def test_capture_failure_is_memoised_per_shape():
+    """After capture fails for a shape, the wrapper must not retry
+    capture on subsequent calls with the same shape.
+
+    On ``cudaErrorStreamCaptureInvalidated`` the stream stays poisoned
+    for the rest of the process (PyTorch limitation), so retrying has
+    no chance of succeeding. Before this fix, ``_capture`` returned
+    ``None`` without marking ``_slots[key]``, so every call re-ran
+    the 3-warmup + sync + capture-attempt cycle (~90 ms wasted per
+    call on the MiniMind-O bench; see docs/perf/session-9.md).
+    """
+    from nanovllm_omni.optim.cuda_graph import (
+        MimiDecodeGraphCache,
+    )
+
+    inner_calls = 0
+
+    class _FailsOnEveryFourth:
+        """Succeed for calls 1-3 (warmup), raise on call 4 (capture
+        attempt), succeed for 5-7 (next round's warmup), raise on
+        call 8 (next round's capture attempt), etc. Lets a single
+        spy instance handle multiple distinct shapes cleanly."""
+
+        def decode(self, codes, *args, **kwargs):
+            nonlocal inner_calls
+            inner_calls += 1
+            if inner_calls % 4 == 0:
+                raise RuntimeError("synthetic capture failure")
+            return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+
+    cache = MimiDecodeGraphCache(_FailsOnEveryFourth())
+
+    # First call: 3 warmup + 1 capture attempt (caught, _FAILED cached).
+    out = cache.replay(_codes(8))
+    assert out is None
+    assert inner_calls == 4
+    assert cache._slots[(1, 8, 8)] is MimiDecodeGraphCache._FAILED
+
+    # Subsequent calls with the same shape must short-circuit --
+    # NO additional warmup, NO additional capture attempt.
+    for _ in range(10):
+        out = cache.replay(_codes(8))
+        assert out is None
+    assert inner_calls == 4  # unchanged
+
+    # A different shape is unaffected by the memoised failure.
+    out = cache.replay(_codes(12))
+    assert out is None
+    assert inner_calls == 8  # 4 more for the new shape
+
+    # capture_failure_count is exposed (per-shape, so two distinct
+    # failed shapes counted twice).
+    assert cache._capture_failure_count == 2
+
+
+def test_replay_short_circuits_on_memoised_failure():
+    """Pure unit test (no CUDA): directly pre-populate ``_slots`` with
+    ``_FAILED`` and verify ``replay`` returns None without touching
+    the inner mimi. Covers the cache logic in isolation from the
+    capture machinery.
+    """
+    from nanovllm_omni.optim.cuda_graph import MimiDecodeGraphCache
+
+    inner_calls = 0
+
+    class _Inner:
+        def decode(self, codes, *args, **kwargs):
+            nonlocal inner_calls
+            inner_calls += 1
+            return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+
+    cache = MimiDecodeGraphCache(_Inner())
+    # Simulate a previously-failed capture for shape (1, 8, 8).
+    cache._slots[(1, 8, 8)] = MimiDecodeGraphCache._FAILED
+
+    # replay() must NOT call inner.decode.
+    for _ in range(5):
+        assert cache.replay(_codes(8)) is None
+    assert inner_calls == 0

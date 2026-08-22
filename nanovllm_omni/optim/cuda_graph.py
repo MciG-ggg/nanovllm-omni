@@ -74,11 +74,27 @@ class MimiDecodeGraphCache:
     replay, copies the live input into a persistent buffer and runs
     the captured graph, returning a clone of the static output buffer
     (the static buffer is overwritten on the next call).
+
+    Capture failure is memoised per shape: a failed capture writes
+    :data:`_FAILED` into ``_slots[key]`` so subsequent calls with the
+    same shape short-circuit straight to the eager fallback instead
+    of re-running the 3-warmup + sync + capture-attempt cycle. On
+    ``cudaErrorStreamCaptureInvalidated`` the stream stays poisoned
+    for the rest of the process (PyTorch limitation), so retrying
+    has no chance of succeeding.
     """
+
+    # ponytail: class-level sentinel; id() is stable per process, equality
+    # is identity. Stored in _slots when capture fails for a shape.
+    _FAILED: object = object()
 
     def __init__(self, mimi: Any) -> None:
         self._mimi = mimi
-        self._slots: dict[tuple[int, ...], _MimiGraphSlot] = {}
+        # value is _MimiGraphSlot on success, _FAILED on memoised failure
+        self._slots: dict[tuple[int, ...], object] = {}
+        # how many times _capture wrote _FAILED into _slots (per shape,
+        # so repeated calls with the same shape only count once)
+        self._capture_failure_count: int = 0
 
     def replay(self, codes: torch.Tensor) -> torch.Tensor | None:
         """Replay the graph for ``codes.shape`` (capture on first sight).
@@ -91,25 +107,32 @@ class MimiDecodeGraphCache:
         slot = self._slots.get(key)
         if slot is None:
             slot = self._capture(codes, key)
-            if slot is None:
-                return None
-        slot.input_buf.copy_(codes)
+            # _capture writes _MimiGraphSlot or _FAILED into _slots[key]
+        if slot is self._FAILED:
+            return None
+        slot.input_buf.copy_(codes)  # type: ignore[union-attr]
         try:
-            slot.graph.replay()
+            slot.graph.replay()  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             _log.warning("graph replay failed for shape=%s: %s", key, exc)
+            # Replay failure is potentially transient (different from
+            # capture failure which always invalidates the stream).
+            # Drop the slot so the next call re-captures.
+            self._slots.pop(key, None)
             return None
-        return slot.output_buf.clone()
+        return slot.output_buf.clone()  # type: ignore[union-attr]
 
     def _capture(
         self,
         codes: torch.Tensor,
         key: tuple[int, ...],
-    ) -> _MimiGraphSlot | None:
+    ) -> object:
         # CPU-only hosts have no CUDA; the wrapper falls back to eager.
         if not torch.cuda.is_available():
             _log.info("skipping mimi.decode CUDA graph capture on CPU-only host")
-            return None
+            self._slots[key] = self._FAILED
+            self._capture_failure_count += 1
+            return self._FAILED
 
         # Persistent input buffer (allocated once per shape).
         input_buf = torch.empty_like(codes, memory_format=torch.contiguous_format)
@@ -136,7 +159,14 @@ class MimiDecodeGraphCache:
                 exc,
             )
             torch.cuda.current_stream().wait_stream(side)
-            return None
+            # ponytail: stream stays poisoned after StreamCaptureInvalidated,
+            # so retrying within this process has no chance of succeeding.
+            # Memoising the failure avoids repeating the 3-warmup + sync
+            # cost on every subsequent call with this shape (~90 ms saved
+            # per call on the MiniMind-O bench, see docs/perf/session-9.md).
+            self._slots[key] = self._FAILED
+            self._capture_failure_count += 1
+            return self._FAILED
 
         # Bind the side stream to the default so the next capture
         # (on a different shape) doesn't race the first one.
@@ -181,7 +211,6 @@ class GraphedMimi(torch.nn.Module):
         object.__setattr__(self, _GRAPH_MARKER, True)
         self._eager_calls: int = 0
         self._graph_calls: int = 0
-        self._capture_failures: int = 0
 
     def decode(self, codes: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
         cached = self._cache.replay(codes)
@@ -214,8 +243,10 @@ class GraphedMimi(torch.nn.Module):
         return {
             "eager_calls": self._eager_calls,
             "graph_calls": self._graph_calls,
-            "capture_failures": self._capture_failures,
-            "graphs_captured": len(self._cache._slots),
+            "capture_failures": self._cache._capture_failure_count,
+            "graphs_captured": len(
+                [k for k, v in self._cache._slots.items() if v is not self._cache._FAILED]
+            ),
         }
 
 

@@ -109,18 +109,37 @@ def run_generate(
     """
     import torch
 
+    from .generation import stream_generate_optimized
+
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
-        stream = model.generate(
-            input_ids,
-            eos_token_id,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stream=True,
-            return_audio_codes=True,
-            open_thinking=open_thinking,
-        )
+        if all(
+            hasattr(model, name)
+            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+        ):
+            stream = stream_generate_optimized(
+                model,
+                input_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                use_cache=True,
+                return_audio_codes=True,
+                open_thinking=open_thinking,
+            )
+        else:
+            # Keep lightweight/test doubles compatible with the public seam.
+            stream = model.generate(
+                input_ids,
+                eos_token_id,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stream=True,
+                return_audio_codes=True,
+                open_thinking=open_thinking,
+            )
         for _text_ids, audio_frame in stream:
             # ``generate.step`` shows up as a sub-event of ``generate`` in the
             # Kineto trace so per-iteration cost is visible in chrome://tracing.

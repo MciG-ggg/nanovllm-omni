@@ -47,6 +47,15 @@ def _maybe_apply_int8(bundle: object, enable: bool) -> None:
     quantize_thinker_int8(bundle.model)
 
 
+def _maybe_wrap_graph(bundle: object, enable: bool) -> None:
+    """Wrap ``bundle.model`` with the per-step CUDA Graph capture (TK-011 followup)."""
+    if not enable:
+        return
+    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+
+    bundle.model = graph_compile_model(bundle.model)
+
+
 def _load_bundle(args: argparse.Namespace):
     from nanovllm_omni.models.minimind_omni import create_bundle
 
@@ -58,6 +67,11 @@ def _load_bundle(args: argparse.Namespace):
     # through the un-quantised linears and produce graphs that don't match
     # the swapped-in bnb.Linear8bitLt modules.
     _maybe_apply_int8(bundle, enable=getattr(args, "int8", False))
+    # Graph wrapping is a thin ``nn.Module`` shell around the model --
+    # actual graph capture happens lazily on the first incremental
+    # forward call. Order doesn't matter vs. compile; the wrapper
+    # itself is cheap.
+    _maybe_wrap_graph(bundle, enable=getattr(args, "graph", False))
     return bundle
 
 
@@ -215,6 +229,8 @@ def cmd_trace_nsys(args: argparse.Namespace) -> int:
         target.append("--compile")
     if getattr(args, "int8", False):
         target.append("--int8")
+    if getattr(args, "graph", False):
+        target.append("--graph")
 
     cmd = [
         nsys,
@@ -267,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--int8",
         action="store_true",
         help="Quantise MLP linears to bitsandbytes int8 (skipped silently if bnb absent).",
+    )
+    common.add_argument(
+        "--graph",
+        action="store_true",
+        help="Capture per-step CUDA Graphs for the incremental forward calls.",
     )
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")

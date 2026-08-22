@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-import torch
+
+# Skip the whole file when torch is missing. See test_optim_bench.py
+# for the rationale; this is the same project convention.
+torch = pytest.importorskip("torch")
 
 # ---------------------------------------------------------------------------
 # Unit tests

@@ -1,80 +1,55 @@
-"""Tests for ``nanovllm_omni.optim.cuda_graph`` (TK-011 followup)."""
+"""Tests for ``nanovllm_omni.optim.cuda_graph`` (mimi-decode graph path).
+
+The previous implementation wrapped the MiniMindOmni thinker; the
+main forward was not capture-safe so the wrapper always fell back
+to eager. The new scope is much narrower -- only the mimi.decode
+call is intercepted -- so the tests focus on that.
+"""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
-import torch
+
+# Skip the whole file when torch is missing. See test_optim_bench.py
+# for the rationale; this is the same project convention.
+torch = pytest.importorskip("torch")
 
 # ---------------------------------------------------------------------------
-# Stubs (no real model load; a tiny linear-stack module that matches the
-# surface the cache needs -- ``forward(input_ids, past_key_values=...)``
-# returning a ``MoeCausalLMOutputWithPast``-shaped object).
+# Fake mimi model: a tiny stub that matches the surface
+# ``decode(codes)`` needs. The bench only touches ``.audio_values``.
 # ---------------------------------------------------------------------------
 
 
-class _FakeOutput:
-    """Stand-in for ``MoeCausalLMOutputWithPast`` used by the cache."""
+class _FakeMimi:
+    """Stand-in for the HF ``MimiModel`` used by the bench harness."""
 
-    def __init__(self, *, logits, past_key_values, audio_logits, aux_loss):
-        self.logits = logits
-        self.past_key_values = past_key_values
-        self.audio_logits = audio_logits
-        self.aux_loss = aux_loss
+    def __init__(self, audio_length: int = 96) -> None:
+        # Some attribute the wrapper must proxy through.
+        self.some_attr = 42
+        self._audio_length = audio_length
 
-
-class _FakeInner(torch.nn.Module):
-    """Linear-stack fake that mimics the per-step forward contract:
-
-    * input shape: ``[B, 9, 1]`` (1 text + 8 audio channels, single token)
-    * past_kvs: list of ``(k, v)`` per layer, each ``[B, n_heads, N, head_dim]``
-    * output past_kvs: list of ``(k, v)`` per layer, each ``[B, n_heads, N+1, head_dim]``
-    * logits: ``[B, 1, vocab]``
-    * audio_logits: list of 8 tensors ``[B, 1, audio_vocab]``
-    * aux_loss: scalar
-    """
-
-    VOCAB = 32
-    AUDIO_VOCAB = 16
-    N_LAYERS = 2
-    N_HEADS = 2
-    HEAD_DIM = 4
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.lin = torch.nn.Linear(9, 9)  # placeholder; the fake forward ignores weights
-        # Reusable zero KV so all "captures" see consistent state.
-        self._zero_kv_template: tuple[torch.Tensor, torch.Tensor] = (
-            # MiniMind-O layout: [B, seq, n_heads, head_dim]
-            torch.zeros(1, 0, self.N_HEADS, self.HEAD_DIM),
-            torch.zeros(1, 0, self.N_HEADS, self.HEAD_DIM),
-        )
-
-    def forward(self, input_ids, past_key_values=None, **kwargs):  # noqa: D401
-        # past_key_values is a list of (k, v) per layer; each is
-        # [B, seq, n_heads, head_dim] (MiniMind-O layout -- cat on dim=1).
-        # Build new past = past + [0]*1 in seq.
-        new_past = []
-        for _layer_idx, (k, v) in enumerate(
-            past_key_values or [self._zero_kv_template] * self.N_LAYERS
-        ):
-            new_k = torch.cat([k, torch.zeros(1, 1, self.N_HEADS, self.HEAD_DIM)], dim=1)
-            new_v = torch.cat([v, torch.zeros(1, 1, self.N_HEADS, self.HEAD_DIM)], dim=1)
-            new_past.append((new_k, new_v))
-        logits = torch.zeros(1, 1, self.VOCAB)
-        audio_logits = [torch.zeros(1, 1, self.AUDIO_VOCAB) for _ in range(8)]
-        return _FakeOutput(
-            logits=logits,
-            past_key_values=new_past,
-            audio_logits=audio_logits,
-            aux_loss=torch.zeros(()),
+    def decode(self, codes: torch.Tensor) -> Any:
+        # codes: [B, 8, T]. Produce a fake audio tensor [B, T_audio, 1].
+        b = codes.shape[0]
+        return SimpleNamespace(
+            audio_values=torch.zeros(b, self._audio_length, 1),
         )
 
 
-def _build_past(n_layers: int, n_heads: int, head_dim: int, past_len: int) -> list:
-    return [
-        (torch.zeros(1, past_len, n_heads, head_dim), torch.zeros(1, past_len, n_heads, head_dim))
-        for _ in range(n_layers)
-    ]
+def _codes(t: int = 8) -> torch.Tensor:
+    return torch.zeros(1, 8, t, dtype=torch.long)
+
+
+# Skip the graph-capture path on CPU-only hosts; the rest of the
+# tests (idempotency, attribute proxying, fallback paths) still
+# run and verify the wrapper structure.
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA graph capture needs a CUDA device",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -82,109 +57,136 @@ def _build_past(n_layers: int, n_heads: int, head_dim: int, past_len: int) -> li
 # ---------------------------------------------------------------------------
 
 
-def test_graph_compile_model_is_idempotent():
+def test_graph_compile_mimi_is_idempotent():
     """Wrapping twice is a no-op (the second call returns the same wrapper)."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
 
-    inner = _FakeInner()
-    wrapped1 = graph_compile_model(inner)
-    wrapped2 = graph_compile_model(wrapped1)
+    inner = _FakeMimi()
+    wrapped1 = graph_compile_mimi(inner)
+    wrapped2 = graph_compile_mimi(wrapped1)
     assert wrapped1 is wrapped2
-    # And ``forward`` is still routed through the cache.
-    assert hasattr(wrapped1, "stats")
 
 
-def test_full_prompt_call_is_eager():
-    """First call (past_kvs is None) goes through eager, no graph capture."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+@requires_cuda
+def test_decode_routes_through_cache_after_successful_capture():
+    """After a successful capture, subsequent decodes go through the cache."""
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
 
-    inner = _FakeInner()
-    wrapped = graph_compile_model(inner)
-    full_input = torch.zeros(1, 9, 7)  # 7-token prompt
-    out = wrapped(full_input, past_key_values=None, use_cache=True)
-    assert out.logits.shape == (1, 1, _FakeInner.VOCAB)
+    inner = _FakeMimi()
+    wrapped = graph_compile_mimi(inner)
+    out = wrapped.decode(_codes(8))
+    # The fake's audio_values is [1, 96, 1]; cloned each call.
+    assert out.audio_values.shape == (1, 96, 1)
     s = wrapped.stats()
-    assert s["eager_calls"] == 1
-    assert s["graph_calls"] == 0
+    assert s["graphs_captured"] >= 1
+    assert s["graph_calls"] >= 1
+    assert s["eager_calls"] == 0
+
+
+@requires_cuda
+def test_different_input_shapes_capture_separate_graphs():
+    """Each ``codes.shape`` key gets its own graph slot."""
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
+
+    inner = _FakeMimi()
+    wrapped = graph_compile_mimi(inner)
+    for t in (4, 6, 8):
+        wrapped.decode(_codes(t))
+    s = wrapped.stats()
+    assert s["graphs_captured"] == 3
+
+
+@requires_cuda
+def test_capture_failure_falls_back_to_eager():
+    """If the inner decode raises during capture, fall back to eager."""
+    from nanovllm_omni.optim.cuda_graph import GraphedMimi
+
+    class _Raiser:
+        def decode(self, codes, *args, **kwargs):
+            raise RuntimeError("synthetic decode failure")
+
+    inner = _Raiser()
+    wrapped = GraphedMimi(inner)
+    with pytest.raises(RuntimeError, match="synthetic"):
+        wrapped.decode(_codes(8))
+    s = wrapped.stats()
+    assert s["capture_failures"] >= 1
     assert s["graphs_captured"] == 0
 
 
-def test_incremental_call_captures_and_replays():
-    """A second call (past_kvs of length N) gets graphed and replays match eager."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+@requires_cuda
+def test_replay_failure_falls_back_to_eager():
+    """If replay raises, the next call goes through the eager inner."""
+    from nanovllm_omni.optim.cuda_graph import MimiDecodeGraphCache
 
-    inner = _FakeInner()
-    wrapped = graph_compile_model(inner)
-    # First call: full prompt, past_kvs None.
-    full_input = torch.zeros(1, 9, 7)
-    wrapped(full_input, past_key_values=None, use_cache=True)
-    # Second call: incremental with past_len=0.
-    inc_input = torch.zeros(1, 9, 1)
-    past0 = _build_past(_FakeInner.N_LAYERS, _FakeInner.N_HEADS, _FakeInner.HEAD_DIM, 0)
-    out = wrapped(inc_input, past_key_values=past0, use_cache=True)
-    s = wrapped.stats()
-    assert s["graphs_captured"] == 1
-    assert s["graph_calls"] == 1
-    # Output present must have past_len=1.
-    assert out.past_key_values[0][0].shape == (1, 1, _FakeInner.N_HEADS, _FakeInner.HEAD_DIM)
-    # Replay the same shape: graph_calls should go up, no new graph captured.
-    wrapped(inc_input, past_key_values=past0, use_cache=True)
-    s2 = wrapped.stats()
-    assert s2["graphs_captured"] == 1
-    assert s2["graph_calls"] == 2
+    class _BoomReplay:
+        def __init__(self):
+            self.calls = 0
 
+        def decode(self, codes, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # First call: return a value so capture "succeeds".
+                return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+            raise RuntimeError("synthetic replay failure")
 
-def test_different_past_lens_capture_separate_graphs():
-    """Each past_len gets its own graph."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+    inner = _BoomReplay()
+    cache = MimiDecodeGraphCache(inner)
+    # First call: capture + replay works.
+    out = cache.replay(_codes(8))
+    assert out is not None
+    # Now manually drop the slot to force a re-capture path that fails.
+    cache._slots.clear()
 
-    inner = _FakeInner()
-    wrapped = graph_compile_model(inner)
-    full_input = torch.zeros(1, 9, 7)
-    wrapped(full_input, past_key_values=None, use_cache=True)
-    inc = torch.zeros(1, 9, 1)
-    for n in range(3):
-        past = _build_past(_FakeInner.N_LAYERS, _FakeInner.N_HEADS, _FakeInner.HEAD_DIM, n)
-        wrapped(inc, past_key_values=past, use_cache=True)
-    s = wrapped.stats()
-    assert s["graphs_captured"] == 3
-    assert s["graph_calls"] == 3
+    # Replace inner so the second capture also fails.
+    def _raise(codes, *a, **k):
+        raise RuntimeError("synthetic capture failure")
 
-
-def test_capture_failure_falls_back_to_eager():
-    """If capture raises, the wrapper falls back to eager without crashing."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
-
-    class Bad(torch.nn.Module):
-        def forward(self, x, past_key_values=None, **kwargs):
-            raise RuntimeError("synthetic forward failure")
-
-    wrapped = graph_compile_model(Bad())
-    inc = torch.zeros(1, 9, 1)
-    past = _build_past(2, 2, 4, 0)
-    # First incremental call: capture raises, fallback to eager (which also raises).
-    with pytest.raises(RuntimeError, match="synthetic"):
-        wrapped(inc, past_key_values=past, use_cache=True)
-    s = wrapped.stats()
-    assert s["capture_failures"] >= 1
+    inner.decode = _raise
+    out = cache.replay(_codes(8))
+    assert out is None  # capture failure -> None
 
 
 def test_replay_output_is_independent_of_static_buffer():
-    """Two consecutive replays return tensors whose data does not alias."""
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+    """Two consecutive replays return tensors that do not alias the buffer."""
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
 
-    inner = _FakeInner()
-    wrapped = graph_compile_model(inner)
-    full_input = torch.zeros(1, 9, 7)
-    wrapped(full_input, past_key_values=None, use_cache=True)
-    inc = torch.zeros(1, 9, 1)
-    past0 = _build_past(_FakeInner.N_LAYERS, _FakeInner.N_HEADS, _FakeInner.HEAD_DIM, 0)
-    out1 = wrapped(inc, past_key_values=past0, use_cache=True)
-    # Mutate past0; should not affect a subsequent replay (it copies into
-    # the static buffer).
-    past0[0][0].fill_(99.0)
-    out2 = wrapped(inc, past_key_values=past0, use_cache=True)
-    # Both outputs are zero (the fake forward does nothing with values),
-    # so we just check shapes and that the wrapper still works after the
-    # copy path.
-    assert out1.past_key_values[0][0].shape == out2.past_key_values[0][0].shape  # noqa: E501
+    inner = _FakeMimi()
+    wrapped = graph_compile_mimi(inner)
+    a = wrapped.decode(_codes(8))
+    b = wrapped.decode(_codes(8))
+    # The fake's audio_values is zeros; mutating one clone must not
+    # affect the other. The clones live in separate memory.
+    a.audio_values.fill_(99.0)
+    assert b.audio_values.abs().sum() == 0
+
+
+def test_wrapper_proxies_non_decode_attributes():
+    """Non-decode attributes go to the inner mimi via ``__getattr__``."""
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
+
+    inner = _FakeMimi()
+    inner.extra_attr = "hello"
+    wrapped = graph_compile_mimi(inner)
+    assert wrapped.some_attr == 42
+    assert wrapped.extra_attr == "hello"
+
+
+def test_decode_proxies_extra_args_and_kwargs():
+    """Extra positional / keyword args to ``decode`` are forwarded to the inner."""
+    from nanovllm_omni.optim.cuda_graph import GraphedMimi
+
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        def decode(self, codes, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(audio_values=torch.zeros(1, 4, 1))
+
+    wrapped = GraphedMimi(_Spy())
+    wrapped.decode(_codes(8), "positional1", kw="value")
+    # Inner received the extra args. The cache replay path failed
+    # (capture failure in the spy is fine -- the wrapper falls back).
+    assert captured["args"] == ("positional1",)
+    assert captured["kwargs"] == {"kw": "value"}

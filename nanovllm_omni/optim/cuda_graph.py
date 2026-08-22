@@ -1,33 +1,39 @@
-"""CUDA Graph capture for MiniMind-O's per-step forward (TK-011 followup).
+"""CUDA Graph capture for capture-safe sub-paths in nanovllm-omni.
 
-The bench profile-detail on session-1.md showed ``generate`` fires
-~17 000 ``cudaLaunchKernel`` calls per second of wall time, but only
-~28 ms of those are real ``cutlass`` matmul work -- the other ~510 ms
-is per-kernel launch + dispatch overhead. ``torch.compile`` (TK-015)
-cannot reach this: it traces ``forward``, not the Python generator's
-``yield`` boundary, so the per-step launch overhead stays in eager
-mode.
+The main ``MiniMindOmni.forward`` is NOT capture-safe on this model --
+its forward contains:
 
-The real lever is CUDA Graph capture of the per-step forward call.
-Each AR step inside ``model.stream_generate`` runs
-``self.forward(input_ids[...], past_key_values=past_kvs, ...)`` where
-``past_kvs`` grows by one position per step. CUDA Graphs need static
-shapes, so we capture one graph **per past_kvs length** (1 graph for
-prompt-length 0, 1 for length 1, ..., N-1 for length N-1) and replay
-the right one each step.
+* a data-dependent ``if self.thinker.freqs_cos[0, 0] == 0:`` check
+  (forces a CUDA sync to read the tensor scalar; rejected by
+  ``torch.cuda.graph``);
+* a ``sum(l.mlp.aux_loss for l in ...)`` MOE aux-loss accumulation
+  whose Python generator produces a dynamic allocation pattern;
+* a ``out.audio_logits`` list of 8 tensors stored as a dynamic-shape
+  attribute on a HF output container.
 
-The first call (the full-prompt forward where ``past_kvs is None``)
-always goes through eager -- its shape depends on the user prompt and
-capturing it is not worth the complexity. Only the incremental calls
-land in a graph.
+All three fail with ``cudaErrorStreamCaptureInvalidated``. vllm-omni
+PR #3796 confirms the same blocker for their MiniMind-O integration
+("Cannot copy between CPU and CUDA tensors during CUDA graph
+capture") and uses ``enforce_eager=True`` for the main forward.
+
+The capture-safe sub-path we can graph is ``mimi.decode(codes)`` --
+a single static-shape call invoked once per ``run_one`` with the
+collected audio code list. The bench profile-detail on session-1.md
+shows the decode stage fires ~1 000 ``cudaLaunchKernel`` calls; the
+graph path collapses these into a single launch. Expected saving is
+modest (decode is ~3% of total) but the same pattern vllm-omni
+applies to the Talker MTP path.
 
 This module exposes:
 
-* :class:`StepGraphCache` -- the capture/replay engine.
-* :class:`GraphedMiniMindOmni` -- a thin wrapper that routes incremental
-  forward calls through the cache and falls back to eager when the
-  graph for that ``past_len`` is not yet captured.
-* :func:`graph_compile_model` -- entry point used by the bench CLI.
+* :class:`MimiDecodeGraphCache` -- one CUDA graph per input shape
+  (keyed by ``codes.shape``), with a persistent input buffer and
+  a cloned output buffer.
+* :class:`GraphedMimi` -- thin ``nn.Module`` wrapper that routes
+  ``decode(codes)`` through the cache and falls back to eager on any
+  capture / replay failure. All other attributes delegate to the
+  inner mimi model.
+* :func:`graph_compile_mimi` -- entry point used by the bench CLI.
 """
 
 from __future__ import annotations
@@ -41,239 +47,158 @@ import torch
 
 _log = logging.getLogger(__name__)
 
-# Ponytail: graph capture can fail on dynamic shapes or unsupported ops;
-# fall back to eager. The CLI prints the actual path taken via the
-# capture/replay log lines.
-_GRAPH_MARKER = "_nano_vllm_graphed_v1"
-_SIDE_STREAM_NAME = "nano_vllm_capture_stream"
+_GRAPH_MARKER = "_nano_vllm_mimi_graphed_v1"
 
 
 @dataclass
-class _GraphSlot:
-    """Static buffers + the captured graph for one ``past_len``."""
+class _MimiGraphSlot:
+    """Static buffers + captured graph for one mimi input shape."""
 
     graph: torch.cuda.CUDAGraph
-    input_ids_buf: torch.Tensor
-    past_kvs_buf: list  # list of (k_buf, v_buf) per layer
-    output_present_buf: list  # list of (k_buf, v_buf) per layer, length past_len+1
-    output_logits_buf: torch.Tensor
-    output_audio_logits_buf: list  # list of 8 tensors (one per audio channel)
-    output_aux_loss_buf: torch.Tensor
+    input_buf: torch.Tensor
+    output_buf: torch.Tensor  # cloned audio_values buffer
 
 
 def _cuda_side_stream() -> torch.cuda.Stream:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     return s
 
 
-class StepGraphCache:
-    """Per-step-length CUDA Graph cache for a MiniMind-O forward call.
+class MimiDecodeGraphCache:
+    """Per-input-shape CUDA Graph cache for ``mimi.decode``.
 
-    Each captured graph uses pre-allocated static input/output buffers
-    keyed by ``past_len``. On replay we copy the current
-    ``past_key_values`` into the static buffers, replay the graph, and
-    return cloned outputs (cloned because the static output buffers are
-    overwritten on the next call).
+    Captures one graph per distinct ``codes.shape`` on first use. On
+    replay, copies the live input into a persistent buffer and runs
+    the captured graph, returning a clone of the static output buffer
+    (the static buffer is overwritten on the next call).
     """
 
-    def __init__(self, model: Any) -> None:
-        self._model = model
-        self._slots: dict[int, _GraphSlot] = {}
+    def __init__(self, mimi: Any) -> None:
+        self._mimi = mimi
+        self._slots: dict[tuple[int, ...], _MimiGraphSlot] = {}
 
-    def has(self, past_len: int) -> bool:
-        return past_len in self._slots
+    def replay(self, codes: torch.Tensor) -> torch.Tensor | None:
+        """Replay the graph for ``codes.shape`` (capture on first sight).
 
-    def capture(
-        self,
-        past_len: int,
-        sample_input_ids: torch.Tensor,
-        sample_past_kvs: list,
-        **forward_kwargs: Any,
-    ) -> None:
-        """Capture one graph for ``past_len``.
-
-        ``sample_input_ids`` and ``sample_past_kvs`` are the actual tensors
-        passed to ``model.forward`` on the first incremental call --
-        their shapes define the captured graph's I/O.
+        Returns the cloned ``audio_values`` tensor on success, or
+        ``None`` on capture / replay failure (caller falls back to
+        eager).
         """
-        # Static input buffers (allocated copies).
-        input_ids_buf = torch.empty_like(sample_input_ids, memory_format=torch.contiguous_format)
-        input_ids_buf.copy_(sample_input_ids)
+        key = tuple(codes.shape)
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._capture(codes, key)
+            if slot is None:
+                return None
+        slot.input_buf.copy_(codes)
+        try:
+            slot.graph.replay()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("graph replay failed for shape=%s: %s", key, exc)
+            return None
+        return slot.output_buf.clone()
 
-        past_kvs_buf: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for k, v in sample_past_kvs:
-            k_buf = torch.empty_like(k, memory_format=torch.contiguous_format)
-            v_buf = torch.empty_like(v, memory_format=torch.contiguous_format)
-            k_buf.copy_(k)
-            v_buf.copy_(v)
-            past_kvs_buf.append((k_buf, v_buf))
+    def _capture(
+        self,
+        codes: torch.Tensor,
+        key: tuple[int, ...],
+    ) -> _MimiGraphSlot | None:
+        # CPU-only hosts have no CUDA; the wrapper falls back to eager.
+        if not torch.cuda.is_available():
+            _log.info("skipping mimi.decode CUDA graph capture on CPU-only host")
+            return None
+
+        # Persistent input buffer (allocated once per shape).
+        input_buf = torch.empty_like(codes, memory_format=torch.contiguous_format)
+        input_buf.copy_(codes)
 
         # Warmup on a side stream so the first capture's JIT / cuDNN
-        # benchmark don't pollute the captured graph.
+        # benchmark don't pollute the recorded graph.
         side = _cuda_side_stream()
         with torch.cuda.stream(side):
             for _ in range(3):
-                _ = self._model(
-                    input_ids_buf,
-                    past_key_values=past_kvs_buf,
-                    **forward_kwargs,
-                )
+                _ = self._mimi.decode(input_buf)
         side.synchronize()
         torch.cuda.current_stream().wait_stream(side)
 
-        # Capture.
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=side):
-            out = self._model(
-                input_ids_buf,
-                past_key_values=past_kvs_buf,
-                **forward_kwargs,
+        try:
+            with torch.cuda.graph(graph, stream=side):
+                out = self._mimi.decode(input_buf)
+                output_buf = out.audio_values.clone()
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "graph capture failed for mimi.decode shape=%s: %s",
+                key,
+                exc,
             )
-            # Materialise output buffers we want to read on replay.
-            # Clone the lists so the captured graph's tensors are kept
-            # alive (the original `out.past_key_values` Python list will
-            # be released when the context manager exits).
-            output_present_buf = [(k.clone(), v.clone()) for k, v in out.past_key_values]
-            output_logits_buf = out.logits.clone()
-            output_audio_logits_buf = [t.clone() for t in out.audio_logits]
-            output_aux_loss_buf = (
-                out.aux_loss.clone() if out.aux_loss is not None else torch.zeros(())
-            )
+            torch.cuda.current_stream().wait_stream(side)
+            return None
 
-        # Set the side stream to wait for the default stream so the
-        # next graph capture (on a different past_len) doesn't race.
+        # Bind the side stream to the default so the next capture
+        # (on a different shape) doesn't race the first one.
         torch.cuda.current_stream().wait_stream(side)
         graph.replay()  # one initial replay to bind all pointers
         torch.cuda.synchronize()
 
-        self._slots[past_len] = _GraphSlot(
-            graph=graph,
-            input_ids_buf=input_ids_buf,
-            past_kvs_buf=past_kvs_buf,
-            output_present_buf=output_present_buf,
-            output_logits_buf=output_logits_buf,
-            output_audio_logits_buf=output_audio_logits_buf,
-            output_aux_loss_buf=output_aux_loss_buf,
-        )
+        slot = _MimiGraphSlot(graph=graph, input_buf=input_buf, output_buf=output_buf)
+        self._slots[key] = slot
         _log.info(
-            "captured CUDA graph for past_len=%d (output present shape=%s, %d layers)",
-            past_len,
-            output_present_buf[0][0].shape,
-            len(output_present_buf),
+            "captured mimi.decode CUDA graph for shape=%s (output shape=%s)",
+            key,
+            tuple(output_buf.shape),
         )
-
-    def replay(
-        self,
-        past_len: int,
-        input_ids: torch.Tensor,
-        past_kvs: list,
-        **forward_kwargs: Any,
-    ) -> tuple[list, torch.Tensor, list, torch.Tensor]:
-        """Replay the graph for ``past_len`` and return cloned outputs.
-
-        Returns ``(past_key_values, logits, audio_logits, aux_loss)``.
-        """
-        slot = self._slots[past_len]
-        # Copy inputs into the static buffers.
-        slot.input_ids_buf.copy_(input_ids)
-        for (k_buf, v_buf), (k, v) in zip(slot.past_kvs_buf, past_kvs, strict=True):
-            k_buf.copy_(k)
-            v_buf.copy_(v)
-        # Replay.
-        slot.graph.replay()
-        # Clone outputs (the static buffers are overwritten on next call).
-        present = [(k.clone(), v.clone()) for k, v in slot.output_present_buf]
-        logits = slot.output_logits_buf.clone()
-        audio_logits = [t.clone() for t in slot.output_audio_logits_buf]
-        aux_loss = slot.output_aux_loss_buf.clone()
-        return present, logits, audio_logits, aux_loss
+        return slot
 
 
-class GraphedMiniMindOmni(torch.nn.Module):
-    """Wraps a MiniMindOmni so incremental forward calls use CUDA Graphs.
+class _SimpleOut:
+    """Drop-in for the HF output container carrying ``audio_values``."""
 
-    The full-prompt call (where ``past_key_values`` is None) always uses
-    eager forward -- the prompt shape varies per request. Only the
-    incremental calls (one new token + past_kvs of length N) get
-    graphed, one graph per past_kvs length.
+    __slots__ = ("audio_values",)
 
-    The wrapper delegates everything else (attributes, sub-modules,
-    ``generate``, ``stream_generate``) to the inner model. Only
-    ``forward`` is intercepted.
+    def __init__(self, *, audio_values: torch.Tensor) -> None:
+        self.audio_values = audio_values
+
+
+class GraphedMimi(torch.nn.Module):
+    """Wraps a mimi model so ``decode(codes)`` replays via CUDA Graph.
+
+    The wrapper delegates everything else (other sub-modules, params,
+    ``encode``, ``__call__``, etc.) to the inner mimi model via
+    ``__getattr__``. Only ``decode`` is intercepted. On any capture
+    or replay failure the wrapper falls back to ``self._inner.decode``
+    so the bench can still run.
     """
 
     def __init__(self, inner: Any) -> None:
         super().__init__()
         self._inner = inner
-        self._cache = StepGraphCache(inner)
-        # Mark the wrapper so graph_compile_model is idempotent.
+        self._cache = MimiDecodeGraphCache(inner)
+        # Mark the wrapper so ``graph_compile_mimi`` is idempotent.
         object.__setattr__(self, _GRAPH_MARKER, True)
-        # Eager fallback counter (informational).
         self._eager_calls: int = 0
         self._graph_calls: int = 0
         self._capture_failures: int = 0
 
-    def forward(self, input_ids: torch.Tensor, **kwargs: Any) -> Any:
-        past_kvs = kwargs.get("past_key_values")
-        # Full-prompt call -- always eager.
-        if past_kvs is None or past_kvs[0] is None:
+    def decode(self, codes: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        cached = self._cache.replay(codes)
+        if cached is None:
             self._eager_calls += 1
-            return self._inner.forward(input_ids, **kwargs)
-
-        # MiniMind-O KV cache layout: [B, seq, n_heads, head_dim] -- the model
-        # concatenates past/new along dim=1 (the seq axis). The model's own
-        # ``start_pos`` is computed as ``past_key_values[0][0].shape[1]``.
-        past_len = past_kvs[0][0].shape[1]
-        # Strip past_key_values from kwargs; capture/replay inject it.
-        fwd_kwargs = {k: v for k, v in kwargs.items() if k != "past_key_values"}
-        if not self._cache.has(past_len):
-            try:
-                self._cache.capture(past_len, input_ids, past_kvs, **fwd_kwargs)
-            except Exception as exc:  # noqa: BLE001
-                # Ponytail: graph capture can fail on dynamic shapes;
-                # fall back to eager rather than crash the bench.
-                self._capture_failures += 1
-                _log.warning(
-                    "graph capture failed for past_len=%d: %s -- falling back to eager",
-                    past_len,
-                    exc,
-                )
-                return self._inner.forward(input_ids, **kwargs)
-
+            return self._inner.decode(codes, *args, **kwargs)
+        # Reconstruct the model's output container. The downstream
+        # code in ``decode_audio`` only touches ``.audio_values``, so
+        # a thin shim is enough; the HF ``BaseModelOutput`` is used
+        # when available to stay class-compatible.
         try:
-            present, logits, audio_logits, aux_loss = self._cache.replay(
-                past_len, input_ids, past_kvs, **kwargs
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Replay can fail on shape / value drift; fall back to eager.
-            self._capture_failures += 1
-            _log.warning(
-                "graph replay failed for past_len=%d: %s -- falling back to eager",
-                past_len,
-                exc,
-            )
-            return self._inner.forward(input_ids, **kwargs)
+            from transformers.modeling_outputs import BaseModelOutput
 
-        # Reconstruct the model's output container. We use the inner
-        # model's output class to stay compatible with downstream
-        # ``.logits`` / ``.audio_logits`` / ``.past_key_values`` access
-        # in ``stream_generate``.
-        try:
-            from transformers.modeling_outputs import (
-                MoeCausalLMOutputWithPast,
-            )
-
-            out = MoeCausalLMOutputWithPast(
-                aux_loss=aux_loss,
-                logits=logits,
-                past_key_values=present,
-            )
-            out.audio_logits = audio_logits
+            out: Any = BaseModelOutput()
+            out.audio_values = cached
         except ImportError:
-            # Fall back to a plain object -- ``stream_generate`` only
-            # touches ``.logits`` / ``.past_key_values`` / ``.audio_logits``.
-            out = _SimpleOut(logits=logits, past_key_values=present, audio_logits=audio_logits)
+            out = _SimpleOut(audio_values=cached)
         self._graph_calls += 1
         return out
 
@@ -294,21 +219,11 @@ class GraphedMiniMindOmni(torch.nn.Module):
         }
 
 
-class _SimpleOut:
-    __slots__ = ("logits", "past_key_values", "audio_logits", "aux_loss")
+def graph_compile_mimi(mimi: Any) -> Any:
+    """Wrap ``mimi`` so ``decode(codes)`` replays via CUDA Graph.
 
-    def __init__(self, *, logits, past_key_values, audio_logits, aux_loss=None) -> None:
-        self.logits = logits
-        self.past_key_values = past_key_values
-        self.audio_logits = audio_logits
-        self.aux_loss = aux_loss
-
-
-def graph_compile_model(model: Any) -> Any:
-    """Wrap ``model`` so its incremental forward calls use CUDA Graphs.
-
-    Idempotent: wrapping an already-graphed model is a no-op.
+    Idempotent: wrapping an already-graphed mimi is a no-op.
     """
-    if getattr(model, _GRAPH_MARKER, False):
-        return model
-    return GraphedMiniMindOmni(model)
+    if getattr(mimi, _GRAPH_MARKER, False):
+        return mimi
+    return GraphedMimi(mimi)

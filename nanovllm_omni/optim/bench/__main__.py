@@ -48,12 +48,21 @@ def _maybe_apply_int8(bundle: object, enable: bool) -> None:
 
 
 def _maybe_wrap_graph(bundle: object, enable: bool) -> None:
-    """Wrap ``bundle.model`` with the per-step CUDA Graph capture (TK-011 followup)."""
+    """Wrap ``bundle.mimi`` with the mimi-decode CUDA Graph capture.
+
+    Only ``mimi.decode`` is capture-safe on this model; the main
+    thinker forward has data-dependent control flow and fails with
+    ``cudaErrorStreamCaptureInvalidated`` (vllm-omni PR #3796 hits
+    the same wall and uses ``enforce_eager=True`` for the main
+    forward). The graph here collapses the ~1 000 per-call
+    ``cudaLaunchKernel`` launches inside mimi.decode into a single
+    graph launch.
+    """
     if not enable:
         return
-    from nanovllm_omni.optim.cuda_graph import graph_compile_model
+    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
 
-    bundle.model = graph_compile_model(bundle.model)
+    bundle.mimi = graph_compile_mimi(bundle.mimi)
 
 
 def _load_bundle(args: argparse.Namespace):

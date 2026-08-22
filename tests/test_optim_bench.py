@@ -15,6 +15,13 @@ from typing import Any
 
 import pytest
 
+# Skip the whole file when torch is missing. AGENTS.md scopes the dev
+# extra to pytest+ruff+black; heavy ML deps (torch, transformers, ...)
+# live in the ``minimind`` extra and are NOT installed in CI. Local
+# runs that exercise the bench / compile / cuda-graph paths should
+# `uv pip install torch` (or ``uv sync --group minimind``) first.
+torch = pytest.importorskip("torch")
+
 # ---------------------------------------------------------------------------
 # Fakes (CPU-only; mirror MiniMind-O's surface enough for the helpers)
 # ---------------------------------------------------------------------------

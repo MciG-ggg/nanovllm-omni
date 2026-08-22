@@ -34,6 +34,17 @@
    python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
    python -m compileall -q nanovllm_omni
    ```
+   Or, equivalently, run the pre-commit hook (install once with
+   `./scripts/install-hooks.sh`):
+   ```bash
+   scripts/pre-commit
+   ```
+   The hook runs the lint, format, and public-API-import checks on
+   the whole repo. Slow checks (pytest, torch-using unit tests) live
+   in the GitHub Actions workflow -- `.github/workflows/ci.yml` --
+   not in the hook.
+6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
+7. Commit each ticket or coherent change separately with a descriptive message, then push only after the checks pass.
 6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
 7. Commit each ticket or coherent change separately with a descriptive message, then push only after the checks pass.
 

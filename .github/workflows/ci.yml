@@ -7,6 +7,8 @@ on:
     branches: [main]
 
 jobs:
+  # Fast path: lint + format + tests that don't need torch.
+  # Runs on the cheap dev extra only.
   lint-and-test:
     name: Lint + Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -27,9 +29,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install package without heavy ML deps; tests should not require GPU.
-          # Heavy deps (vllm, torch CUDA, diffusers, moshi) are guarded by
-          # try/except in module-level imports so unit tests can mock them.
+          # Dev extra: pytest + ruff + black. Heavy ML deps (torch, transformers,
+          # bitsandbytes) live in the ``minimind`` extra and are NOT installed
+          # here. The torch-using tests under tests/test_optim_{bench,compile,
+          # cuda_graph}.py use ``pytest.importorskip("torch")`` so they skip
+          # cleanly on this job.
           pip install -e ".[dev]"
 
       - name: Lint with ruff
@@ -40,7 +44,61 @@ jobs:
         run: |
           black --check nanovllm_omni/ tests/
 
-      - name: Run unit tests (skip smoke)
+      - name: Public-API import check
+        run: |
+          # The aligned public surface must stay importable.
+          # See AGENTS.md ``CI-equivalent checks``.
+          python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
+
+      - name: Compileall
+        run: |
+          python -m compileall -q nanovllm_omni
+
+      - name: Run unit tests (skip smoke + skip torch-requiring)
+        run: |
+          # -m "not smoke" excludes the smoke-marked tests (those need real
+          # model weights + GPU). The torch-using test files self-skip on
+          # the missing torch import; see test_optim_*.py docstrings.
+          pytest -m "not smoke" -v
+
+  # Slow path: same matrix, but with the CPU-only torch extra so the
+  # torch-using unit tests actually run. CUDA-specific graph tests still
+  # skip on this runner (no GPU); a real GPU runner is tracked
+  # separately.
+  lint-and-test-torch:
+    name: Lint + Test + torch (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dev + CPU torch
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          # CPU-only torch (no CUDA) keeps the wheel small while still
+          # letting the torch-using test files import + collect.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Lint with ruff
+        run: |
+          ruff check nanovllm_omni/ tests/
+
+      - name: Format check with black
+        run: |
+          black --check nanovllm_omni/ tests/
+
+      - name: Run unit tests with torch (skip smoke)
         run: |
           pytest -m "not smoke" -v
 

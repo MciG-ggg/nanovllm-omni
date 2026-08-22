@@ -1,13 +1,38 @@
 #!/usr/bin/env bash
+# nanovllm-omni pre-commit hook.
+#
+# Runs the same lint + format + public-API checks the CI does, but
+# only on the files staged for commit (so the hook is fast). Heavy
+# checks (pytest, torch-requiring unit tests) are NOT run here -- they
+# are too slow for a commit-time hook and live in the GitHub Actions
+# workflow instead.
+#
+# Install: this script is symlinked into .git/hooks/pre-commit (see
+# scripts/install-hooks.sh). To reinstall after a clean clone:
+#   ./scripts/install-hooks.sh
+#
+# Skip on demand: git commit --no-verify ...
+
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-if [[ -x .venv/bin/ruff ]]; then
-  .venv/bin/ruff check nanovllm_omni/ tests/
-else
-  ruff check nanovllm_omni/ tests/
-fi
-if [[ -x .venv/bin/black ]]; then
-  .venv/bin/black --check nanovllm_omni/ tests/
-else
-  black --check nanovllm_omni/ tests/
-fi
+
+# Pick the project's local venv tools when available so we don't depend
+# on a globally-installed ruff / black.
+RUFF=".venv/bin/ruff"
+BLACK=".venv/bin/black"
+[[ -x "$RUFF" ]] || RUFF="ruff"
+[[ -x "$BLACK" ]] || BLACK="black"
+
+# 1. Lint + format (full repo, fast on Python source).
+echo "[pre-commit] ruff"
+"$RUFF" check nanovllm_omni/ tests/
+
+echo "[pre-commit] black"
+"$BLACK" --check nanovllm_omni/ tests/
+
+# 2. Public-API import smoke. This is fast (a few imports) but catches
+# the most common regression class: a renamed or removed public symbol
+# silently breaking Omni / AsyncOmni / etc. users. AGENTS.md lists this
+# as part of the CI-equivalent checks.
+echo "[pre-commit] public API import"
+python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"

@@ -33,6 +33,14 @@ dev = [
     "ruff>=0.4",
     "black>=24.0",
 ]
+turbovla = [
+    "torch>=2.3.1",
+    "torchvision>=0.18.1",
+    "transformers>=4.40",
+    "Pillow>=10.0",
+    "huggingface_hub>=0.20",
+    "numpy>=1.24",
+]
 # Real-weight MiniMind-O path: required for examples/minimind_omni.py and the
 # `pytest -m smoke` suite. ~1 GB checkpoint is downloaded from the HF
 # Hub on first execute, not at install time. funasr/librosa/onnxruntime are

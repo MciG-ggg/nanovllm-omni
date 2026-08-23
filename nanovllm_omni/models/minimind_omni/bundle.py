@@ -82,8 +82,14 @@ def load_minimind_omni_bundle(
         model = model.half()
     model = model.to(device)
     from .attention import enable_sdpa_decode
+    from .qkv_fusion import enable_fused_projections
+    from .rms_norm import enable_fused_rmsnorm
+    from .rope import enable_fused_rope
 
     enable_sdpa_decode(model)
+    enable_fused_rmsnorm(model)
+    enable_fused_projections(model)
+    enable_fused_rope(model)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
     if device != "cpu":

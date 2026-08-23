@@ -33,10 +33,10 @@ dev = [
     "ruff>=0.4",
     "black>=24.0",
 ]
-turbovla = [
+smolvla = [
     "torch>=2.3.1",
-    "torchvision>=0.18.1",
     "transformers>=4.40",
+    "lerobot>=0.3",
     "Pillow>=10.0",
     "huggingface_hub>=0.20",
     "numpy>=1.24",
@@ -92,6 +92,7 @@ packages = [
     "nanovllm_omni.entrypoints",
     "nanovllm_omni.models",
     "nanovllm_omni.models.minimind_omni",
+    "nanovllm_omni.models.smolvla",
     "nanovllm_omni.serving",
 ]
 

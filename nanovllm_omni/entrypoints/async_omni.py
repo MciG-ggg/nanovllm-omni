@@ -27,4 +27,7 @@ class AsyncOmni(Omni):
         executor = self._ensure_executor()
         for prompt in prompts:
             payload = await executor.submit(prompt, sampling_params)
-            yield OmniRequestOutput.from_pipeline(payload)
+            yield OmniRequestOutput.from_pipeline(
+                payload,
+                final_output_type=self._final_output_type(),
+            )

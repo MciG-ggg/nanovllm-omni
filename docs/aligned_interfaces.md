@@ -46,7 +46,7 @@ The minimal field set for `StageConfig` after TICKET-02 (see `.scratch/aligned-i
 | `process_input` | `str \| None` | Dotted-path to the bridge hook (`"package.module:attr"`), or `None` for identity pass-through. | minimind_o (TICKET-05), reserved for future multi-stage models |
 | `input_sources` | `tuple[int, ...]` | Stage ids whose outputs feed this stage. Empty for the first stage. | All models |
 | `is_terminal` | `bool` | Marks the final stage whose output is the user-facing result. | All models |
-| `final_output_type` | `str \| None` | One of `"audio"`, `"video"`, `"image"`, `"text"`, `"actions"`. Drives `OmniRequestOutput.multimodal_output` key. | All models |
+| `final_output_type` | `str \| None` | One of `"audio"`, `"video"`, `"image"`, `"text"`, `"actions"`. Drives `OmniRequestOutput.multimodal_output` key. SmolVLA uses `"actions"` with an `ActionArtifact`. | All models |
 | `model_subdir` | `str \| None` | Subfolder name within the model checkpoint (e.g. `"language_model"`). | Reserved for TICKET-06 / future TTS-same-shape ticket |
 | `tokenizer_subdir` | `str \| None` | Subfolder for the tokenizer. | Reserved for future TTS-same-shape ticket |
 | `diffusers_class_name` | `str \| None` | Stable class name for diffusers-based diffusion stages. | TICKET-06 (Wan2.2) |
@@ -55,7 +55,7 @@ The minimal field set for `StageConfig` after TICKET-02 (see `.scratch/aligned-i
 
 | Field | Type | Purpose |
 |---|---|---|
-| `name` | `str` | Canonical model identifier (e.g. `"minimind_o"`, `"wan2_2_ti2v"`) |
+| `name` | `str` | Canonical model identifier (e.g. `"minimind_o"`, `"smolvla"`, `"wan2_2_ti2v"`) |
 | `stages` | `tuple[StageConfig, ...]` | Ordered stages. Length 1 = single-stage (diffusion); length N = multi-stage AR pipeline. |
 | `default_deploy_config_name` | `str` | Filename in `deploy/` whose contents are loaded into `DeployConfig`. |
 | `registration_handles` | `tuple[str, ...]` | Alternate keys under which this pipeline is registered (e.g. HF repo id `"jingyaogong/minimind-3o"`). Defaults to `(name,)`. |

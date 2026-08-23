@@ -130,6 +130,59 @@ def test_register_pipeline_adds_entry():
 
 
 # ---------------------------------------------------------------------------
+# PipelineConfig extra fields (TK-010-rev alignment with vllm-omni):
+# ``hf_architectures`` + ``hf_config_predicate`` drive the layer-6
+# disambiguator in ``OmniBase.try_infer_model_type``.
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_config_accepts_hf_architectures_and_predicate():
+    pred = lambda c: getattr(c, "version", "") == "4.5"  # noqa: E731
+    cfg = PipelineConfig(
+        name="fake_o",
+        stages=(
+            StageConfig(
+                stage_id=0,
+                name="only",
+                kind=StageExecutionType.LLM_AR,
+                factory="tests._stage_factories:thinker_simple",
+                is_terminal=True,
+            ),
+        ),
+        default_deploy_config_name="fake_o.yaml",
+        hf_architectures=("FakeArch",),
+        hf_config_predicate=pred,
+    )
+    assert cfg.hf_architectures == ("FakeArch",)
+    assert cfg.hf_config_predicate is pred
+
+
+def test_pipeline_config_hf_fields_default_to_empty():
+    cfg = PipelineConfig(
+        name="minimal",
+        stages=(
+            StageConfig(
+                stage_id=0,
+                name="only",
+                kind=StageExecutionType.LLM_AR,
+                factory="tests._stage_factories:thinker_simple",
+                is_terminal=True,
+            ),
+        ),
+        default_deploy_config_name="minimal.yaml",
+    )
+    assert cfg.hf_architectures == ()
+    assert cfg.hf_config_predicate is None
+
+
+def test_smolvla_pipeline_declares_hf_architectures():
+    """Lock the SmolVLA claim on the LeRobot policy class name."""
+    cfg = resolve_pipeline_config("smolvla")
+    assert cfg is not None
+    assert cfg.hf_architectures == ("SmolVLAPolicy",)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 (TK-016) contract tests: StageExecutionType enum + string-path
 # factory resolution. See /docs/aligned_interfaces.md and SPEC.md
 # "Module structure".

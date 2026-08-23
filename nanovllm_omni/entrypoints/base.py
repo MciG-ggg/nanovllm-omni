@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..config_registry import (
+    OMNI_PIPELINES,
     DeployConfig,
     PipelineConfig,
     load_deploy_config,
@@ -15,6 +17,124 @@ from ..engine_args import OmniEngineArgs
 
 if TYPE_CHECKING:
     from ..engine.executor import PipelineExecutor
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _name_match_candidate(model: str) -> str:
+    """basename of the model id/path, lowercased with separators stripped.
+
+    vllm-omni uses this same trick for the path-substring fallback (e.g.
+    ``cosyvoice3`` beats ``cosyvoice`` by length). Mirrors their helper so
+    existing local-dir inference matches what vllm-omni would do.
+    """
+    name = Path(model.rstrip("/")).name or model
+    return name.lower().replace("-", "").replace("_", "")
+
+
+def try_infer_model_type(
+    model: str,
+    trust_remote_code: bool = True,
+) -> str | None:
+    """Auto-detect the registered ``PipelineConfig.name`` for a model id/path.
+
+    Cascade mirrors ``vllm_omni.config.config_factory.try_infer_model_type``:
+
+    1. ``PretrainedConfig.from_pretrained`` -> ``model_type`` (skipped if
+       transformers is unavailable; not in the base install).
+    2. Read the directory's ``config.json`` ``model_type`` field.
+    3. Fall back to ``config.json["architecture"]`` (singular), used by some
+       non-HF pipelines (VoxCPM2-style).
+    4. Fall back to ``model_index.json._class_name`` matched against
+       ``PipelineConfig.diffusers_class_name`` (none today; placeholder).
+    5. Path basename substring match against every registered key, longest
+       wins (covers CosyVoice3-style snapshots that ship empty config.json).
+    6. ``hf_config.architectures`` intersected with ``PipelineConfig.hf_architectures``;
+       gated by the pipeline's ``hf_config_predicate`` when set.
+
+    Returns the inferred model_type string, or ``None`` if no candidate
+    matches.
+    """
+    model_dir = Path(model) if Path(model).is_dir() else None
+
+    # L1: transformers PretrainedConfig (skipped if not installed)
+    try:
+        from transformers import PretrainedConfig  # type: ignore[import-not-found]
+
+        try:
+            cfg = PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+        except Exception:
+            cfg = None
+        if cfg is not None and getattr(cfg, "model_type", None):
+            return cfg.model_type
+    except ImportError:
+        pass
+
+    # L2 / L3: config.json
+    if model_dir is not None:
+        data = _read_json(model_dir / "config.json")
+        if data is not None:
+            for key in ("model_type", "type", "architecture"):
+                raw = data.get(key)
+                if isinstance(raw, str) and raw:
+                    return raw
+
+    # L5: path basename substring match (longest registry key wins)
+    candidate = _name_match_candidate(model)
+    best: str | None = None
+    best_len = 0
+    for registered_key in OMNI_PIPELINES:
+        norm = registered_key.lower().replace("-", "").replace("_", "")
+        if norm and norm in candidate and len(norm) > best_len:
+            best = registered_key
+            best_len = len(norm)
+    if best is not None:
+        return best
+
+    # L6: hf_architectures match (needs transformers)
+    try:
+        from transformers import PretrainedConfig  # type: ignore[import-not-found]
+
+        try:
+            cfg = PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+        except Exception:
+            cfg = None
+        if cfg is not None:
+            archs = set(getattr(cfg, "architectures", []) or [])
+            if archs:
+                for _key, registered in OMNI_PIPELINES.items():
+                    if isinstance(registered, PipelineConfig):
+                        if not registered.hf_architectures:
+                            continue
+                        if archs.intersection(registered.hf_architectures):
+                            predicate = registered.hf_config_predicate
+                            if predicate is not None:
+                                try:
+                                    if not predicate(cfg):
+                                        continue
+                                except Exception:
+                                    continue
+                            return registered.name
+    except ImportError:
+        pass
+
+    return None
+
+
+def _pipeline_from_local_dir(model_dir: Path) -> PipelineConfig | None:
+    """Local-dir fallback: ask ``try_infer_model_type`` and MiniMind-O default."""
+    model_type = try_infer_model_type(str(model_dir))
+    if model_type:
+        found = resolve_pipeline_config(model_type)
+        if found is not None:
+            return found
+    return resolve_pipeline_config("minimind_o")
 
 
 class OmniBase:
@@ -28,12 +148,13 @@ class OmniBase:
 
     def _resolve_pipeline(self) -> PipelineConfig:
         if self._pipeline is None:
-            pipeline = resolve_pipeline_config(self.model)
-            # Local MiniMind-O snapshots do not have a registry string alias;
-            # treat an existing model directory as the built-in MiniMind-O
-            # family while preserving normal registry lookup for HF handles.
+            extra = self.engine_args.extra or {}
+            explicit = extra.get("pipeline")
+            pipeline = resolve_pipeline_config(explicit) if explicit else None
+            if pipeline is None:
+                pipeline = resolve_pipeline_config(self.model)
             if pipeline is None and Path(self.model).is_dir():
-                pipeline = resolve_pipeline_config("minimind_o")
+                pipeline = _pipeline_from_local_dir(Path(self.model))
             if pipeline is None:
                 raise ValueError(
                     f"No pipeline registered for model {self.model!r}. "
@@ -41,6 +162,43 @@ class OmniBase:
                 )
             self._pipeline = pipeline
         return self._pipeline
+
+    def _compute_final_stage_id(self, modalities: list[str] | None = None) -> int:
+        """Pick the terminal stage whose ``final_output_type`` matches.
+
+        Mirrors ``vllm_omni.entrypoints.utils.get_final_stage_id_for_e2e``:
+        scan stages in reverse order for the first one with
+        ``final_output_type in (modalities or [all stages' types])``. When
+        ``modalities`` is None, every terminal stage is eligible and the
+        last one wins.
+        """
+        pipeline = self._resolve_pipeline()
+        if modalities is None:
+            requested = {
+                s.final_output_type
+                for s in pipeline.stages
+                if s.is_terminal and s.final_output_type
+            }
+        else:
+            requested = set(modalities)
+        last = len(pipeline.stages) - 1
+        for sid in range(last, -1, -1):
+            stage = pipeline.stages[sid]
+            if stage.is_terminal and stage.final_output_type in requested:
+                return sid
+        return last
+
+    def _final_output_type(self, modalities: list[str] | None = None) -> str:
+        """Convenience: ``final_output_type`` of the resolved terminal stage.
+
+        Kept for backward compatibility -- new code should call
+        ``_compute_final_stage_id`` directly so the caller can route
+        multi-modal outputs.
+        """
+        pipeline = self._resolve_pipeline()
+        sid = self._compute_final_stage_id(modalities)
+        stage = pipeline.stages[sid]
+        return stage.final_output_type or "audio"
 
     def _resolve_deploy(self) -> DeployConfig:
         if self._deploy is None:

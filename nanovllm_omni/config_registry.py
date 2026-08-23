@@ -137,6 +137,14 @@ class PipelineConfig:
     stages: tuple[StageConfig, ...]
     default_deploy_config_name: str
     registration_handles: tuple[str, ...] = ()
+    # HF architecture aliases: disambiguates siblings that ship the same
+    # ``model_type`` (e.g. SmolVLA + a hypothetical next-gen variant). When
+    # ``try_infer_model_type`` finds multiple candidates by ``model_type`` or
+    # path basename, it intersects ``hf_config.architectures`` against this
+    # tuple and returns the first pipeline with a non-empty intersection
+    # whose ``hf_config_predicate`` (if any) accepts the loaded config.
+    hf_architectures: tuple[str, ...] = ()
+    hf_config_predicate: Callable[[Any], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +231,7 @@ def _load_builtin_pipelines() -> None:
     the imported modules call it. New families add one import here.
     """
     from nanovllm_omni.models.minimind_omni import pipeline as _minimind_pipeline  # noqa: F401
+    from nanovllm_omni.models.smolvla import pipeline as _smolvla_pipeline  # noqa: F401
 
 
 _load_builtin_pipelines()

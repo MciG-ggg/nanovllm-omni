@@ -20,7 +20,10 @@ class Omni(OmniBase):
     ) -> OmniRequestOutput:
         executor = self._ensure_executor()
         payload = executor._runner.run(prompt, sampling_params)
-        return OmniRequestOutput.from_pipeline(payload)
+        return OmniRequestOutput.from_pipeline(
+            payload,
+            final_output_type=self._final_output_type(),
+        )
 
     def generate(
         self,

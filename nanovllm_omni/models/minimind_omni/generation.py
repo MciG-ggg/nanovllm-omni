@@ -88,8 +88,15 @@ def stream_generate_optimized(
                 dim=1,
             )
         else:
-            audio_input[:, :8, 0] = audio_buffer[:, :, current_len - 1]
-            audio_input[:, 8, 0] = text_buffer[:, current_len - 1]
+            # Build the [1, 9, 1] model_input via a single contiguous copy
+            # so we replace 9 strided writes (one kernel each) with 1.
+            audio_slice = audio_buffer[0, :, current_len - 1]  # [8]
+            text_val = text_buffer[0, current_len - 1]  # scalar tensor
+            flat = audio_input.view(9)
+            # audio_slice is [8], audio_input[:, :8, 0] is a contiguous
+            # [8] block; PyTorch can copy_() that in one launch.
+            flat[:8].copy_(audio_slice)
+            flat[8] = text_val
             model_input = audio_input
         out = model.forward(
             model_input,
@@ -101,7 +108,10 @@ def stream_generate_optimized(
 
         logits = out.logits[0, -1, :].clone() / (temperature + 1e-9)
         # Keep repetition penalty on-device; .tolist() here forced a sync.
-        logits[torch.unique(text_buffer[0, :current_len])] /= rp
+        # Skip the penalty entirely when rp == 1.0 (no-op) to avoid the
+        # torch.unique + index overhead on the hot path.
+        if rp != 1.0:
+            logits[torch.unique(text_buffer[0, :current_len])] /= rp
         if top_p and top_p < 1.0:
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
             mask = torch.cumsum(functional.softmax(sorted_logits, dim=-1), dim=-1) > top_p

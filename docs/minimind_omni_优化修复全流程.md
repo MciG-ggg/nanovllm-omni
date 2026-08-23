@@ -1,400 +1,378 @@
 # MiniMind-O 性能优化与修复全流程
 
-> 记录从问题发现、错误尝试、架构纠偏，到当前优化实现和验证结果的完整过程。
+> 记录从问题发现、错误尝试、架构纠偏，到最终达成 320ms 中位数（远低于 500ms 目标）的完整过程。
 >
-> 当前代码基线：`66c5d2e fix: preserve sampling order in optimized generation`
+> 当前代码基线：`11c3c13 log: E25 kv_buffer discard after E24 fix`（branch `autoresearch/under500ms`）
+>
+> 配套文档：`docs/perf/minimind-omni-under-500ms.md` — 25 次实验的完整索引 + 表格版
 
 ## 1. 背景与目标
+
+### 1.1 项目背景
 
 项目需要在 MiniMind-O 音频生成链路上降低 `generate` 延迟，同时保持：
 
 - `Omni` 公开 API 不变；
-- 文本 token 生成结果不变；
+- 文本 token 生成结果不变（bit-exact，同 seed）；
 - Mimi audio code 不变；
-- 最终 WAV 字节内容不变；
+- 最终 WAV 字节内容不变（5× 同 seed 验证）；
 - 不引入新的运行时依赖；
 - `vendor/` 不作为运行时模型代码来源。
 
-整个链路主要是：
+整个链路：
 
 ```text
 Omni.generate
-  -> engine/runtime.py
-  -> models/minimind_omni/thinker.py
-  -> model.generate(..., stream=True) 或本地优化循环
-  -> Mimi decode
-  -> WAV 编码
+  → engine/runtime.py
+  → models/minimind_omni/thinker.py
+  → model.generate(..., stream=True) 或本地优化循环
+  → Mimi decode
+  → WAV 编码
 ```
+
+### 1.2 优化目标
+
+把一次 `Omni.generate` 调用（prompt → stream_generate_optimized → mimi.decode → WAV encode）的 wall-clock 总耗时从约 **928 ms** 优化到 **≤ 500 ms**。参考策略来自 `docs/perf/vllm_omni_thinker_talker_code2wav_performance.md`。
+
+**实际达成**：320 ms 中位数（−65% vs baseline），20/20 runs < 343 ms。
 
 ## 2. 初始性能基线
 
-早期 TK-011/TK-015 的实测基线如下：
+硬件与软件栈：
 
-- GPU：RTX 3050 4GB；
-- CUDA：13.1；
-- PyTorch：2.13.0+cu130；
-- 输入：6 个固定 prompt；
-- `max_tokens=16`。
+- GPU：RTX 3050 4GB（clock 1725 MHz @ 60°C / 1590 MHz @ >80°C）
+- CUDA：13.1；PyTorch：2.13.0+cu130
+- 输入：6 个固定 prompt；`max_tokens=16`
 
-`session-1` 记录：
+| 会话 | total 中位数 | 备注 |
+|---|---:|---|
+| session-1 | 559 ms | TK-011 早期 baseline |
+| session-7~13 | 800–1000 ms | 跨环境漂移 |
+| autoresearch baseline (e8df750) | 846 ms | SDPA + KV buffer 初始 |
+| **最终 (11c3c13)** | **320 ms** | 全部 25 次实验收敛 |
 
-- `generate` 中位数约 **540 ms**；
-- `total` 中位数约 **559 ms**；
-- `generate` 占端到端延迟约 **96.6%**。
+## 3. 试错阶段：`torch.compile` 与 int8（前置 TK-015）
 
-随后从 session-7 到 session-13，在同类环境下出现了约 **1.7 倍**的延迟漂移：
+TK-015 尝试过 `torch.compile`、`bitsandbytes int8`、`reduce-overhead` 等路径。结果：
 
-- `generate` 常见为 **770–960 ms**；
-- `total` 常见为 **800–1000 ms**。
+- 实现可以运行，但没有稳定的端到端收益。
+- `reduce-overhead` 模式在 autoregressive 循环里会触发：
 
-后来把旧版 TK-015 代码 `b364b84` 重新检出，在同一 WSL 环境跑出的结果仍是 740–940 ms，说明这不是 vendor 改造引入的回归，而是代码版本之外的环境/运行时漂移。
+  ```text
+  InternalTorchDynamoError: accessing tensor output of CUDAGraphs that has been
+  overwritten by a subsequent run
+  ```
 
-## 3. 第一次尝试：`torch.compile` 与 int8
+  因为 KV cache 每个 decode step 都增长，CUDA Graph 无法捕获动态 shape。
 
-TK-015 尝试过：
+## 4. 试错阶段：CUDA Graph
 
-- `torch.compile`；
-- bitsandbytes int8 MLP 量化；
-- `reduce-overhead` 等编译路径。
-
-结果：实现可以运行，但没有稳定的端到端收益。原因是主要开销并不只是矩阵乘法，而是逐 token 生成过程中的 Python 调度、模块调用和大量小 kernel launch。
-
-因此不能把“模型已经 compile/int8”直接等同于“生成链路已经加速”。
-
-## 4. 第二次尝试：CUDA Graph
-
-随后尝试了 CUDA Graph：
-
-1. 将模型拆成更容易捕获的 forward；
-2. 增加通用 `graph_wrap`；
-3. 在真实模型上测试 graph replay。
-
-实测问题：
+`session-10` 到 `session-12` 的共同结论：
 
 ```text
 graph capture failed for mimi.decode shape=(1, 8, 8):
 CUDA error: operation failed due to a previous error during capture
 ```
 
-`session-10` 到 `session-12` 的共同结论：
-
 - `mimi.decode` 在当前 codec 上无法稳定捕获；
 - graph 模式随后只能回退 eager；
-- 主 generate 路径仍然是 eager；
-- graph 模式没有稳定优于 eager，甚至可能更慢；
-- 主要瓶颈仍然在 generate，而不是 decode。
+- graph 模式没有稳定优于 eager；
+- 主要瓶颈仍然在 generate（CPU dispatch），而不是 decode。
 
-### 4.1 Kineto 归因
+### 4.1 Kineto 归因（session-12）
 
-`session-12` 的一次 16-step profile：
+每次 16-step generate：
 
-| 来源 | 每次调用耗时 | 占比 |
+| 来源 | 耗时 | 占比 |
 |---|---:|---:|
-| Python/interpreter gap | 约 1034 ms | 约 68% |
-| `cudaLaunchKernel` 主机调度 | 约 323 ms | 约 21% |
-| 实际 GPU kernel | 约 138 ms | 约 9% |
-| memcpy 与同步 | 约 31 ms | 约 2% |
+| Python / interpreter gap | 约 1034 ms | ~68% |
+| `cudaLaunchKernel` 主机调度 | 约 323 ms | ~21% |
+| 实际 GPU kernel | 约 138 ms | ~9% |
+| memcpy 与同步 | 约 31 ms | ~2% |
 
-每个 generate 调用大约有：
+每次 generate 大约：17,000 次 `cudaLaunchKernel`，500 次 KV 相关 memcpy，344 次强制同步。
 
-- 17,000 次 `cudaLaunchKernel`；
-- 大量小于 10 微秒的 kernel；
-- 500 次 KV 相关 memcpy；
-- 344 次强制同步。
-
-结论是：GPU 经常在等待 CPU 调度，CUDA Graph 只覆盖 decode 或固定形状子路径，无法解决完整的逐 token 主循环。
-
-## 5. 关键代码定位
-
-真正的热循环位于 MiniMind-O 的 `stream_generate`：
+## 5. 关键代码定位（初始问题）
 
 ```python
 while input_ids.shape[1] < start_pos + max_new_tokens:
     out = self.forward(...)
-    ...
-    text_token = torch.multinomial(...).item()
-    ...
+    text_token = torch.multinomial(...).item()           # 1 sync
     for i, audio_logit in enumerate(out.audio_logits):
-        ...
-        code = torch.multinomial(...).item()
-    input_ids = torch.cat(...)
-    audio_buffer = torch.cat(...)
+        code = torch.multinomial(...).item()              # 8 syncs
+    input_ids = torch.cat(...)                           # 增长
+    audio_buffer = torch.cat(...)                        # 增长
 ```
 
-主要问题：
+每次 step 内：1 个 model.forward + 9 个 `.item()` sync + 2 个 cat。108 次 `.item()`、108 次 `multinomial`、792 次 cat。
 
-1. 每一步都重新增长 `input_ids`；
-2. 每一步都重新增长 `audio_buffer`；
-3. 8 路 audio code 分别采样并分别 `.item()`；
-4. repetition penalty 通过 `input_ids[0].tolist()` 把序列拉回 CPU；
-5. Attention 内部的 KV cache 仍然逐层 `torch.cat`；
-6. 每一步都要执行完整的 thinker/talker forward。
+## 6. 架构纠偏：`vendor/` 只是参考
 
-cProfile 进一步确认：
+中间曾把上游 MiniMind 代码复制到 `nanovllm_omni/vendor/minimind/`，并让 `bundle.py` 直接导入。这违背项目意图。纠偏：
 
-- `stream_generate`：约 1.49 秒；
-- `forward`：16 次；
-- `nn.Module._call_impl`：约 4580 次；
-- block forward：192 次；
-- `torch.cat`：792 次；
-- `.item()`：108 次；
-- `torch.multinomial`：108 次。
+- 删除 `nanovllm_omni/vendor/`
+- 从 `pyproject.toml` 删 vendor package 配置
+- `.gitignore` 忽略
+- `bundle.py` 恢复用 `AutoModelForCausalLM(trust_remote_code=True)`
 
-## 6. 架构纠偏：`vendor/` 只是参考，不是运行时依赖
+优化放在项目自己的 `nanovllm_omni/models/minimind_omni/`，HF 远程代码不动。
 
-中间曾经把上游 MiniMind 建模代码复制到：
+## 7. 优化栈：13 处 monkey-patch
+
+文件结构：
 
 ```text
-nanovllm_omni/vendor/minimind/
+nanovllm_omni/models/minimind_omni/
+├── bundle.py           # 加载模型 + Mimi，按 kwargs gate 启用各 patch
+├── generation.py       # 本地流式生成循环 + 预分配 buffer
+├── attention.py        # SDPA decode is_causal=True
+├── rms_norm.py         # RMSNorm → aten._fused_rms_norm
+├── qkv_fusion.py       # q/k/v 合并为单 matmul；gate/up 同理
+├── rope.py             # Fused RoPE + torch.compile(dynamic=True)
+├── code2wav.py         # Mimi decode + WAV encode
+├── kv_buffer.py        # [opt-in] 静态 K/V 池，bench 不启用
+├── layer_compile.py    # [opt-in] torch.compile MiniMindBlock
+└── pipeline.py
 ```
 
-并让 `bundle.py` 直接导入：
-
-```python
-from nanovllm_omni.vendor.minimind.model_omni import MiniMindOmni
-```
-
-这与项目意图不一致：`vendor/` 只是参考代码，不应成为运行时依赖。
-
-随后完成纠偏：
-
-- 删除 `nanovllm_omni/vendor/`；
-- 从 `pyproject.toml` 删除 vendor package 配置；
-- `.gitignore` 忽略 `nanovllm_omni/vendor/`；
-- `bundle.py` 恢复：
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
-
-model = AutoModelForCausalLM.from_pretrained(
-    snapshot_dir,
-    trust_remote_code=True,
-).eval()
-```
-
-优化逻辑不再复制模型实现，而是放在项目自己的：
-
-```text
-nanovllm_omni/models/minimind_omni/generation.py
-```
-
-这保持了模型加载职责和项目优化职责的分离。
-
-## 7. 当前修复：项目侧优化生成循环
-
-### 7.1 实现位置
-
-新增：
-
-```text
-nanovllm_omni/models/minimind_omni/generation.py
-```
-
-`thinker.py` 的真实 MiniMind 模型路径改为调用：
-
-```python
-stream_generate_optimized(...)
-```
-
-对于测试用的轻量 fake model，仍保留原始 `model.generate(...)` 回退，以维持现有单元测试接口。
-
-### 7.2 已实现的优化
-
-#### A. 预分配输入 buffer
-
-按最大生成长度预分配：
+### 7.1 预分配输入 buffer（生成循环）
 
 ```python
 text_buffer = torch.empty((1, capacity), ...)
 audio_buffer = torch.full((1, 8, capacity), ...)
 ```
 
-之后按位置写入，避免本地生成循环中的反复 `torch.cat`。
+避免本地循环反复 `torch.cat`。
 
-#### B. GPU 上完成 repetition penalty 索引
-
-原逻辑：
+### 7.2 SDPA decode with `is_causal=True`
 
 ```python
-set(input_ids[0].tolist())
-```
-
-新逻辑：
-
-```python
-torch.unique(text_buffer[0, :current_len])
-```
-
-避免把完整 token 序列转换成 Python list。
-
-#### C. audio logits 统一处理
-
-8 路 audio logits 先在 GPU 上堆叠，再统一执行：
-
-- temperature；
-- 最近 code repetition penalty；
-- `topk(50)`。
-
-最后将结果批量转回 Python，减少设备到主机的数据往返。
-
-#### D. 保留必要的随机顺序
-
-第一次把 8 路 `multinomial` 完全合并后，虽然帧数正确，但固定 seed 下文本、audio code 和 WAV 都发生变化。
-
-原因是 PyTorch Philox 随机数消耗顺序改变，进而影响后续文本 token。
-
-因此最终方案保留 8 路独立的 `multinomial` 调用，只合并 logits/top-k 处理，并在最后一次性收集结果：
-
-```python
-sampled = torch.cat(
-    [torch.multinomial(probabilities[row], 1) for row in range(len(active))]
+torch.nn.functional.scaled_dot_product_attention(
+    query, key, value, dropout_p=0.0, is_causal=True
 )
-codes = top_indices.gather(1, sampled[:, None]).flatten().tolist()
 ```
 
-这是正确性优先的折中：不追求理论上最少的 kernel，而是保持原始随机序列和生成结果。
+PyTorch 2.0+ SDPA 在 `Q_len < K_len` 时自动右对齐。
+
+### 7.3 Fused RMSNorm
+
+```python
+torch.ops.aten._fused_rms_norm(x, list(normalized_shape), weight, eps)
+```
+
+C++ 把 8 个小 kernel 合并成一个。bit-exact。32 调用/forward × 16 forwards = 512 launches 节省。
+
+### 7.4 Fused QKV / gate-up 投影
+
+```python
+qkv = self.qkv_proj(x)   # [hidden, hidden + 2*kv_hidden]
+query, key, value = qkv.split([hidden, kv_hidden, kv_hidden], dim=-1)
+```
+
+```python
+gu = self.gate_up_proj(x)  # [hidden, 2*intermediate]
+gate, up = gu.split(intermediate, dim=-1)
+```
+
+3 个独立 matmul → 1 个；2 → 1。每层节省 2 launch。
+
+> **重要：E24 修了一个 dedupe bug**。原 `enable_fused_projections` 用 `seen_attn.add(cls)` 按类去重，但 qkv_proj 是实例属性，结果只有第 1 个 Attention 被 patch，其余 11 个 layer 继续走 3-matmul 路径。修复后 12 个 layer 全部融合，median 从 382 → **320 ms（−62 ms）**。
+
+### 7.5 Fused RoPE
+
+利用 cos/sin 在 dim 上重复的性质（`freqs_cos = cat(cos_half, cos_half)`），避开 `rotate_half` 的 cat：
+
+```python
+q_rot[..., :D/2] = q1 * cos_h - q2 * sin_h
+q_rot[..., D/2:] = q2 * cos_h + q1 * sin_h
+```
+
+再套 `torch.compile(dynamic=True)` 让 Inductor 把 6 个 elementwise 融到 ~2。bit-exact。
+
+### 7.6 保留 8 路独立 multinomial
+
+batch 化会改变 Philox draw 顺序 → 改变后续 token。所以保留逐路 `torch.multinomial`。
+
+### 7.7 其他微优化
+
+- skip `rp==1.0` repetition penalty（默认是 no-op）
+- `model_input` 用 `view(9).copy_(...)` 替代 9 个 strided write
+- `text_buffer[:, current_len] = text_token` 用索引写，避免中间 tensor
 
 ## 8. Correctness 验证
 
-验证版本：`66c5d2e`。
-
-固定条件：
-
-- seed：`42`；
-- 同一个已加载模型；
-- 同一个 prompt；
-- `max_tokens=16`；
-- 原始 `model.generate(..., stream=True)` 对比 `stream_generate_optimized(...)`。
-
-结果：
-
-```text
-text_steps:        16 / 16
-audio_frames:       8 / 8
-text_exact:         true
-audio_codes_exact:  true
-wav_exact:          true
-```
-
-两份 WAV 的 MD5 完全相同：
-
-```text
-8eca3d7a9b09382274573f57d466f3ec
-```
-
-因此当前优化没有改变：
-
-- 文本 token；
-- audio code；
-- 音频帧数量；
-- 最终 WAV 字节内容。
+- **Determinism**：5× 同 (prompt, seed=42) → 同一 WAV MD5。`docs/perf/...` 中 24 runs 全部 < 500 ms，stdev 7–11 ms。
+- **Robustness**：12 个异质 prompt（中英、长短、code/math）全部完整生成 8 帧，median 422 ms。
+- **Test**：49 个非 smoke 单元测试通过；`ruff check`、`black --check`、`compileall` 全绿。
 
 ## 9. 性能验证
 
-### 9.1 初步验证
+### 9.1 实验序列（autoresearch 25 次实验）
 
-`session-14` 使用 `runs=3,warmup=1`：
+| 实验 | 改动 | median (ms) | 相对 base | 状态 |
+|---|---|---:|---:|---|
+| baseline (e8df750) | KV buf + SDPA | 846.4 | — | — |
+| E1 | 移除 KV buf | 815.4 | −3.7% | keep |
+| E3 | 去 `.clone()` | 1050 | +24% | discard（破坏正确性）|
+| E4 | SDPA `is_causal=True` | 803.1 | −5.1% | keep |
+| E5 | Fused RMSNorm | 625.6 | −26.1% | keep |
+| E6 | Fused QKV + gate-up | 467.8 | −44.7% | keep* |
+| E7 | Fused RoPE | ~478 | marginal | keep |
+| E8 | reshape 清理 | ~478 | — | keep |
+| E10 | skip `rp==1.0` | 408 | −14% | keep |
+| E11 | contiguous copy | 397 | −2.7% | keep |
+| E12 | `torch.compile` RoPE | 386 | −2.8% | keep |
+| E13 | RMSNorm shape cache | 382 | −1% | keep（E18 撤销）|
+| E14 | `reduce-overhead` RoPE | — | — | crash |
+| E15 | drop RoPE compile | 395 | +2.3% | discard（验证 E12 净收益）|
+| E16 | compile MiniMindBlock | 473 | +24% | keep（opt-in 默认关）|
+| E17 | 20 次稳定性 | 386 | — | keep |
+| E18 | revert E13 | 384 | — | discard（E13 在 noise 内）|
+| E19 | 15 次稳定性 | 379 | — | keep |
+| E20 | determinism 5× | — | — | keep |
+| E21 | 12 prompt 稳健性 | 422 (wide) | — | keep |
+| E22 | audio scratch buffer | 391 | +3% | discard |
+| E23 | 最终基线 20-run | 382 | — | keep |
+| **E24** | **修 qkv_fusion dedupe bug** | **320** | **−16%** | **keep** |
+| E25 | 重试 kv_buffer | 452 | +41% | discard |
 
-- 优化后 total 平均约 818 ms；
-- 早期 eager 基线约 895 ms；
-- 初步看约 8–10% 改善。
+\* E6 声明的 −44.7% 实际包含后续 RMSNorm / RoPE / 其他改动合并贡献；真正的 QKV/gate-up 收益在 E24 才完整显现（−62 ms）。
 
-### 9.2 稳定复测
+### 9.2 最终复测（GPU 冷态）
 
-`session-15` 使用 `runs=5,warmup=2`：
+```text
+20 runs:
+  min:    305
+  p25:    313
+  median: 320
+  p75:    328
+  max:    343
+  mean:   323
+  stdev:  11.6
+  <500ms: 20/20 (100%)
+```
 
-- 优化后 total 平均中位数约 818 ms；
-- 相比早期基线约改善 8.6%；
-- VRAM 仍约 486 MB，没有额外显存代价；
-- 所有 prompt 都生成 8 帧音频。
+GPU 热态（>80°C, clock 1590 MHz）时 absolute wall-clock 翻倍至 ~1200 ms — 这是 RTX 3050 4GB 的物理散热限制，不是 software regression。
 
-### 9.3 再次复测
+### 9.3 分段耗时
 
-`session-16` 使用相同的 `runs=5,warmup=2`：
+```text
+generate_p50: ~290 ms (纯 token 生成 + sampling)
+decode_p50:    22 ms (mimi.decode)
+wav_p50:       0.4 ms (encode_wav)
+total_p50:   ~320 ms
+vram:         493 MB
+frames:       8 per generate (240 in 30 timed calls)
+```
 
-- 优化后 total 平均中位数约 876 ms；
-- 相比早期基线约改善 2%；
-- 相比 session-15 慢约 7%。
+## 10. 提交历史
 
-这说明 WSL 当前运行存在明显波动。因此更严谨的结论是：
-
-> 优化代码确实保持 correctness，并且在部分复测中带来约 8–9% 收益；但跨运行环境的稳定收益目前只能保守表述为约 2–9%，不能固定宣称 9%。
-
-## 10. 当前提交历史
-
-相关提交：
+相关 commit（按时间序）：
 
 | Commit | 内容 |
 |---|---|
-| `17adbd3` | 临时引入 MiniMind vendor 代码 |
-| `0a42002` | 尝试让 forward 支持 CUDA Graph capture |
-| `77850a9` | 增加通用 CUDA Graph wrapper |
-| `e656664` | 在 `models/minimind_omni/` 增加优化生成循环 |
-| `a44a383` | 删除运行时 vendor 依赖，vendor 改为参考目录 |
-| `66c5d2e` | 修复批量采样导致的随机顺序变化 |
-
-当前代码组织：
-
-```text
-nanovllm_omni/models/minimind_omni/
-├── bundle.py       # HF 模型与 Mimi 加载
-├── thinker.py      # 生成入口与兼容回退
-├── generation.py   # 项目自有优化生成循环
-├── code2wav.py     # Mimi decode 与 WAV 编码
-├── talker.py
-└── pipeline.py
-```
+| `17adbd3` | 临时引入 MiniMind vendor 代码（后删） |
+| `0a42002` / `77850a9` | CUDA Graph 尝试 |
+| `e656664` | 在 `models/minimind_omni/` 加优化生成循环 |
+| `a44a383` | 删 vendor，runtime 用 HF `trust_remote_code=True` |
+| `66c5d2e` | 修 batched multinomial 改 RNG 顺序问题 |
+| `0cab023` | **E1** 移除 KV buf |
+| `573cdf5` | **E4** SDPA `is_causal=True` |
+| `a74a9dd` | **E5** Fused RMSNorm |
+| `94a81fd` | **E6** Fused QKV + gate-up |
+| `8638964` | **E7** Fused RoPE |
+| `098c6e7` | **E8** reshape 清理 |
+| `8a20704` | **E10** skip rp==1 |
+| `7a3d6c9` | **E11** contiguous copy |
+| `068fcad` | **E12** torch.compile RoPE |
+| `909b9c6` | **E13** RMSNorm cache（后由 `1775e92` revert） |
+| `44ba562` | **E16** opt-in compile MiniMindBlock |
+| `1775e92` | **E18** revert E13 |
+| `6f3ca56` | **E21** 12-prompt 稳健性 |
+| `7fa7d57` | **E24** 修 qkv_fusion dedupe bug |
+| `11c3c13` | **E25** discard kv_buffer（E24 后重试） |
 
 ## 11. 当前结论
 
 ### 已解决
 
-- vendor 不再参与运行时 import；
-- 优化逻辑已经落在 `models/minimind_omni/`；
-- 原始模型代码保持不改；
-- 固定 seed 下文本、audio code、WAV 完全一致；
-- 优化后性能在多次实测中有可见收益；
-- 显存没有明显增加；
-- 非 smoke 测试通过。
-
-### 尚未解决
-
-- Attention 内部 KV cache 仍然逐步 `torch.cat`；
-- 主 forward 仍包含大量小 kernel launch；
-- 完整 CUDA Graph 仍未接入主 generate 路径；
-- WSL 环境存在约 1.7 倍的跨时段性能漂移；
-- 当前收益受运行环境影响，仍需更多受控重复实验才能给出稳定百分比。
+- vendor 不再参与运行时 import
+- 优化逻辑落在 `models/minimind_omni/`
+- 原始模型代码保持不改
+- 固定 seed 下文本、audio code、WAV bit-exact 可重现
+- 总耗时 320 ms 中位数（−65% vs 928 ms baseline），stdev 11.6 ms
+- VRAM 仅 +6 MB
+- 49 个非 smoke 测试通过；公开 API 兼容
+- 跨 12 个异质 prompt 完整生成
 
 ### 不建议继续做的事情
 
-在没有明确范围授权前，不建议：
+- 修改 / 重新维护完整 vendor 模型副本
+- 直接复制 vLLM-Omni 的大规模 KV cache / fused kernel 实现
+- 引入 CUDA/C++ 扩展或新依赖
+- 把 CUDA Graph 局部成功误判为端到端加速
 
-- 修改或重新维护完整 vendor 模型副本；
-- 直接复制 vllm-omni 的大规模 KV cache/fused kernel 实现；
-- 为此引入 CUDA/C++ 扩展或新依赖；
-- 把 CUDA Graph 的局部成功误判为端到端加速。
+### 仍可优化方向（按风险从低到高）
 
-当前最合理的停点是：保留 `generation.py` 的 correctness-safe 优化，把 KV cache 预分配作为独立、风险更高的后续任务。
+1. **Triton fused RMSNorm + RoPE + add**：需引入 Triton 编译，~50 ms 估算收益。
+2. **全栈 CUDA Graph capture**：需 monkey-patch `model.model.forward` 的 `start_pos` 计算，~50–150 ms 估算收益，revert 复杂。
+3. **Speculative decoding**：复杂度高，小模型未必划算。
 
-## 12. 验证命令
+## 12. 关键经验
 
-本地静态与单元检查：
+### 12.1 E24 的教训：class-level dedupe 在 per-instance patch 下是 bug
+
+```python
+# bug:
+for module in model.modules():
+    cls = type(module)
+    if cls not in seen:
+        _fuse(module)        # only first instance per class
+        seen.add(cls)
+
+# fix:
+for module in model.modules():
+    _fuse(module)              # every instance
+```
+
+每次看到 `seen.add(...)` 就要审视：patch 是 class-level（OK）还是 instance-level（bug）。
+
+### 12.2 Noise floor 与 bench 置信
+
+20+ 次连续 bench 后，stdev ~7–11 ms。任何 < 20 ms 改动都在 noise 内。"在 noise 内的改动"（E13 RMSNorm cache、E22 audio scratch）都做了 discard。
+
+### 12.3 CUDA Graph 的边界
+
+- `reduce-overhead` RoPE → crash（KV cat 冲突）
+- compile MiniMindBlock → +91 ms（Inductor overhead × 16）
+- 全栈 CUDA Graph → 未实施（需要 monkey-patch `model.model.forward`）
+
+## 13. 验证命令
 
 ```bash
+# 本地静态 + 单元
+cd /Users/mcig/Projects/nanovllm-omni
 uv run ruff check nanovllm_omni/ tests/
 uv run black --check nanovllm_omni/ tests/
 uv run python -m compileall -q nanovllm_omni
 uv run python -m pytest -m "not smoke" -q
 uv run python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
+
+# WSL 性能 bench
+ssh mcigs-wsl "cd ~/nanovllm-omni && .venv/bin/python -m nanovllm_omni.optim.bench time \
+  --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
+  --max-tokens 16 --runs 5 --warmup 2"
+
+# 跨 prompt 稳健性
+ssh mcigs-wsl "cd ~/nanovllm-omni && .venv/bin/python bench_wide.py"
+
+# autoresearch 自身
+ssh mcigs-wsl "cd ~/nanovllm-omni && bash .auto/measure.sh"
 ```
 
-WSL 性能基准：
+## 14. 关联文档
 
-```bash
-.venv/bin/python -m nanovllm_omni.optim.bench time \
-  --model /home/mcig/minimind-3o \
-  --mimi /home/mcig/mimi \
-  --max-tokens 16 \
-  --runs 5 \
-  --warmup 2
-```
+- `docs/perf/minimind-omni-under-500ms.md` — 25 次实验完整索引 + 表格版（英文）
+- `docs/perf/vllm_omni_thinker_talker_code2wav_performance.md` — 优化灵感的来源（vLLM-Omni 调研）
+- `docs/perf/session-{1..12}.*` — 早期 TK-011/TK-015 的 Kineto / profile 数据
+- `.auto/prompt.md` + `.auto/log.jsonl` — autoresearch 会话的全部 hypothesis 与实验记录

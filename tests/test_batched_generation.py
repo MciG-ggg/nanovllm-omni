@@ -292,7 +292,7 @@ def test_run_batched_generate_engine_loop():
 
 
 def test_deploy_config_parses_max_batch(tmp_path):
-    from nanovllm_omni.config_registry import DeployConfig, load_deploy_config
+    from nanovllm_omni.config.registry import DeployConfig, load_deploy_config
 
     p = tmp_path / "deploy.yaml"
     p.write_text(
@@ -304,7 +304,7 @@ def test_deploy_config_parses_max_batch(tmp_path):
 
 
 def test_run_batched_generate_reads_max_batch_from_deploy():
-    from nanovllm_omni.config_registry import DeployConfig
+    from nanovllm_omni.config.registry import DeployConfig
     from nanovllm_omni.engine.batched_runner import run_batched_generate
     from nanovllm_omni.outputs import AudioPayload
 

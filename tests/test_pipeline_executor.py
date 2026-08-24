@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.params import OmniEngineArgs
+from nanovllm_omni.config.registry import (
     DeployConfig,
     PipelineConfig,
     StageConfig,
     StageExecutionType,
 )
 from nanovllm_omni.engine.executor import PipelineExecutor
-from nanovllm_omni.engine_args import OmniEngineArgs
 
 
 def _make_executor(max_concurrent: int = 1) -> PipelineExecutor:

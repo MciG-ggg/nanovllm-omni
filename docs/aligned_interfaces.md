@@ -6,15 +6,15 @@ The public nanovllm-omni API follows the corresponding vllm-omni interfaces wher
 |---|---|
 | `nanovllm_omni.entrypoints.Omni` | `vllm_omni.entrypoints.Omni` |
 | `nanovllm_omni.entrypoints.AsyncOmni` | `vllm_omni.entrypoints.AsyncOmni` |
-| `nanovllm_omni.engine_args.SamplingParams` | `vllm_omni.engine_args.SamplingParams` |
-| `nanovllm_omni.engine_args.OmniEngineArgs` | `vllm_omni.engine_args.OmniEngineArgs` |
+| `nanovllm_omni.config.params.SamplingParams` | `vllm_omni.engine_args.SamplingParams` |
+| `nanovllm_omni.config.params.OmniEngineArgs` | `vllm_omni.engine_args.OmniEngineArgs` |
 | `nanovllm_omni.outputs.OmniRequestOutput` | `vllm_omni.outputs.RequestOutput` |
-| `nanovllm_omni.config_registry.PipelineConfig` | `vllm_omni.config.PipelineConfig` |
-| `nanovllm_omni.config_registry.StageConfig` (new) | `vllm_omni.config.StagePipelineConfig` |
-| `nanovllm_omni.config_registry.DeployConfig` | `vllm_omni.config.DeployConfig` |
-| `nanovllm_omni.config_registry.DeployStageConfig` | `vllm_omni.config.StageDeployConfig` |
-| `nanovllm_omni.config_registry.StageExecutionType` (TK-016 phase 2) | `vllm_omni.config.StageExecutionType` |
-| `nanovllm_omni.config_registry.resolve_stage_factory` (TK-016 phase 2) | `vllm_omni.config.resolve_stage_factory` |
+| `nanovllm_omni.config.registry.PipelineConfig` | `vllm_omni.config.PipelineConfig` |
+| `nanovllm_omni.config.registry.StageConfig` (new) | `vllm_omni.config.StagePipelineConfig` |
+| `nanovllm_omni.config.registry.DeployConfig` | `vllm_omni.config.DeployConfig` |
+| `nanovllm_omni.config.registry.DeployStageConfig` | `vllm_omni.config.StageDeployConfig` |
+| `nanovllm_omni.config.registry.StageExecutionType` (TK-016 phase 2) | `vllm_omni.config.StageExecutionType` |
+| `nanovllm_omni.config.registry.resolve_stage_factory` (TK-016 phase 2) | `vllm_omni.config.resolve_stage_factory` |
 | `nanovllm_omni.engine.runner.PipelineRunner` (new) | no vllm-omni analog (replaces `StagePool` role for single-GPU) |
 | `nanovllm_omni.engine.executor.PipelineExecutor` (new) | no vllm-omni analog (replaces `Orchestrator` role for single-process) |
 

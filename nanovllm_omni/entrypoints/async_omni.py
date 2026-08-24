@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from ..engine_args import SamplingParams
+from ..config.params import SamplingParams
 from ..outputs import OmniRequestOutput
 from .omni import Omni
 

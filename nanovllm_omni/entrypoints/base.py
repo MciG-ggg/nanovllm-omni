@@ -6,14 +6,14 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..config_registry import (
+from ..config.params import OmniEngineArgs
+from ..config.registry import (
     OMNI_PIPELINES,
     DeployConfig,
     PipelineConfig,
     load_deploy_config,
     resolve_pipeline_config,
 )
-from ..engine_args import OmniEngineArgs
 
 if TYPE_CHECKING:
     from ..engine.executor import PipelineExecutor
@@ -158,7 +158,7 @@ class OmniBase:
             if pipeline is None:
                 raise ValueError(
                     f"No pipeline registered for model {self.model!r}. "
-                    f"Known models: see nanovllm_omni.config_registry.OMNI_PIPELINES."
+                    f"Known models: see nanovllm_omni.config.OMNI_PIPELINES."
                 )
             self._pipeline = pipeline
         return self._pipeline

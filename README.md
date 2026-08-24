@@ -36,13 +36,13 @@ with open("audio.wav", "wb") as f:
 
 ## Configuration
 
-The legacy smoke test uses `configs/minimind_omni.yaml`. The aligned interface work will add the separated pipeline and deployment configuration under `deploy/`; consult `.scratch/aligned-interfaces/SPEC.md` for the locked contract.
+Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage sampling and resource defaults live in `deploy/*.yaml`, read from `Path.cwd()` at runtime. Consult `.scratch/aligned-interfaces/SPEC.md` for the locked contract.
 
 ## Repository layout
 
 ```
-nanovllm_omni/  # package implementation
-configs/        # existing pipeline configuration
+nanovllm_omni/  # package implementation (config layer in nanovllm_omni/config/)
+deploy/         # per-family sampling/resource defaults
 examples/       # runnable examples
 tests/          # automated tests
 docs/           # project notes

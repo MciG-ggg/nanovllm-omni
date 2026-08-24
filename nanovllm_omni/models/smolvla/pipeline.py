@@ -11,7 +11,7 @@ taxonomy has no VLA member and the closed-set test locks the four names.
 
 from __future__ import annotations
 
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.registry import (
     PipelineConfig,
     StageConfig,
     StageExecutionType,

@@ -1,4 +1,4 @@
-from .engine_args import OmniEngineArgs, SamplingParams
+from .config.params import OmniEngineArgs, SamplingParams
 from .entrypoints import AsyncOmni, Omni, OmniBase
 from .outputs import MultimodalPayload, OmniRequestOutput
 

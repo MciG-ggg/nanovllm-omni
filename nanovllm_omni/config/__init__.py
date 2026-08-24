@@ -1,6 +1,14 @@
-"""Public configuration registry exports."""
+"""Public configuration registry exports.
 
-from nanovllm_omni.config_registry import (
+Thin facade over the config subsystem. Implementation lives in the sibling
+leaf modules ``registry.py`` (pipeline/deploy dataclasses + yaml loading +
+dotted-path stage resolution) and ``params.py`` (``SamplingParams`` /
+``OmniEngineArgs``). Keep this file leaf-only: importing engine, models, or
+entrypoints here would reintroduce the import cycle this layout avoids.
+"""
+
+from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.registry import (
     OMNI_PIPELINES,
     DeployConfig,
     DeployStageConfig,
@@ -11,7 +19,6 @@ from nanovllm_omni.config_registry import (
     register_pipeline,
     resolve_pipeline_config,
 )
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
 
 __all__ = [
     "OMNI_PIPELINES",

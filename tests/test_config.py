@@ -12,7 +12,7 @@ from nanovllm_omni.config import (
     merge_pipeline_deploy,
     resolve_pipeline_config,
 )
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.registry import (
     StageExecutionType,
     resolve_stage_factory,
 )
@@ -104,7 +104,7 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
 
 
 def test_register_pipeline_adds_entry():
-    from nanovllm_omni.config_registry import (
+    from nanovllm_omni.config.registry import (
         OMNI_PIPELINES,
         register_pipeline,
     )

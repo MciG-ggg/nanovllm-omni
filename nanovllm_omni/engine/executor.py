@@ -15,9 +15,9 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from nanovllm_omni.config_registry import DeployConfig, PipelineConfig
+from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.registry import DeployConfig, PipelineConfig
 from nanovllm_omni.engine.runner import PipelineRunner
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
 
 
 class PipelineExecutor:

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.registry import (
     DeployConfig,
     DeployStageConfig,
     PipelineConfig,
@@ -10,7 +11,6 @@ from nanovllm_omni.config_registry import (
     StageExecutionType,
 )
 from nanovllm_omni.engine.runner import PipelineRunner
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
 from tests import _stage_factories as fac
 
 

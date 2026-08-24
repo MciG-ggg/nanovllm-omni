@@ -15,7 +15,7 @@
   - `POST /v1/chat/completions` OpenAI response shape
 - Keep implementation scope limited to the MiniMind-O audio pipeline. Do not add image/video/VLA/vision, diffusion, full-duplex S2S, WebSockets, distributed execution, FastAPI, uvicorn, Pydantic, or new dependencies.
 - Use stdlib `@dataclass` for contracts and stdlib `http.server` for serving.
-- Prefer package modules with one responsibility. `__init__.py` files should primarily re-export public symbols; implementation classes and runtime logic belong in dedicated modules.
+- Prefer package modules with one responsibility. `__init__.py` files should primarily re-export public symbols; implementation classes and runtime logic belong in dedicated modules. The configuration layer lives in `nanovllm_omni/config/` (`registry.py` + `params.py`) behind a thin `__init__.py` facade; keep `config/__init__.py` leaf-only (no engine/model/entrypoint imports) so the import graph stays acyclic.
 - Do not copy vllm-omni code. Inspect it only to verify names, signatures, field shapes, and architecture patterns, then adapt to this repository's smaller scope.
 - Keep deploy/runtime knobs separate from pipeline topology. Pipeline topology belongs in model-family `pipeline.py`; sampling/resource defaults belong in `deploy/*.yaml`.
 - Preserve the aligned API contract when cleaning up legacy code. Any intentional compatibility break must be explicit in the ticket and reflected in tests/docs.

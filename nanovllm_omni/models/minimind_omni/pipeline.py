@@ -6,7 +6,7 @@ Stage 2: code2wav — kind=CODEC     (Mimi codec codes -> 24 kHz mono PCM)
 
 This file contains NO static imports from per-stage modules: factory and
 process_input are dotted-path strings resolved by
-``nanovllm_omni.config_registry.resolve_stage_factory`` at construction
+``nanovllm_omni.config.registry.resolve_stage_factory`` at construction
 (``StageConfig.__post_init__``). The pipeline topology file is the
 declarative contract; per-stage implementation lives in
 ``thinker.py`` / ``talker.py`` / ``code2wav.py``.
@@ -20,7 +20,7 @@ shape match vllm-omni's pipeline-registry pattern.
 
 from __future__ import annotations
 
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.registry import (
     PipelineConfig,
     StageConfig,
     StageExecutionType,

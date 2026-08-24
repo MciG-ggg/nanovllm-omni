@@ -97,7 +97,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-nanovllm_omni = ["configs/*.yaml"]
+# none: deploy/*.yaml is read from Path.cwd() at runtime, not shipped in the wheel.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

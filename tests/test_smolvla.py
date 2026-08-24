@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from nanovllm_omni.config import resolve_pipeline_config
-from nanovllm_omni.config_registry import StageExecutionType
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.registry import StageExecutionType
 from nanovllm_omni.models.smolvla import stage as smolvla_stage
 from nanovllm_omni.outputs import ActionArtifact, OmniRequestOutput
 
@@ -141,7 +141,7 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
     """Layer-6: ``hf_architectures`` routes correctly; final_stage_id picks the
     stage whose ``final_output_type`` is in the requested modalities (or
     defaults to the last terminal stage)."""
-    from nanovllm_omni.config_registry import (
+    from nanovllm_omni.config.registry import (
         PipelineConfig,
         StageConfig,
         StageExecutionType,

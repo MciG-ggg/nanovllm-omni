@@ -7,7 +7,7 @@ the caller-supplied SamplingParams overrides them per request.
 
 from __future__ import annotations
 
-from ..engine_args import SamplingParams
+from ..config.params import SamplingParams
 from ..outputs import OmniRequestOutput
 from .base import OmniBase
 

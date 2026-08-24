@@ -19,13 +19,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from nanovllm_omni.config_registry import (
+from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.config.registry import (
     DeployConfig,
     PipelineConfig,
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
-from nanovllm_omni.engine_args import OmniEngineArgs, SamplingParams
 
 
 class PipelineRunner:

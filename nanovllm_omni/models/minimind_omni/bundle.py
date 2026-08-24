@@ -15,6 +15,7 @@ import paths rewritten when migrating.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ DEFAULT_MINIMIND_MODEL_ID = "jingyaogong/minimind-3o"
 DEFAULT_MIMI_MODEL_ID = "kyutai/mimi"
 MIMI_SAMPLE_RATE = 24_000
 MIMI_CODE_VOCAB_LIMIT = 2048
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,12 +46,33 @@ class MinimindBundle:
 
 
 def _resolve_snapshot(model_id: str) -> str:
+    """Resolve a model identifier to a local directory, offline-first.
+
+    Mirrors vllm-omni's ``_resolve_model_to_local_path``
+    (``vllm_omni/engine/stage_init_utils.py``): if ``model_id`` is already
+    a local directory it is used as-is; otherwise we look it up in the
+    HuggingFace local cache via ``snapshot_download(local_files_only=True)``
+    and never trigger a network download. Unresolvable Hub ids (no local
+    cache, no network) are passed through unchanged so the caller can
+    surface a clearer error from ``from_pretrained`` itself.
+    """
     path = Path(model_id)
     if path.is_dir():
         return str(path.resolve())
+
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(model_id)
+    try:
+        return snapshot_download(model_id, local_files_only=True)
+    except Exception as exc:
+        _logger.warning(
+            "[bundle] Could not resolve %s to a local snapshot (%s); "
+            "passing through unchanged. Pass --model /path/to/local/dir "
+            "for offline use.",
+            model_id,
+            type(exc).__name__,
+        )
+        return model_id
 
 
 def _pick_device(device: str | None) -> str:

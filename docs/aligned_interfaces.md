@@ -69,6 +69,16 @@ vllm-omni's `StagePool` (1281 LOC) and `Orchestrator` (2428 LOC) are designed fo
 
 The split mirrors vllm-omni's "pool routes to replicas, orchestrator tracks requests" division, but in single-process form: the runner is the only consumer of the pipeline config, and the executor is the only consumer of the runner. No class is named `StagePool` or `Orchestrator` in `nanovllm_omni.engine/` — those names are reserved for the future when multi-replica support is reintroduced (TK-007).
 
+## Model path resolution
+
+The MiniMind-O bundle loader (`nanovllm_omni.models.minimind_omni.bundle._resolve_snapshot`) mirrors vllm-omni's `_resolve_model_to_local_path` (`vllm_omni/engine/stage_init_utils.py`) so the two engines fail the same way when offline:
+
+1. A string that is already a directory on disk is used as-is (no HF cache lookup).
+2. Anything else is resolved through `huggingface_hub.snapshot_download(..., local_files_only=True)` — **local HF cache only, never triggers a network download**.
+3. Unresolvable Hub ids (no local cache) are passed through unchanged with a `WARNING` log so a downstream `from_pretrained` can surface a clearer error.
+
+The previous behavior of the function called `snapshot_download` without `local_files_only`, which meant a user who ran an example with the default Hub id on a machine without network hit `LocalEntryNotFoundError: ConnectError: Network is unreachable` instead of a clear offline-mode hint. The contract is pinned by `tests/test_bundle_resolve_snapshot.py`.
+
 ## When an aligned symbol changes
 
 When an aligned public symbol or response field changes, update this table, add a focused contract test, and run the CI-equivalent checks documented in `AGENTS.md`.

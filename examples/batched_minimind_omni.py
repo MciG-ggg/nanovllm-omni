@@ -36,6 +36,7 @@ def _wav_bytes(payload) -> bytes:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="jingyaogong/minimind-3o")
+    parser.add_argument("--mimi", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument(
@@ -49,7 +50,10 @@ def main() -> None:
     parser.add_argument("--out", default="batched_smoke")
     args = parser.parse_args()
 
-    bundle = create_bundle(model_id=args.model, device=args.device)
+    bundle_kwargs: dict[str, object] = {}
+    if args.mimi:
+        bundle_kwargs["mimi_model_id"] = args.mimi
+    bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
 
     # record actual [B, 9, T] forward shapes so we can prove batching happened
     shapes: list[tuple[int, int, int]] = []

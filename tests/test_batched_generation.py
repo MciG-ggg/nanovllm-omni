@@ -240,3 +240,83 @@ def test_fixed_slot_pool_layout_and_gather():
         raise AssertionError("unequal-length gather should raise")
     except ValueError:
         pass
+
+
+# --------------------------------------------------------------------------
+# engine-level: run_batched_generate end-to-end with a fake bundle
+# (tokenizer + mimi + model, no GPU) -- exercises the whole loop included
+# tokenization and the serial codec chain.
+
+
+class _FakeTokenizer:
+    def __init__(self):
+        self.eos_token_id = 2
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kwargs):
+        return " ".join(m.get("content", "") for m in messages)
+
+    def __call__(self, text):
+        return SimpleNamespace(data={"input_ids": [ord(c) % 50 + 1 for c in text]})
+
+
+class _FakeMimi:
+    def decode(self, codes):
+        return SimpleNamespace(audio_values=codes.float())
+
+
+def test_run_batched_generate_engine_loop():
+    from nanovllm_omni.engine.batched_runner import run_batched_generate
+    from nanovllm_omni.outputs import AudioPayload
+
+    model = FakeMiniMindOmni()
+    bundle = SimpleNamespace(
+        model=model, tokenizer=_FakeTokenizer(), mimi=_FakeMimi(), device="cpu"
+    )
+    out = run_batched_generate(
+        bundle,
+        ["hello world", "another prompt here"],
+        max_batch=2,
+        max_new_tokens=12,
+        base_seed=42,
+    )
+    assert len(out) == 2
+    for payload in out:
+        assert isinstance(payload, AudioPayload)
+        assert len(payload.data) > 44  # non-empty WAV (RIFF header + payload)
+        assert payload.data[:4] == b"RIFF"  # real wave bytes
+
+
+# -- deploy wiring (C): max_batch knob lives in deploy/*.yaml -------------
+
+
+def test_deploy_config_parses_max_batch(tmp_path):
+    from nanovllm_omni.config_registry import DeployConfig, load_deploy_config
+
+    p = tmp_path / "deploy.yaml"
+    p.write_text(
+        "max_batch: 3\nstages:\n  - name: thinker\n    default_sampling_params: {max_tokens: 16}\n"
+    )
+    deploy = load_deploy_config(p)
+    assert deploy.max_batch == 3
+    assert DeployConfig().max_batch == 2  # default without yaml
+
+
+def test_run_batched_generate_reads_max_batch_from_deploy():
+    from nanovllm_omni.config_registry import DeployConfig
+    from nanovllm_omni.engine.batched_runner import run_batched_generate
+    from nanovllm_omni.outputs import AudioPayload
+
+    model = FakeMiniMindOmni()
+    bundle = SimpleNamespace(
+        model=model, tokenizer=_FakeTokenizer(), mimi=_FakeMimi(), device="cpu"
+    )
+    deploy = DeployConfig(max_batch=2)  # knob from deploy yaml
+    out = run_batched_generate(
+        bundle,
+        ["hello world", "another prompt here"],
+        max_new_tokens=12,
+        base_seed=42,
+        deploy=deploy,
+    )
+    assert len(out) == 2
+    assert all(isinstance(p, AudioPayload) for p in out)

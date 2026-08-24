@@ -1,3 +1,4 @@
+max_batch: 2
 stages:
   - name: thinker
     default_sampling_params:

@@ -157,9 +157,15 @@ class DeployStageConfig:
 
 @dataclass(frozen=True)
 class DeployConfig:
-    """Runtime knob bundle loaded from one deploy YAML."""
+    """Runtime knob bundle loaded from one deploy YAML.
+
+    ``stages`` carries per-stage sampling defaults; engine-level resource
+    knobs (continuous-batching width, etc.) are top-level keys in the YAML
+    (AGENTS: runtime knobs belong in ``deploy/*.yaml``, not in pipeline code).
+    """
 
     stages: tuple[DeployStageConfig, ...] = ()
+    max_batch: int = 2
 
 
 OMNI_PIPELINES: dict[str, PipelineConfig] = {}
@@ -188,14 +194,18 @@ def resolve_pipeline_config(name: str) -> PipelineConfig | None:
 def load_deploy_config(path: str | Path) -> DeployConfig:
     """Parse a deploy YAML into a DeployConfig."""
     data = yaml.safe_load(Path(path).read_text()) or {}
+    max_batch = int(data.get("max_batch", 2))
+    if max_batch < 1:
+        raise ValueError(f"max_batch must be >= 1, got {max_batch}")
     return DeployConfig(
-        tuple(
+        stages=tuple(
             DeployStageConfig(
                 name=str(s.get("name", "")),
                 default_sampling_params=dict(s.get("default_sampling_params", {}) or {}),
             )
             for s in data.get("stages", [])
-        )
+        ),
+        max_batch=max_batch,
     )
 
 

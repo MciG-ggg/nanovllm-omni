@@ -23,6 +23,8 @@ The bundle loader is offline-first and never auto-fetches.
 ### Start the server
 
 ```bash
+MODEL_DIR=<model-dir> bash start_server.sh
+# or directly:
 HF_HUB_OFFLINE=1 python -m nanovllm_omni.serving.openai_adapter \
     --model-id <model-dir>/minimind-3o \
     --mimi-model-id <model-dir>/mimi \
@@ -31,7 +33,8 @@ HF_HUB_OFFLINE=1 python -m nanovllm_omni.serving.openai_adapter \
 
 The server binds stdlib `ThreadingHTTPServer` to `host:port` and
 serves a single route: `POST /v1/chat/completions`. Sampling defaults
-are read from `deploy/minimind_omni.yaml`.
+are read from `deploy/minimind_omni.yaml`. `start_server.sh` exports
+`HF_HUB_OFFLINE=1` and accepts `HOST`, `PORT`, `DEVICE` overrides.
 
 ### Send a request
 

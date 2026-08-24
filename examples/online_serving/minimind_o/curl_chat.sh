@@ -15,13 +15,19 @@ PORT="${PORT:-8000}"
 MODEL="${MODEL:-minimind-o}"
 PROMPT="${1:-你好，请用一句话介绍你自己。}"
 
-# build the JSON body with python (no extra deps; jq if present, then
-# we still need python for base64 decode in save_audio.py)
-read -r -d '' BODY <<EOF || true
-{"model":"$MODEL","messages":[{"role":"user","content":"$PROMPT"}]}
-EOF
+# Build the JSON body with python so the nested content array is
+# correctly quoted regardless of the prompt's contents (quotes,
+# newlines, etc.). The adapter requires the OpenAI multimodal content
+# array form, not a bare string.
+BODY=$(python3 -c '
+import json, os, sys
+print(json.dumps({
+    "model": os.environ["MODEL"],
+    "messages": [{"role": "user", "content": [{"type": "text", "text": sys.argv[1]}]}],
+}))' "$PROMPT")
 
-curl -sS -X POST "http://$HOST:$PORT/v1/chat/completions" \
+curl -sS --retry 5 --retry-delay 1 --retry-connrefused \
+    -X POST "http://$HOST:$PORT/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     --data "$BODY"
 echo

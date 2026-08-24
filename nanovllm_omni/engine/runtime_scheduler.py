@@ -1,0 +1,163 @@
+"""Per-stage runtime scheduler (TK-004).
+
+Mirrors vllm-omni's per-stage ``Scheduler`` shape:
+
+  - one ``RuntimeScheduler`` instance per LLM stage (thinker, talker)
+  - each instance owns its own waiting / running / finished queues
+  - ``schedule()`` returns ``prefill_chunks`` + ``decode_groups``
+  - ``update_from_output()`` advances sequence status from one round
+
+The MiniMind-O thinker stage does NOT need a separate scheduler instance
+because thinker and talker share the same underlying model in memory (the
+pipeline just calls the model twice with different ``process_input``
+shaping). Each LLM-style stage factory instantiates one scheduler when
+constructed.
+
+Deliberately not a subclass of ``OmniScheduler`` (which is the global
+mini-mind-specific scheduler in ``sched.py``); the SPEC's TK-004 calls
+for a per-stage model with ``Sequence``-shaped state, and ``OmniScheduler``
+is the request-grouping + FSM convenience used by
+``BatchedThinkerRunner``. The two are linked: ``OmniRequest`` carries a
+``Sequence`` for SPEC compliance; ``RuntimeScheduler`` operates on the
+``Sequence`` directly.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import Any
+
+from .sequence import PrefillChunk, Sequence, SequenceStatus
+
+
+@dataclass
+class RuntimeGroup:
+    """One unit of work a single stage forward can execute.
+
+    A prefill group is a list of ``PrefillChunk`` (chunked prefill supported
+    via the ``start``/``end`` range); a decode group is a list of
+    ``Sequence`` whose current ``num_tokens`` matches a single stage
+    forward's single-scalar ``start_pos``.
+    """
+
+    kind: str  # "prefill" | "decode"
+    items: list[Any] = field(default_factory=list)  # list[PrefillChunk] | list[Sequence]
+
+
+@dataclass
+class RuntimeSchedulerOutput:
+    """What ``schedule()`` produced for one round, in execution order."""
+
+    prefill_groups: list[RuntimeGroup] = field(default_factory=list)
+    decode_groups: list[RuntimeGroup] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.prefill_groups and not self.decode_groups
+
+
+class RuntimeScheduler:
+    """Per-stage scheduler with SPEC-style Sequence state.
+
+    Lifecycle for a single sequence: WAITING -> (admit) -> PREFILL ->
+    (prefill round done) -> DECODE -> (decode round done) -> DECODE -> ...
+    -> (finished) -> FINISHED.
+    """
+
+    def __init__(self, *, max_num_seqs: int = 2) -> None:
+        if max_num_seqs < 1:
+            raise ValueError("max_num_seqs must be >= 1")
+        self.max_num_seqs = max_num_seqs
+        self.waiting: deque[Sequence] = deque()
+        self.running: dict[str, Sequence] = {}
+        self.finished: dict[str, Sequence] = {}
+
+    # -- submission ----------------------------------------------------------
+
+    def add_sequence(self, seq: Sequence) -> None:
+        """Admit a new sequence (typically a freshly-constructed request)."""
+        if (
+            seq.request_id in self.running
+            or seq.request_id in self.finished
+            or any(s.request_id == seq.request_id for s in self.waiting)
+        ):
+            raise ValueError(f"duplicate request_id {seq.request_id!r}")
+        self.waiting.append(seq)
+
+    # -- queries -------------------------------------------------------------
+
+    def has_work(self) -> bool:
+        return bool(self.waiting or self.running)
+
+    def get(self, rid: str) -> Sequence | None:
+        if rid in self.running:
+            return self.running[rid]
+        return self.finished.get(rid)
+
+    def is_finished(self, rid: str) -> bool:
+        return rid in self.finished
+
+    # -- scheduler core ------------------------------------------------------
+
+    def schedule(self) -> RuntimeSchedulerOutput:
+        """Form prefill chunks (waiting) and decode groups (running, by len)."""
+        out = RuntimeSchedulerOutput()
+
+        # Admission: fill running up to max_num_seqs with waiting sequences.
+        while self.waiting and len(self.running) < self.max_num_seqs:
+            seq = self.waiting.popleft()
+            seq.status = SequenceStatus.PREFILL
+            self.running[seq.request_id] = seq
+
+        # Prefill chunks: every PREFILL sequence becomes a single chunk
+        # covering its full prompt. Chunked prefill (start > 0) is supported
+        # by the data structure but not emitted here.
+        if self.running:
+            prefill_items: list[PrefillChunk] = []
+            decode_items: list[Sequence] = []
+            for seq in self.running.values():
+                if seq.status is SequenceStatus.PREFILL:
+                    prefill_items.append(PrefillChunk(seq=seq, start=0, end=seq.num_tokens))
+                elif seq.status is SequenceStatus.DECODE:
+                    decode_items.append(seq)
+            if prefill_items:
+                out.prefill_groups.append(RuntimeGroup(kind="prefill", items=prefill_items))
+            # Decode groups: identical num_tokens -> one rectangular forward.
+            by_len: dict[int, list[Sequence]] = {}
+            for seq in decode_items:
+                by_len.setdefault(seq.num_tokens, []).append(seq)
+            for _num_tokens, group in sorted(by_len.items()):
+                out.decode_groups.append(RuntimeGroup(kind="decode", items=group))
+
+        return out
+
+    def update_from_output(
+        self,
+        *,
+        prefilled: list[str] | None = None,
+        finished: list[str] | None = None,
+    ) -> None:
+        """Advance per-sequence status from one round's runner output.
+
+        ``prefilled``: request_ids whose prefill forward just wrote KV.
+        ``finished``: request_ids whose stage generation is done.
+        """
+        for rid in prefilled or ():
+            seq = self.running.get(rid)
+            if seq is not None and seq.status is SequenceStatus.PREFILL:
+                seq.status = SequenceStatus.DECODE
+        for rid in finished or ():
+            seq = self.running.pop(rid, None)
+            if seq is not None:
+                seq.status = SequenceStatus.FINISHED
+                self.finished[rid] = seq
+
+    # -- iteration helpers (for tests + introspection) ----------------------
+
+    def __iter__(self) -> Iterator[Sequence]:
+        return iter(list(self.waiting) + list(self.running.values()) + list(self.finished.values()))
+
+
+__all__ = ["RuntimeGroup", "RuntimeScheduler", "RuntimeSchedulerOutput"]

@@ -299,10 +299,18 @@ class BatchedThinkerRunner:
         Port of generation.py's exact indexing: ``step`` here is ``st.step``
         after the increment, matching ``step = current_len - start_pos`` there;
         frame index is ``step - 7 + i`` and the gate is ``active >= 8``.
+
+        CRITICAL: ``audio_stop_pos`` is only recorded for layers that were
+        actually sampled this step (``i in sampled`` in generation.py). The pad
+        token is ``audio_pad >= AUDIO_VOCAB_BOUNDARY``, so applying the ``>=``
+        test to inactive (pad) rows would mark every layer stopped at step 0
+        and starve the ``active >= 8`` frame gate.
         """
+        # which layers are being sampled this step = active set (i <= audio_step)
+        active_here = {i for i in range(8) if st.step - 1 >= i}
         for i, code in enumerate(codes):
             st.audio_codes[i].append(code)
-            if code >= _AUDIO_VOCAB_BOUNDARY and st.audio_stop_pos[i] is None:
+            if i in active_here and code >= _AUDIO_VOCAB_BOUNDARY and st.audio_stop_pos[i] is None:
                 st.audio_stop_pos[i] = len(st.audio_codes[i]) - 1
         st.last_audio = codes
 

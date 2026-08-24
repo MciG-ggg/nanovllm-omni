@@ -38,7 +38,7 @@ class FakeMiniMindOmni:
     sampling consumes each request's RNG and needs a seeded generator.
     """
 
-    def __init__(self, n_thinker=2, n_talker=2, kv_heads=2, head_dim=4, vocab=80):
+    def __init__(self, n_thinker=2, n_talker=2, kv_heads=2, head_dim=4, vocab=4096):
         self.config = SimpleNamespace(
             num_key_value_heads=kv_heads,
             head_dim=head_dim,
@@ -47,7 +47,7 @@ class FakeMiniMindOmni:
         )
         self.thinker = SimpleNamespace(layers=[None] * n_thinker)
         self.talker = SimpleNamespace(layers=[None] * n_talker)
-        self.audio_pad_token = 0
+        self.audio_pad_token = 2049  # real MiniMind-O: >= AUDIO_VOCAB_BOUNDARY (2048)
         self.audio_stop_token = vocab - 1
         self.enter_token_id = vocab - 2
         self.pad_token_id = 1

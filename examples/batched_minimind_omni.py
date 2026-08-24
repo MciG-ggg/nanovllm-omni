@@ -81,8 +81,9 @@ def main() -> None:
     (outdir / "batched_a.wav").write_bytes(batched_a)
     (outdir / "batched_b.wav").write_bytes(batched_b)
 
-    decode_batch_sizes = sorted({s[0] for s in shapes if s[1] == 1})
-    max_decode_batch = decode_batch_sizes[-1] if decode_batch_sizes else 0
+    # forward input is [B, 9, T]; decode steps have T == 1, batch is B.
+    decode_batches = [s[0] for s in shapes if len(s) == 3 and s[2] == 1]
+    max_decode_batch = max(decode_batches) if decode_batches else 0
     print(f"solo_a:    {len(solo_a):>7} bytes")
     print(f"batched_a: {len(batched_a):>7} bytes  (from max_batch=2 run)")
     print(f"batched_b: {len(batched_b):>7} bytes")

@@ -130,9 +130,9 @@ def test_qkv_fusion_decode_uses_is_causal_false():
     """Same regression guard for the qkv_fusion patch's decode branch."""
     import inspect
 
-    from nanovllm_omni.models.minimind_omni import qkv_fusion as qkv_mod
+    from nanovllm_omni.models.minimind_omni import attention as attn_mod
 
-    src = inspect.getsource(qkv_mod._fused_attention_forward)
+    src = inspect.getsource(attn_mod._fused_attention_forward)
     decode_idx = src.index("seq_len == 1")
     prefill_idx = src.index("seq_len > 1")
     assert decode_idx < prefill_idx, "expected decode branch before prefill branch"
@@ -165,7 +165,7 @@ class _UpstreamRMSNorm(torch.nn.Module):
 
 def test_fused_rmsnorm_matches_upstream_within_fp16_ulp():
     """The fused op must match the upstream fp32-cast reference in fp16 precision."""
-    from nanovllm_omni.models.minimind_omni.rms_norm import _fused_rms_forward
+    from nanovllm_omni.models.minimind_omni.attention import _fused_rms_forward
 
     torch.manual_seed(0)
     dim = 64
@@ -189,7 +189,7 @@ def test_fused_rmsnorm_does_not_quantize_to_zero():
     Catches a future regression where the upcast is dropped and the reduction
     collapses to zero on near-zero inputs.
     """
-    from nanovllm_omni.models.minimind_omni.rms_norm import _fused_rms_forward
+    from nanovllm_omni.models.minimind_omni.attention import _fused_rms_forward
 
     class _R(torch.nn.Module):
         def __init__(self) -> None:

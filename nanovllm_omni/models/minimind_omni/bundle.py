@@ -133,10 +133,12 @@ def load_minimind_omni_bundle(
     ).eval()
     model = _cast_model_dtype(model, dtype, device)
     model = model.to(device)
-    from .attention import enable_sdpa_decode
-    from .qkv_fusion import enable_fused_projections
-    from .rms_norm import enable_fused_rmsnorm
-    from .rope import enable_fused_rope
+    from .attention import (
+        enable_fused_projections,
+        enable_fused_rmsnorm,
+        enable_fused_rope,
+        enable_sdpa_decode,
+    )
 
     enable_sdpa_decode(model)
     enable_fused_rmsnorm(model)

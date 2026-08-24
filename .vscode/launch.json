@@ -2,10 +2,28 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: audio.py (MiniMind-O)",
+      "name": "Python: minimind_omni.py (MiniMind-O)",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/audio.py",
+      "program": "${workspaceFolder}/examples/minimind_omni.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: smolvla.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/smolvla.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: smolvla_libero.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/smolvla_libero.py",
       "python": "${workspaceFolder}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true

@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,17 +30,11 @@ class OmniEngineArgs:
 
     def __init__(self, model: str | None = None, **kwargs: Any):
         self.model = model
-        fields = {
-            "enforce_eager",
-            "gpu_memory_utilization",
-            "max_num_seqs",
-            "max_num_batched_tokens",
-            "dtype",
-            "tensor_parallel_size",
-            "trust_remote_code",
-            "device",
-        }
-        for name in fields:
-            setattr(self, name, kwargs.pop(name, getattr(type(self), name, None)))
-        self.extra = dict(kwargs.pop("extra", {}) or {})
+        self.extra = dict(kwargs.pop("extra", None) or {})
+        # Iterate dataclass fields instead of maintaining a parallel set:
+        # adding a new typed field to the class now picks it up here automatically.
+        for f in dataclasses.fields(self):
+            if f.name in ("model", "extra"):
+                continue
+            setattr(self, f.name, kwargs.pop(f.name, f.default))
         self.extra.update(kwargs)

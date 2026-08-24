@@ -98,8 +98,6 @@ class StageConfig:
     input_sources: tuple[int, ...] = ()
     is_terminal: bool = False
     final_output_type: str | None = None
-    model_subdir: str | None = None
-    tokenizer_subdir: str | None = None
     diffusers_class_name: str | None = None
 
     def __post_init__(self) -> None:
@@ -171,17 +169,12 @@ class DeployConfig:
 OMNI_PIPELINES: dict[str, PipelineConfig] = {}
 
 
-def register_pipeline(
-    pipeline: PipelineConfig,
-    model_type: str | None = None,
-) -> None:
-    """Register a PipelineConfig as the canonical model and (optionally) under
-    additional handles (e.g. a HF repo id)."""
+def register_pipeline(pipeline: PipelineConfig) -> None:
+    """Register a PipelineConfig under ``pipeline.name`` and every entry in
+    ``pipeline.registration_handles`` (e.g. HF repo ids)."""
     if not isinstance(pipeline, PipelineConfig):
         raise TypeError(f"register_pipeline expected PipelineConfig, got {type(pipeline).__name__}")
     OMNI_PIPELINES[pipeline.name] = pipeline
-    if model_type is not None:
-        OMNI_PIPELINES[model_type] = pipeline
     for handle in pipeline.registration_handles:
         OMNI_PIPELINES[handle] = pipeline
 
@@ -220,17 +213,9 @@ def merge_pipeline_deploy(
     sampling-params dict. Returns a tuple aligned with ``pipeline_cfg.stages``,
     in stage order.
     """
-    deploy_by_name = {s.name: s for s in deploy_cfg.stages}
+    defaults_by_name = {s.name: s.default_sampling_params for s in deploy_cfg.stages}
     return tuple(
-        (
-            stage,
-            dict(
-                deploy_by_name.get(
-                    stage.name, DeployStageConfig(stage.name)
-                ).default_sampling_params
-            ),
-        )
-        for stage in pipeline_cfg.stages
+        (stage, dict(defaults_by_name.get(stage.name, {}))) for stage in pipeline_cfg.stages
     )
 
 

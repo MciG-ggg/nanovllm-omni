@@ -38,6 +38,23 @@ def _name_match_candidate(model: str) -> str:
     return name.lower().replace("-", "").replace("_", "")
 
 
+def _load_pretrained_config(model: str, trust_remote_code: bool) -> Any | None:
+    """Load a HF ``PretrainedConfig``, or return None if transformers is
+    unavailable / the config cannot be loaded.
+
+    Shared by L1 and L6 of ``try_infer_model_type`` so the import guard and
+    the ``from_pretrained`` swallow only live in one place.
+    """
+    try:
+        from transformers import PretrainedConfig  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        return PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
+    except Exception:
+        return None
+
+
 def try_infer_model_type(
     model: str,
     trust_remote_code: bool = True,
@@ -64,17 +81,9 @@ def try_infer_model_type(
     model_dir = Path(model) if Path(model).is_dir() else None
 
     # L1: transformers PretrainedConfig (skipped if not installed)
-    try:
-        from transformers import PretrainedConfig  # type: ignore[import-not-found]
-
-        try:
-            cfg = PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
-        except Exception:
-            cfg = None
-        if cfg is not None and getattr(cfg, "model_type", None):
-            return cfg.model_type
-    except ImportError:
-        pass
+    cfg = _load_pretrained_config(model, trust_remote_code)
+    if cfg is not None and getattr(cfg, "model_type", None):
+        return cfg.model_type
 
     # L2 / L3: config.json
     if model_dir is not None:
@@ -98,31 +107,23 @@ def try_infer_model_type(
         return best
 
     # L6: hf_architectures match (needs transformers)
-    try:
-        from transformers import PretrainedConfig  # type: ignore[import-not-found]
-
-        try:
-            cfg = PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
-        except Exception:
-            cfg = None
-        if cfg is not None:
-            archs = set(getattr(cfg, "architectures", []) or [])
-            if archs:
-                for _key, registered in OMNI_PIPELINES.items():
-                    if isinstance(registered, PipelineConfig):
-                        if not registered.hf_architectures:
-                            continue
-                        if archs.intersection(registered.hf_architectures):
-                            predicate = registered.hf_config_predicate
-                            if predicate is not None:
-                                try:
-                                    if not predicate(cfg):
-                                        continue
-                                except Exception:
+    cfg = _load_pretrained_config(model, trust_remote_code)
+    if cfg is not None:
+        archs = set(getattr(cfg, "architectures", []) or [])
+        if archs:
+            for _key, registered in OMNI_PIPELINES.items():
+                if isinstance(registered, PipelineConfig):
+                    if not registered.hf_architectures:
+                        continue
+                    if archs.intersection(registered.hf_architectures):
+                        predicate = registered.hf_config_predicate
+                        if predicate is not None:
+                            try:
+                                if not predicate(cfg):
                                     continue
-                            return registered.name
-    except ImportError:
-        pass
+                            except Exception:
+                                continue
+                        return registered.name
 
     return None
 

@@ -17,6 +17,7 @@ dotted-path strings on ``StageConfig``; this runner resolves them via
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
@@ -69,32 +70,30 @@ class PipelineRunner:
         """
         extras = dict(per_stage_defaults)
         if request is None:
-            kwargs: dict[str, Any] = {}
-            if "temperature" in per_stage_defaults:
-                kwargs["temperature"] = float(per_stage_defaults["temperature"])
-            if "top_p" in per_stage_defaults:
-                kwargs["top_p"] = float(per_stage_defaults["top_p"])
-            if "top_k" in per_stage_defaults:
-                kwargs["top_k"] = int(per_stage_defaults["top_k"])
-            if "max_tokens" in per_stage_defaults:
-                kwargs["max_tokens"] = int(per_stage_defaults["max_tokens"])
+            # Deploy YAML is untyped; cast strictly-typed fields so
+            # SamplingParams' frozen validation accepts them.
+            _casts = {
+                "temperature": float,
+                "top_p": float,
+                "top_k": int,
+                "max_tokens": int,
+                "n": int,
+            }
+            kwargs: dict[str, Any] = {
+                name: cast_(per_stage_defaults[name])
+                for name, cast_ in _casts.items()
+                if name in per_stage_defaults
+            }
             if "seed" in per_stage_defaults:
+                # int | None: pass through unchanged so YAML `seed: null` works.
                 kwargs["seed"] = per_stage_defaults["seed"]
-            if "n" in per_stage_defaults:
-                kwargs["n"] = int(per_stage_defaults["n"])
             if "stop" in per_stage_defaults:
                 stop = per_stage_defaults["stop"]
                 kwargs["stop"] = list(stop) if stop is not None else None
             return SamplingParams(extra=extras, **kwargs)
 
-        return SamplingParams(
-            temperature=request.temperature,
-            top_p=request.top_p,
-            top_k=request.top_k,
-            max_tokens=request.max_tokens,
-            stop=list(request.stop) if request.stop else None,
-            seed=request.seed,
-            n=request.n,
+        return dataclasses.replace(
+            request,
             extra={**extras, **(request.extra or {})},
         )
 

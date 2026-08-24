@@ -65,6 +65,7 @@ dmypy.json
 
 # Model weights (large files; should not be committed)
 models_cache/
+pretrained/
 *.safetensors
 *.bin
 *.pt

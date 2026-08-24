@@ -22,7 +22,7 @@ from nanovllm_omni import Omni, SamplingParams
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="jingyaogong/minimind-3o")
+    parser.add_argument("--model", default="pretrained/minimind-3o")
     parser.add_argument("--mimi", default=None)
     parser.add_argument("--prompt", default="你好，请用一句话介绍你自己。")
     parser.add_argument("--max-tokens", type=int, default=None)

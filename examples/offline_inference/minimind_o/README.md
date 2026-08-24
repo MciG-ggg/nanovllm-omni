@@ -8,18 +8,18 @@ Single-process Python inference against the aligned API
 ## Setup
 
 Weights are **offline-first**: the bundle loader never triggers a
-network download. Pull both checkpoints once with `hf` and keep them
-in a local directory of your choice:
+network download. Pull both checkpoints once with `hf` into
+`pretrained/`:
 
 ```bash
-hf download jingyaogong/minimind-3o --local-dir <model-dir>/minimind-3o
-hf download kyutai/mimi             --local-dir <model-dir>/mimi
+hf download jingyaogong/minimind-3o --local-dir pretrained/minimind-3o
+hf download kyutai/mimi             --local-dir pretrained/mimi
 ```
 
-Pass those directories to `--model` and `--mimi`. If you prefer the
-Hub id (default), make sure `~/.cache/huggingface/hub/` already has
-the snapshots — otherwise the loader logs a warning naming
-`--model /path/to/local/dir`.
+That matches the `--model` / `--mimi` defaults. If you prefer the
+Hub id, pass `--model jingyaogong/minimind-3o` explicitly and make
+sure `~/.cache/huggingface/hub/` already has the snapshot —
+otherwise the loader logs a warning naming `--model /path/to/local/dir`.
 
 ## Run examples
 
@@ -28,7 +28,7 @@ the snapshots — otherwise the loader logs a warning naming
 ```bash
 cd examples/offline_inference/minimind_o
 HF_HUB_OFFLINE=1 bash run_end2end.sh \
-    --model <model-dir>/minimind-3o --mimi <model-dir>/mimi --out audio.wav
+    --mimi pretrained/mimi --out audio.wav
 ```
 
 `end2end.py` constructs `Omni(...)` directly, calls
@@ -40,7 +40,7 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 ```bash
 cd examples/offline_inference/minimind_o
 HF_HUB_OFFLINE=1 bash run_batched.sh \
-    --model <model-dir>/minimind-3o --mimi <model-dir>/mimi --out batched_smoke
+    --mimi pretrained/mimi --out batched_smoke
 ```
 
 `batched.py` exercises `engine/sched.py + engine/batched_runner.py`

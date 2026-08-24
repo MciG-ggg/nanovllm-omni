@@ -53,6 +53,32 @@ folders.
   `cd "$(dirname "$0")"` matters — `deploy/<model>.yaml` resolves
   relative to the repo root only after the `cd`.
 
+## Default `--model` paths
+
+Project convention: **entrypoints default `--model` to a local path
+under `pretrained/`, not to a HuggingFace Hub id**. This matches
+the offline-first bundle loader (`1278891 fix(bundle): align
+_resolve_snapshot with vllm-omni's offline-first semantics`) and
+lets WSL run the same script as Mac without a Hub login.
+
+```bash
+# Default for every example entrypoint:
+--model  pretrained/<model-folder-name>
+--mimi   pretrained/<model-folder-name>   # if the model has one
+```
+
+The `Setup` section in each model README lists the matching
+`hf download --local-dir pretrained/<name>` commands. A user who
+prefers Hub ids can still pass them explicitly:
+
+```bash
+python .../end2end.py --model jingyaogong/minimind-3o
+python .../libero_eval.py --model HuggingFaceVLA/smolvla_libero
+```
+
+The bundle resolver accepts both forms; see
+`nanovllm_omni/entrypoints/base.py:OmniBase._resolve_pipeline`.
+
 ## Required sections in every README
 
 In this order, modeled on vllm-omni's per-model READMEs:

@@ -63,6 +63,7 @@ deploy/         # per-family sampling/resource defaults
 examples/
     offline_inference/
         minimind_o/   # Python-seam audio smoke (single + batched)
+        smolvla/      # SmolVLA policy (synthetic L1 + LIBERO eval)
     online_serving/
         minimind_o/   # curl/stdlib client for /v1/chat/completions
 tests/          # automated tests

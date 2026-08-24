@@ -1,9 +1,9 @@
 """SmolVLA policy in LIBERO, driven through the Omni seam.
 
-Inference goes through ``Omni(...).generate(...)`` -- the same public entry
-point as MiniMind-O. The SmolVLA pipeline stage
-(``nanovllm_omni.models.smolvla.stage``) runs the exact official eval chain
-when the caller passes a raw lerobot LIBERO obs dict:
+Inference goes through ``Omni(...).generate(...)`` -- the same public
+entry point as MiniMind-O. The SmolVLA pipeline stage
+(``nanovllm_omni.models.smolvla.stage``) runs the exact official eval
+chain when the caller passes a raw lerobot LIBERO obs dict:
 
     preprocess_observation -> env_preprocessor (flip + quat->axis-angle)
     -> policy.preprocessor -> policy.select_action (50-step chunk queue)
@@ -11,15 +11,15 @@ when the caller passes a raw lerobot LIBERO obs dict:
 
 That chain is what delivers ~100% SR on libero_object task 5 with the
 ``HuggingFaceVLA/smolvla_libero`` checkpoint (matches lerobot/scripts/
-lerobot_eval.py). This script only builds the env, collects raw obs, and
-feeds each one through ``Omni.generate``; the stage owns all the
-preprocessing that a from-scratch loop tends to get subtly wrong (which is
-why hand-rolled obs led to 0% SR).
+lerobot_eval.py). This script only builds the env, collects raw obs,
+and feeds each one through ``Omni.generate``; the stage owns all the
+preprocessing that a from-scratch loop tends to get subtly wrong
+(which is why hand-rolled obs led to 0% SR).
 
-Requires a GPU host with: pip install -e '.[smolvla]' lerobot, and the
-``pretrained/smolvla_libero`` + ``pretrained/smolvlm2-500m`` directories
-(see examples/smolvla.py docstring; WSL has no HF access, so point the
-patched config at a local SmolVLM2).
+Requires a GPU host with ``lerobot`` (see ``[smolvla]`` extra), and
+the ``pretrained/smolvla_libero`` + ``pretrained/smolvlm2-500m``
+directories (see ``synthetic_obs.py`` docstring; WSL has no HF access,
+so point the patched config at a local SmolVLM2).
 """
 
 from __future__ import annotations
@@ -98,7 +98,9 @@ def main() -> int:
                 # SmolVLA stage runs the official eval chain internally.
                 out = omni.generate(
                     [task_description],
-                    SamplingParams(extra={"libero_obs": obs, "libero_task_suite": args.task_suite}),
+                    SamplingParams(
+                        extra={"libero_obs": obs, "libero_task_suite": args.task_suite},
+                    ),
                 )[0]
                 if out.error:
                     print(

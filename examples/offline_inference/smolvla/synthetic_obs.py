@@ -1,15 +1,22 @@
-"""L1 demo: Omni.generate → ActionArtifact for SmolVLA (synthetic obs).
+"""L1 demo: Omni.generate -> ActionArtifact for SmolVLA (synthetic obs).
 
-Same seam as ``examples/offline_inference/minimind_o/end2end.py``:
-construct Omni, call generate. Images / state go in
-``SamplingParams.extra``; the prompt is the instruction.
+Same Python seam as ``offline_inference/minimind_o/end2end.py``:
+construct ``Omni(...)``, call ``generate([instruction], sampling)``.
+Images / state go in ``SamplingParams.extra``; the prompt is the
+instruction. This script feeds random pixels and a zero state, so it
+runs without a real dataset and verifies the action-shape contract
+before doing real-env evaluation in ``libero_eval.py``.
+
+Run with the local weights pre-provisioned (the bundle loader is
+offline-first and never auto-fetches):
 
     pip install -e '.[smolvla]'
-    # Mac (proxy) then rsync to WSL — do not run inference on the Mac:
-    HTTPS_PROXY=http://127.0.0.1:29659 hf download HuggingFaceVLA/smolvla_libero \
+    # Mac (proxy) then rsync to WSL -- do not run inference on the Mac:
+    HTTPS_PROXY=http://127.0.0.1:29659 hf download HuggingFaceVLA/smolvla_libero \\
         --local-dir pretrained/smolvla_libero
-    ssh mcigs-wsl '.venv/bin/python examples/smolvla.py \
-        --model pretrained/smolvla_libero --dtype int8 --device cuda'
+    cd examples/offline_inference/smolvla
+    HF_HUB_OFFLINE=1 bash run_synthetic.sh \\
+        --model pretrained/smolvla_libero --dtype int8 --device cuda
 """
 
 from __future__ import annotations

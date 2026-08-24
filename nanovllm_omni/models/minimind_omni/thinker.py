@@ -112,7 +112,7 @@ def run_generate(
     """
     import torch
 
-    from .generation import stream_generate_optimized
+    from .generation import stream_generate
 
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
@@ -120,7 +120,7 @@ def run_generate(
             hasattr(model, name)
             for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
         ):
-            stream = stream_generate_optimized(
+            stream = stream_generate(
                 model,
                 input_ids,
                 eos_token_id=eos_token_id,

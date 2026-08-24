@@ -1,173 +1,101 @@
-"""Project-owned optimized MiniMind-O generation loop.
+"""Project-owned streaming MiniMind-O generation loop.
 
-This intentionally keeps the vendored model untouched.  The model's forward
-method remains the upstream implementation; only the token/audio sampling
-loop and its growing input buffers live here.
+The single-request path (``stream_generate``) is a thin wrapper that drives a
+``BatchedThinkerRunner`` with ``max_batch=1`` and yields one
+``(text_chunk, audio_frame)`` pair per decode step. All per-step work
+(forward, sampling, EOS bookkeeping, frame emission, open_thinking audio
+gating) is shared with the batched engine path used by
+``engine.run_batched_generate``.
+
+The earlier hand-rolled ``stream_generate_optimized`` was retired because it
+duplicated ~120 lines of per-step logic with ``BatchedThinkerRunner``; now
+both paths route through one MiniMind generation loop.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
+from .batched_generation import BatchedThinkerRunner
 
-def _sample_audio_codes(
-    audio_logits: list[Any], audio_codes: list[list[int]], active: list[int]
-) -> dict[int, int]:
-    """Sample active audio streams as one GPU batch and sync once."""
-    import torch
-    import torch.nn.functional as functional
-
-    logits = torch.stack([audio_logits[i][0, -1, :].clone() / 0.2 for i in active])
-    for row, layer in enumerate(active):
-        for previous in audio_codes[layer][-3:]:
-            logits[row, previous] /= 1.05
-    top_values, top_indices = logits.topk(50, dim=-1)
-    probabilities = functional.softmax(top_values, dim=-1)
-    # Keep one multinomial call per stream: batching this call changes the
-    # Philox draw order and therefore changes subsequent text samples.
-    sampled = torch.cat([torch.multinomial(probabilities[row], 1) for row in range(len(active))])
-    codes = top_indices.gather(1, sampled[:, None]).flatten().tolist()
-    return dict(zip(active, codes, strict=True))
+__all__ = ["stream_generate"]
 
 
-def stream_generate_optimized(
+def stream_generate(
     model: Any,
     input_ids: Any,
+    *,
     eos_token_id: int | None = 2,
     max_new_tokens: int = 1024,
     temperature: float = 0.75,
     top_p: float = 0.90,
     rp: float = 1.0,
-    use_cache: bool = True,
-    return_audio_codes: bool = False,
-    **args: Any,
+    use_cache: bool = True,  # accepted for API parity; runner always uses cache
+    return_audio_codes: bool = False,  # accepted for API parity; runner always returns
+    open_thinking: bool = False,
+    **_kwargs: Any,
 ) -> Iterator[tuple[Any, Any]]:
-    """Stream MiniMind-O output with project-owned low-sync bookkeeping.
+    """Stream MiniMind-O output one decode step at a time.
 
-    The text sample still synchronizes once per step because the next model
-    input depends on it.  Eight audio samples are kept on device and copied to
-    Python together in one transfer.  Input/audio history buffers are fixed
-    capacity, avoiding repeated growth ``torch.cat`` calls in this loop.
+    Equivalent to ``run_batched_generate([prompt], max_batch=1)`` driven by
+    a one-slot ``OmniScheduler``. ``text_chunk`` is a ``[1, N]`` tensor of
+    all generated text tokens (or ``None`` after EOS); ``audio_frame`` is a
+    list of 8 ints (Mimi codebook frame) or ``None`` until the 8th decode
+    step. The generator terminates once ``BatchedThinkerRunner.step_finished``
+    flips True (text EOS + last audio layer stopped, or ``max_new_tokens``).
     """
     import torch
-    import torch.nn.functional as functional
 
-    start_pos = input_ids.shape[1]
-    capacity = start_pos + max_new_tokens
-    past_kvs, text_finished, first_finished = None, False, True
-    audio_codes: list[list[int]] = [[] for _ in range(8)]
-    audio_stop_pos: list[int | None] = [None] * 8
-    audio_pad = model.audio_pad_token
-    audio_stop = model.audio_stop_token
-    audio_spk = model.audio_spk_token
-    audio_buffer = torch.full(
-        (1, 8, capacity), audio_pad, dtype=torch.long, device=input_ids.device
+    from nanovllm_omni.engine.sched import OmniScheduler
+
+    cfg = getattr(model, "config", None)
+    max_seq = int(getattr(cfg, "max_position_embeddings", 4096))
+    sched = OmniScheduler(max_batch=1, max_seq=max_seq)
+    runner = BatchedThinkerRunner(
+        SimpleNamespace(model=model),
+        sched,
+        temperature=temperature,
+        top_p=top_p,
+        rp=rp,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=eos_token_id if eos_token_id is not None else 2,
+        open_thinking=open_thinking,
     )
-    text_buffer = torch.empty((1, capacity), dtype=input_ids.dtype, device=input_ids.device)
-    text_buffer[:, :start_pos] = input_ids
-    audio_input = torch.empty((1, 9, 1), dtype=torch.long, device=input_ids.device)
+    rid = runner.add_request(input_ids[0].tolist())
 
-    spk_emb = args.get("spk_emb")
-    ref_codes = args.get("ref_codes")
-    ref_len = ref_codes.shape[2] if ref_codes is not None else 0
-    spk_reserve = 1 if spk_emb is not None else 0
-    fill_end = start_pos
-    fill_start = max(spk_reserve, start_pos - ref_len)
-    if ref_codes is not None and fill_start < fill_end:
-        audio_buffer[:, :, fill_start:fill_end] = ref_codes[:, :, -(fill_end - fill_start) :]
-    if spk_emb is not None and fill_start > 0:
-        audio_buffer[:, :, fill_start - 1] = audio_spk
-
-    think_end_step, generated_tokens = None, ([] if args.get("open_thinking", False) else None)
-    current_len = start_pos
-    while current_len < capacity:
-        if past_kvs is None or not use_cache:
-            model_input = torch.cat(
-                (audio_buffer[:, :, :current_len], text_buffer[:, :current_len].unsqueeze(1)),
-                dim=1,
-            )
-        else:
-            # Build the [1, 9, 1] model_input via a single contiguous copy
-            # so we replace 9 strided writes (one kernel each) with 1.
-            audio_slice = audio_buffer[0, :, current_len - 1]  # [8]
-            text_val = text_buffer[0, current_len - 1]  # scalar tensor
-            flat = audio_input.view(9)
-            # audio_slice is [8], audio_input[:, :8, 0] is a contiguous
-            # [8] block; PyTorch can copy_() that in one launch.
-            flat[:8].copy_(audio_slice)
-            flat[8] = text_val
-            model_input = audio_input
-        out = model.forward(
-            model_input,
-            past_key_values=past_kvs,
-            use_cache=use_cache,
-            **args,
-        )
-        past_kvs = out.past_key_values
-
-        logits = out.logits[0, -1, :].clone() / (temperature + 1e-9)
-        # Keep repetition penalty on-device; .tolist() here forced a sync.
-        # Skip the penalty entirely when rp == 1.0 (no-op) to avoid the
-        # torch.unique + index overhead on the hot path.
-        if rp != 1.0:
-            logits[torch.unique(text_buffer[0, :current_len])] /= rp
-        if top_p and top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-            mask = torch.cumsum(functional.softmax(sorted_logits, dim=-1), dim=-1) > top_p
-            mask[1:], mask[0] = mask[:-1].clone(), False
-            logits[sorted_indices[mask]] = -float("Inf")
-        text_token = torch.multinomial(functional.softmax(logits, dim=-1), 1).item()
-
-        if text_finished:
-            text_token = (
-                args.get("enter_token_id", 201) if first_finished else args.get("pad_token_id", 0)
-            )
-            first_finished = False
-
-        step = current_len - start_pos
-        audio_step = step - 1
-        if generated_tokens is not None:
-            generated_tokens.append(text_token)
-            if not think_end_step and generated_tokens[-len(model.config.think_end_ids) :] == list(
-                model.config.think_end_ids
-            ):
-                think_end_step = step + 2
-            audio_step = (step - think_end_step) if think_end_step else -1
-
-        active = [i for i in range(8) if audio_step >= i]
-        sampled = _sample_audio_codes(out.audio_logits, audio_codes, active) if active else {}
-        next_audio = [audio_pad] * 8
-        for i in range(8):
-            code = sampled.get(i, audio_pad)
-            next_audio[i] = code
-            audio_codes[i].append(code)
-            if i in sampled and audio_stop_pos[i] is None and code >= 2048:
-                audio_stop_pos[i] = len(audio_codes[i]) - 1
-
-        if text_finished and audio_codes[7][-1] == audio_stop:
+    seen_frames = 0
+    while sched.has_requests():
+        out = sched.schedule()
+        if out.is_empty:
             break
-
-        text_buffer[:, current_len] = text_token
-        audio_buffer[:, :, current_len] = torch.tensor(
-            next_audio, dtype=torch.long, device=input_ids.device
-        )
-        current_len += 1
-
-        audio_frame = None
-        if return_audio_codes and audio_step >= 7:
-            frame = [audio_codes[i][step - 7 + i] for i in range(8)]
-            active_layers = sum(
-                1 for i in range(8) if audio_stop_pos[i] is None or step - 7 + i < audio_stop_pos[i]
-            )
-            if active_layers >= 8:
-                audio_frame = frame
-        if not text_finished:
-            yield text_buffer[:, start_pos:current_len], audio_frame
-            if text_token == eos_token_id:
-                text_finished = True
-        else:
-            yield None, audio_frame
-
-
-__all__ = ["stream_generate_optimized"]
+        prefilled: set[str] = set()
+        finished: set[str] = set()
+        for group in out.prefill_groups:
+            if rid in group.req_ids:
+                runner.prefill_group(group)
+                prefilled.add(rid)
+        for group in out.decode_groups:
+            if rid not in group.req_ids:
+                continue
+            runner.decode_group(group)
+            st = runner.states[rid]
+            text_chunk = torch.as_tensor(
+                st.text_tokens,
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            ).unsqueeze(
+                0
+            )  # [1, N], matches the old text_buffer[:, start_pos:current_len]
+            audio_frame = st.frames[seen_frames] if len(st.frames) > seen_frames else None
+            seen_frames = len(st.frames)
+            if st.text_finished:
+                yield None, audio_frame
+            else:
+                yield text_chunk, audio_frame
+            if runner.step_finished(rid):
+                finished.add(rid)
+        sched.update_from_output(prefilled=prefilled, finished=finished)
+        if finished:
+            return

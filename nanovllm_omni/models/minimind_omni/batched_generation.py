@@ -33,7 +33,12 @@ from nanovllm_omni.engine.sched import (
     SchedulerGroup,
 )
 
-_AUDIO_VOCAB_BOUNDARY = 2048  # codes >= this are audio stop / special (MIMI_CODE_VOCAB_LIMIT)
+from ._sampling import (
+    AUDIO_VOCAB_BOUNDARY,
+    NUM_AUDIO_LAYERS,
+    sample_one_audio_layer,
+    sample_text_token,
+)
 
 
 @dataclass
@@ -61,6 +66,11 @@ class BatchedThinkerState:
 
     # decode calls completed (each appends one text token + 8 audio codes)
     step: int = 0
+
+    # open_thinking audio gating: when the trailing text tokens match
+    # ``runner.think_end_ids``, audio is suppressed until 2 decode steps
+    # later (matches generation.py L130-137). ``None`` until detection.
+    think_end_step: int | None = None
 
 
 class BatchedThinkerRunner:
@@ -102,6 +112,7 @@ class BatchedThinkerRunner:
         self.think_end_ids = list(
             getattr(getattr(self.model, "config", None), "think_end_ids", []) or []
         )
+        self.open_thinking = open_thinking  # hot-path access; mirrors sampling["open_thinking"]
         self.base_seed = base_seed
         self.states: dict[str, BatchedThinkerState] = {}
 
@@ -186,45 +197,44 @@ class BatchedThinkerRunner:
     # -- per-request sampling (isolated RNG, Q10a) --------------------------
 
     def _sample_text(self, st: BatchedThinkerState, logits_row: Any) -> int:
-        import torch
-        import torch.nn.functional as functional
-
-        temp, top_p, rp = (
-            self.sampling["temperature"],
-            self.sampling["top_p"],
-            self.sampling["rp"],
-        )
-        logits = logits_row.clone() / (temp + 1e-9)
-        hist = st.prompt_ids + st.text_tokens
-        if rp != 1.0:
-            uniq = torch.unique(torch.tensor(hist, device=logits.device))
-            logits[uniq] /= rp
-        if top_p and top_p < 1.0:
-            sorted_l, sorted_i = torch.sort(logits, descending=True)
-            mask = torch.cumsum(functional.softmax(sorted_l, dim=-1), dim=-1) > top_p
-            mask[1:], mask[0] = mask[:-1].clone(), False
-            logits[sorted_i[mask]] = -float("Inf")
-        return int(
-            torch.multinomial(functional.softmax(logits, dim=-1), 1, generator=st.gen).item()
+        return sample_text_token(
+            logits_row,
+            history_ids=st.prompt_ids + st.text_tokens,
+            temperature=self.sampling["temperature"],
+            top_p=self.sampling["top_p"],
+            rp=self.sampling["rp"],
+            gen=st.gen,
         )
 
     def _sample_audio_row(self, st: BatchedThinkerState, audio_logits_row: Any) -> list[int]:
         """Port of generation.py ``_sample_audio_codes`` for one request row."""
-        import torch
-        import torch.nn.functional as functional
-
-        active = [i for i in range(8) if st.step - 1 >= i]
-        codes = [self.audio_pad] * 8
+        audio_step = self._compute_audio_step(st)
+        active = [i for i in range(NUM_AUDIO_LAYERS) if audio_step >= i]
+        codes = [self.audio_pad] * NUM_AUDIO_LAYERS
         for layer in active:
-            logits_i = audio_logits_row[layer].clone() / 0.2
-            for prev in st.audio_codes[layer][-3:]:
-                logits_i[prev] /= 1.05
-            top_v, top_i = logits_i.topk(50)
-            idx = int(
-                torch.multinomial(functional.softmax(top_v, dim=-1), 1, generator=st.gen).item()
+            codes[layer] = sample_one_audio_layer(
+                audio_logits_row[layer],
+                st.audio_codes[layer],
+                gen=st.gen,
             )
-            codes[layer] = int(top_i[idx])
         return codes
+
+    def _compute_audio_step(self, st: BatchedThinkerState) -> int:
+        """Audio column index for active-layer gating.
+
+        Without ``open_thinking``: ``audio_step = st.step - 1`` (audio lags
+        text by one position, matches generation.py L129).
+
+        With ``open_thinking``: ``audio_step = -1`` until the trailing text
+        tokens match ``think_end_ids``; once detected at step ``D``, audio
+        starts at ``D + 2`` (matches generation.py L130-137).
+        """
+        base = st.step - 1
+        if not self.open_thinking or not self.think_end_ids:
+            return base
+        if st.think_end_step is None:
+            return -1
+        return base - st.think_end_step
 
     # -- group execution ----------------------------------------------------
 
@@ -282,6 +292,17 @@ class BatchedThinkerRunner:
             if st.text_finished:
                 tok = self._enter_or_pad(st)
             st.text_tokens.append(tok)
+            # Detect think_end (open_thinking audio gating). Detection must
+            # happen before ``st.step += 1`` so the +2 offset uses the current
+            # pre-increment step value, matching generation.py L135.
+            if (
+                self.open_thinking
+                and self.think_end_ids
+                and st.think_end_step is None
+                and len(st.text_tokens) >= len(self.think_end_ids)
+                and st.text_tokens[-len(self.think_end_ids) :] == list(self.think_end_ids)
+            ):
+                st.think_end_step = st.step + 2
             st.step += 1
             codes = self._sample_audio_row(st, [al[r, 0, :] for al in audio_logits])
             self._note_audio(st, codes)
@@ -310,7 +331,7 @@ class BatchedThinkerRunner:
         active_here = {i for i in range(8) if st.step - 1 >= i}
         for i, code in enumerate(codes):
             st.audio_codes[i].append(code)
-            if i in active_here and code >= _AUDIO_VOCAB_BOUNDARY and st.audio_stop_pos[i] is None:
+            if i in active_here and code >= AUDIO_VOCAB_BOUNDARY and st.audio_stop_pos[i] is None:
                 st.audio_stop_pos[i] = len(st.audio_codes[i]) - 1
         st.last_audio = codes
 

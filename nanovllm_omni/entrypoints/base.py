@@ -237,7 +237,10 @@ class OmniBase:
 
             extra = dict(self.engine_args.extra or {})
             mimi_model_id = extra.pop("mimi_model_id", None) or extra.pop("mimi", None)
-            kwargs: dict[str, Any] = {}
+            kwargs: dict[str, Any] = {
+                "trust_remote_code": self.engine_args.trust_remote_code,
+                "dtype": self.engine_args.dtype,
+            }
             if mimi_model_id:
                 kwargs["mimi_model_id"] = mimi_model_id
             self._bundle = load_minimind_omni_bundle(

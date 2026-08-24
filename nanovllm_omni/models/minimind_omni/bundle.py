@@ -87,23 +87,51 @@ def _pick_device(device: str | None) -> str:
     return "cpu"
 
 
+def _cast_model_dtype(model: Any, dtype: str | None, device: str) -> Any:
+    """Cast ``model`` to ``dtype``; no-op on cpu regardless of dtype.
+
+    ``dtype=None`` keeps the legacy ``.half()`` behavior unchanged so
+    existing callers are bit-for-bit equivalent. SmolVLA's int8/qint8
+    quantization path does NOT flow through here -- SmolVLA's stage
+    factory handles its own dtypes.
+    """
+    if device == "cpu":
+        return model
+    if dtype is None or dtype == "float16":
+        return model.half()
+    if dtype == "bfloat16":
+        return model.bfloat16()
+    if dtype == "float32":
+        return model.float()
+    raise ValueError(f"unsupported dtype {dtype!r}; expected None, float16, bfloat16, or float32")
+
+
 def load_minimind_omni_bundle(
     model_id: str = DEFAULT_MINIMIND_MODEL_ID,
     device: str | None = None,
     mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
+    trust_remote_code: bool = True,
+    dtype: str | None = None,
     **kwargs: Any,
 ) -> MinimindBundle:
-    """Load MiniMind-O + tokenizer + Mimi onto ``device``."""
+    """Load MiniMind-O + tokenizer + Mimi onto ``device``.
+
+    ``trust_remote_code`` and ``dtype`` are plumbed from
+    ``OmniEngineArgs`` (see /docs/aligned_interfaces.md "OmniEngineArgs
+    effective-field matrix"); both default to the legacy behavior so
+    existing callers do not need to change.
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
 
     device = _pick_device(device)
     snapshot_dir = _resolve_snapshot(model_id)
     mimi_dir = _resolve_snapshot(kwargs.get("mimi_model_id", mimi_model_id))
 
-    tokenizer = AutoTokenizer.from_pretrained(snapshot_dir, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(snapshot_dir, trust_remote_code=True).eval()
-    if device != "cpu":
-        model = model.half()
+    tokenizer = AutoTokenizer.from_pretrained(snapshot_dir, trust_remote_code=trust_remote_code)
+    model = AutoModelForCausalLM.from_pretrained(
+        snapshot_dir, trust_remote_code=trust_remote_code
+    ).eval()
+    model = _cast_model_dtype(model, dtype, device)
     model = model.to(device)
     from .attention import enable_sdpa_decode
     from .qkv_fusion import enable_fused_projections
@@ -116,8 +144,7 @@ def load_minimind_omni_bundle(
     enable_fused_rope(model)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
-    if device != "cpu":
-        mimi = mimi.half()
+    mimi = _cast_model_dtype(mimi, dtype, device)
     mimi = mimi.to(device)
     # Official eval_omni attaches mimi on the model for decode convenience.
     model.mimi_model = mimi

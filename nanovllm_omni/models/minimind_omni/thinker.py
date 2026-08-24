@@ -30,7 +30,10 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
-    bundle_kwargs: dict[str, Any] = {}
+    bundle_kwargs: dict[str, Any] = {
+        "trust_remote_code": getattr(args, "trust_remote_code", True),
+        "dtype": getattr(args, "dtype", None),
+    }
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id
     bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)

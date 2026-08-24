@@ -41,10 +41,13 @@ smolvla = [
     "huggingface_hub>=0.20",
     "numpy>=1.24",
 ]
-# Real-weight MiniMind-O path: required for examples/minimind_omni.py and the
-# `pytest -m smoke` suite. ~1 GB checkpoint is downloaded from the HF
-# Hub on first execute, not at install time. funasr/librosa/onnxruntime are
-# peer deps of the MiniMind trust_remote_code modeling files.
+# Real-weight MiniMind-O path: required for
+# examples/offline_inference/minimind_o/{end2end,batched}.py and the
+# `pytest -m smoke` suite. The bundle loader is offline-first; weights
+# must be pre-provisioned (see
+# examples/offline_inference/minimind_o/README.md) before the smoke
+# tests can run, not pulled at install time. funasr/librosa/onnxruntime
+# are peer deps of the MiniMind trust_remote_code modeling files.
 minimind = [
     "torch>=2.0",
     "transformers>=4.50",

@@ -1,7 +1,8 @@
 """L1 demo: Omni.generate → ActionArtifact for SmolVLA (synthetic obs).
 
-Same seam as examples/minimind_omni.py: construct Omni, call generate.
-Images / state go in SamplingParams.extra; the prompt is the instruction.
+Same seam as ``examples/offline_inference/minimind_o/end2end.py``:
+construct Omni, call generate. Images / state go in
+``SamplingParams.extra``; the prompt is the instruction.
 
     pip install -e '.[smolvla]'
     # Mac (proxy) then rsync to WSL — do not run inference on the Mac:

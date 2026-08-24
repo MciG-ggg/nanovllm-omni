@@ -18,10 +18,27 @@ Install the package and its existing dependencies:
 
 ```bash
 pip install -e ".[dev]"
-python examples/audio.py
 ```
 
-The MiniMind-O smoke test writes `audio.wav` in the repository root. Model weights are downloaded from Hugging Face on first use; a CUDA-capable machine with sufficient memory is recommended.
+Pull the MiniMind-O + Mimi checkpoints once into local directories
+(the bundle loader is offline-first and never auto-fetches):
+
+```bash
+hf download jingyaogong/minimind-3o --local-dir /home/mcig/minimind-3o
+hf download kyutai/mimi             --local-dir /home/mcig/mimi
+```
+
+Then run the single-prompt smoke against the local weights:
+
+```bash
+cd examples/offline_inference/minimind_o
+HF_HUB_OFFLINE=1 bash run_end2end.sh \
+    --model /home/mcig/minimind-3o --mimi /home/mcig/mimi --out audio.wav
+```
+
+`audio.wav` lands in the example folder. A CUDA-capable machine with
+at least 4 GB of VRAM is recommended; CPU inference works but is
+slow.
 
 The aligned API is available as it is implemented:
 
@@ -43,7 +60,11 @@ Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage 
 ```
 nanovllm_omni/  # package implementation (config layer in nanovllm_omni/config/)
 deploy/         # per-family sampling/resource defaults
-examples/       # runnable examples
+examples/
+    offline_inference/
+        minimind_o/   # Python-seam audio smoke (single + batched)
+    online_serving/
+        minimind_o/   # curl/stdlib client for /v1/chat/completions
 tests/          # automated tests
 docs/           # project notes
 .scratch/       # alignment specification and ticket checklists

@@ -1,23 +1,26 @@
 """Smoke: batched continuous-batching generate -> audio.wav (MiniMind-O).
 
-This example is the WSL real-weight check for the batched engine loop
-(engine/sched.py + engine/batched_runner.py). It asserts the property that
-would otherwise be invisible in the fake-model unit tests:
+Real-weight check for the batched engine loop
+(``engine/sched.py`` + ``engine/batched_runner.py``). Asserts two
+properties that would otherwise be invisible in the fake-model unit
+tests:
 
-* Q10a determinism -- each request owns its RNG (seeded by request id), so
-  running request ``p1`` batched next to ``p2`` MUST produce byte-identical
-  audio to running ``p1`` solo. The engine loop is exercised via
-  ``run_batched_generate`` with ``max_batch=2``.
+* **Q10a determinism** -- each request owns its RNG (seeded by request
+  id), so running request ``p1`` batched next to ``p2`` MUST produce
+  byte-identical audio to running ``p1`` solo. The engine loop is
+  exercised via ``run_batched_generate`` with ``max_batch=2``.
 
-* Real B>1 decode -- the model only supports one scalar ``start_pos`` per
-  forward, so two same-length prompts form a real [B=2, 9, 1] decode group.
-  We wrap ``model.forward`` to record the actual input shapes and report the
-  largest decode batch that occurred (a smoke gate, not a benchmark).
+* **Real B>1 decode** -- the model only supports one scalar
+  ``start_pos`` per forward, so two same-length prompts form a real
+  ``[B=2, 9, 1]`` decode group. ``model.forward`` is wrapped to
+  record the actual input shapes; the largest decode batch observed
+  is reported at the end as a smoke gate, not a benchmark.
 
-Run on WSL with the provisioned offline weights:
+Run with the local weights pre-provisioned by the project README::
 
-    HF_HUB_OFFLINE=1 uv run python examples/batched_minimind_omni.py
-    HF_HUB_OFFLINE=1 uv run python examples/batched_minimind_omni.py --prompt-a "..." --prompt-b "..."
+    cd examples/offline_inference/minimind_o
+    HF_HUB_OFFLINE=1 bash run_batched.sh --model /home/mcig/minimind-3o \
+        --mimi /home/mcig/mimi --out batched_smoke
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ def _wav_bytes(payload) -> bytes:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="jingyaogong/minimind-3o")
     parser.add_argument("--mimi", default=None)
     parser.add_argument("--device", default=None)
@@ -91,7 +94,11 @@ def main() -> None:
 
     # Q10a: byte-identical per-request output regardless of batch layout
     assert solo_a == batched_a, "Q10a violation: prompt A differs between solo and batched runs"
-    for name, data in (("solo_a", solo_a), ("batched_a", batched_a), ("batched_b", batched_b)):
+    for name, data in (
+        ("solo_a", solo_a),
+        ("batched_a", batched_a),
+        ("batched_b", batched_b),
+    ):
         assert data[:4] == b"RIFF" and len(data) > 44, f"{name} is not a valid WAV"
     print("OK: Q10a determinism holds, all outputs valid WAV")
 

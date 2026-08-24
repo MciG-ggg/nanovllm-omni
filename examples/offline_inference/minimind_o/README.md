@@ -12,8 +12,8 @@ network download. Pull both checkpoints once with `hf` and keep them
 in a local directory of your choice:
 
 ```bash
-hf download jingyaogong/minimind-3o --local-dir /home/mcig/minimind-3o
-hf download kyutai/mimi             --local-dir /home/mcig/mimi
+hf download jingyaogong/minimind-3o --local-dir <model-dir>/minimind-3o
+hf download kyutai/mimi             --local-dir <model-dir>/mimi
 ```
 
 Pass those directories to `--model` and `--mimi`. If you prefer the
@@ -28,7 +28,7 @@ the snapshots — otherwise the loader logs a warning naming
 ```bash
 cd examples/offline_inference/minimind_o
 HF_HUB_OFFLINE=1 bash run_end2end.sh \
-    --model /home/mcig/minimind-3o --mimi /home/mcig/mimi --out audio.wav
+    --model <model-dir>/minimind-3o --mimi <model-dir>/mimi --out audio.wav
 ```
 
 `end2end.py` constructs `Omni(...)` directly, calls
@@ -40,7 +40,7 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 ```bash
 cd examples/offline_inference/minimind_o
 HF_HUB_OFFLINE=1 bash run_batched.sh \
-    --model /home/mcig/minimind-3o --mimi /home/mcig/mimi --out batched_smoke
+    --model <model-dir>/minimind-3o --mimi <model-dir>/mimi --out batched_smoke
 ```
 
 `batched.py` exercises `engine/sched.py + engine/batched_runner.py`

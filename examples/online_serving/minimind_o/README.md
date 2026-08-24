@@ -12,8 +12,8 @@ two checkpoints into local directories with `hf download`, point the
 server at them:
 
 ```bash
-hf download jingyaogong/minimind-3o --local-dir /home/mcig/minimind-3o
-hf download kyutai/mimi             --local-dir /home/mcig/mimi
+hf download jingyaogong/minimind-3o --local-dir <model-dir>/minimind-3o
+hf download kyutai/mimi             --local-dir <model-dir>/mimi
 ```
 
 The bundle loader is offline-first and never auto-fetches.
@@ -24,8 +24,8 @@ The bundle loader is offline-first and never auto-fetches.
 
 ```bash
 HF_HUB_OFFLINE=1 python -m nanovllm_omni.serving.openai_adapter \
-    --model-id /home/mcig/minimind-3o \
-    --mimi-model-id /home/mcig/mimi \
+    --model-id <model-dir>/minimind-3o \
+    --mimi-model-id <model-dir>/mimi \
     --device cuda --host 127.0.0.1 --port 8000
 ```
 

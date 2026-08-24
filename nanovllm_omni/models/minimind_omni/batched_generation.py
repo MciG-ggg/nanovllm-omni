@@ -82,6 +82,7 @@ class BatchedThinkerRunner:
         eos_token_id: int = 2,
         open_thinking: bool = False,
         base_seed: int = 42,
+        kv_max_seq: int | None = None,
     ) -> None:
         self.bundle = bundle
         self.sched = sched
@@ -108,7 +109,14 @@ class BatchedThinkerRunner:
         n_thinker = len(getattr(getattr(self.model, "thinker", None), "layers", []) or [])
         n_talker = len(getattr(getattr(self.model, "talker", None), "layers", []) or [])
         self.n_layers = n_thinker + n_talker
-        self.kv_pool = FixedKvSlotPool(max_seq=int(getattr(cfg, "max_position_embeddings", 4096)))
+        # Fixed-slot KV pool. Budget the slot length explicitly: the model's
+        # ``max_position_embeddings`` (MiniMind-O: 32768) is far larger than any
+        # practical single generation, and a full-size slot per request OOMs a
+        # 4 GB card at max_batch>=2 (ponytail: fixed-slot teaching shape; paged
+        # KV is the deferred upgrade this knob approximates).
+        max_emb = int(getattr(cfg, "max_position_embeddings", 4096))
+        self.kv_max_seq = kv_max_seq or min(max_emb, 1024 + max_new_tokens)
+        self.kv_pool = FixedKvSlotPool(max_seq=self.kv_max_seq)
         params = list(self.model.parameters())
         self._device = params[0].device
         self._dtype = params[0].dtype

@@ -31,6 +31,7 @@ def run_batched_generate(
     max_batch: int | None = None,
     base_seed: int = 42,
     deploy: Any = None,
+    kv_max_seq: int | None = None,
 ) -> list[Any]:
     """Continuous-batching entry point: tokenize -> schedule -> batched thinker -> WAV.
 
@@ -67,6 +68,7 @@ def run_batched_generate(
         max_new_tokens=max_new_tokens,
         open_thinking=open_thinking,
         base_seed=base_seed,
+        kv_max_seq=kv_max_seq,
     )
 
     order: list[str] = []

@@ -27,6 +27,7 @@ from nanovllm_omni.config.registry import (
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
+from nanovllm_omni.engine.load_balancer import RoundRobinBalancer
 
 
 class PipelineRunner:
@@ -48,6 +49,11 @@ class PipelineRunner:
         self.args = args
         self._merged = merge_pipeline_deploy(pipeline, deploy)
         self._stage_instances: list[Any] | None = None
+        # TK-007 per-stage replica routing. Single-device default is 1 replica
+        # per stage, so ``select`` always returns 0 and execution is unchanged;
+        # the route is recorded on ``last_routes`` for the per-request trace.
+        self._balancer = RoundRobinBalancer()
+        self.last_routes: list[tuple[int, int]] = []
 
     def _ensure_stages(self) -> list[Any]:
         if self._stage_instances is None:
@@ -101,13 +107,19 @@ class PipelineRunner:
         """Run one request through the pipeline.
 
         ``prompt`` is the initial payload. ``sampling`` is the per-request
-        override; per-stage deploy defaults are merged underneath.
+        override; per-stage deploy defaults are merged underneath. The per-
+        stage replica route is recorded on ``last_routes`` (TK-007).
         """
         stages = self._ensure_stages()
+        routes: list[tuple[int, int]] = []
         payload: Any = prompt
-        for (stage_cfg, stage_defaults), instance in zip(self._merged, stages, strict=True):
+        for stage_id, ((stage_cfg, stage_defaults), instance) in enumerate(
+            zip(self._merged, stages, strict=True)
+        ):
+            routes.append((stage_id, self._balancer.select(stage_id, stage_cfg.num_replicas)))
             if stage_cfg.process_input is not None:
                 payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
             payload = instance(payload, stage_sampling)
+        self.last_routes = routes
         return payload

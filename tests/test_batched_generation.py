@@ -15,12 +15,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import torch
+import pytest
 
 from nanovllm_omni.engine.sched import (
     FixedKvSlotPool,
     OmniScheduler,
 )
+
+torch = pytest.importorskip("torch")
 
 
 class _FakeOut:

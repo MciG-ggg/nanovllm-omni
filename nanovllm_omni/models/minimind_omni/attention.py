@@ -38,8 +38,18 @@ def _sdpa_forward(
     value = module.repeat_kv(value, self.n_rep).transpose(1, 2)
 
     if seq_len == 1 and past_key_value is not None and attention_mask is None:
+        # Decode: Q has length 1 but K/V carry the full past+self. PyTorch
+        # SDPA's ``is_causal=True`` is documented as only valid when Q, K, V
+        # share the same length; for Q length=1 it builds a [1, N] lower-
+        # triangular mask that attends ONLY to K[0] (the BOS position),
+        # producing logits that see a single token and turn subsequent
+        # multinomial sampling into noise -- which is exactly the "garbled
+        # MiniMind-O audio" bug this fix addresses. With Q length=1, the
+        # current token genuinely attends to all past positions, so the
+        # causal mask is a no-op and ``is_causal=False`` is the correct
+        # setting.
         output = functional.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=True
+            query, key, value, dropout_p=0.0, is_causal=False
         )
     elif (
         self.flash

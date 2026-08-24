@@ -55,8 +55,12 @@ def _fused_attention_forward(
     value = module.repeat_kv(value, self.n_rep).transpose(1, 2)
 
     if seq_len == 1 and past_key_value is not None and attention_mask is None:
+        # Decode branch: see ``attention.py`` for why ``is_causal=False`` is
+        # the correct setting here. Using ``is_causal=True`` masks every
+        # K position except the first, collapsing attention to K[0] and
+        # collapsing audio output to garbled noise.
         output = functional.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=True
+            query, key, value, dropout_p=0.0, is_causal=False
         )
     elif (
         self.flash

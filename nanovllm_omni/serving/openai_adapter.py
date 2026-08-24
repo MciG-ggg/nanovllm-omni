@@ -24,20 +24,39 @@ from nanovllm_omni.outputs import AudioPayload
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
 
 
+_ALLOWED_BLOCK_TYPES = frozenset({"text"})
+
+
 def _extract_text(messages: list[dict[str, Any]]) -> str:
-    """Last user-role message, text content only. No multimodal blocks."""
+    """Concatenate the text blocks of the last user-role message.
+
+    `content` MUST be a list of OpenAI-shape content blocks, e.g.
+    ``[{"type": "text", "text": "..."}, ...]``. Bare strings and any
+    block type other than ``text`` raise ``ValueError`` so the handler
+    returns HTTP 400 instead of silently dropping user intent.
+    """
     for message in reversed(messages):
         if message.get("role") != "user":
             continue
-        content = message.get("content", "")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "".join(
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
+        content = message.get("content")
+        if not isinstance(content, list):
+            raise ValueError(
+                "message.content must be an array of content blocks "
+                '(e.g. [{"type": "text", "text": "..."}]); '
+                f"got {type(content).__name__}"
             )
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                raise ValueError(f"content block must be an object, got {type(block).__name__}")
+            block_type = block.get("type")
+            if block_type not in _ALLOWED_BLOCK_TYPES:
+                raise ValueError(
+                    f"unsupported content block type {block_type!r}; "
+                    f"only {sorted(_ALLOWED_BLOCK_TYPES)} are accepted"
+                )
+            parts.append(block.get("text", ""))
+        return "".join(parts)
     raise ValueError("no user text message found")
 
 

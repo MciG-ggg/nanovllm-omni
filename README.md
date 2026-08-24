@@ -75,6 +75,38 @@ docs/           # project notes
 
 This repository intentionally excludes diffusion, vision, VLA, multi-model pipelines, distributed execution, WebSockets, and FastAPI/uvicorn serving. The aligned HTTP seam, when available, uses the Python standard library HTTP server.
 
+### Single-card, single-process runtime
+
+One `Omni(...)` constructs one `MinimindBundle`
+(`nanovllm_omni/models/minimind_omni/bundle.py`) holding the full
+MiniMind-O checkpoint, the Mimi codec, and the tokenizer in one
+Python process. There is no per-stage subprocess pool, no
+`StageRuntime`, no multi-GPU dispatch, and no tensor-parallel
+worker — by design.
+
+This is a deliberate divergence from vllm-omni, where each stage
+runs in its own `StageEngineCoreProc` subprocess and stages can
+be pinned to separate GPUs. vllm-omni can do that because each
+stage is an independent HF checkpoint (thinker 30B, talker 2B,
+code2wav 1B, etc.). MiniMind-O's `thinker` and `talker` are
+submodules of one `AutoModelForCausalLM` that loads from a single
+safetensors file, so per-stage subprocess isolation would force
+every stage to re-load the full ~3 GB checkpoint — unaffordable on
+the 4 GB GPU we target and wasteful on anything bigger.
+`bundle.py` instead keeps everything in one process; inter-stage
+traffic (thinker hidden states → talker → code2wav) is Python
+tensor references with zero serialization and zero IPC.
+
+For request-level parallelism on the same GPU, use the in-process
+batched runner (`examples/offline_inference/minimind_o/batched.py`,
+verified by `tests/test_batched_generation.py` — Q10a).
+Multi-card, per-stage subprocess isolation, tensor-parallel, and
+pipeline-parallel schedulers are intentionally out of scope; if
+any are added later, the change must start by reworking
+`bundle.py` (one bundle per replica) and `engine/runtime.py`
+(per-replica inference path), not by retrofitting vllm-omni's
+`StageRuntime` into a runtime that has no use for it today.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

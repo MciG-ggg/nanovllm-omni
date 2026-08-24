@@ -1,29 +1,65 @@
 {
   "version": "0.2.0",
+  "inputs": [
+    {
+      "id": "model_dir",
+      "type": "promptString",
+      "description": "Directory containing minimind-3o/ and mimi/ subdirs",
+      "default": "${workspaceFolder}/models"
+    }
+  ],
   "configurations": [
     {
-      "name": "Python: minimind_omni.py (MiniMind-O)",
+      "name": "Python: HTTP server (openai_adapter)",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/minimind_omni.py",
+      "module": "nanovllm_omni.serving.openai_adapter",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "HF_HUB_OFFLINE": "1"
+      },
+      "args": [
+        "--model-id", "${input:model_dir}/minimind-3o",
+        "--mimi-model-id", "${input:model_dir}/mimi",
+        "--device", "cuda",
+        "--host", "127.0.0.1",
+        "--port", "8000"
+      ]
+    },
+    {
+      "name": "Python: minimind-o end2end",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/offline_inference/minimind_o/end2end.py",
       "python": "${workspaceFolder}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true
     },
     {
-      "name": "Python: smolvla.py",
+      "name": "Python: minimind-o batched",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/smolvla.py",
+      "program": "${workspaceFolder}/examples/offline_inference/minimind_o/batched.py",
       "python": "${workspaceFolder}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true
     },
     {
-      "name": "Python: smolvla_libero.py",
+      "name": "Python: smolvla synthetic",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/examples/smolvla_libero.py",
+      "program": "${workspaceFolder}/examples/offline_inference/smolvla/synthetic_obs.py",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: smolvla libero_eval",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/offline_inference/smolvla/libero_eval.py",
       "python": "${workspaceFolder}/.venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": true
@@ -37,6 +73,19 @@
       "args": [
         "${file}",
         "-x",
+        "-v"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: pytest (not smoke)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "-m", "not smoke",
         "-v"
       ],
       "console": "integratedTerminal",

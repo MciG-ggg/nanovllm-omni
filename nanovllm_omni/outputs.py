@@ -1,10 +1,75 @@
 import io
+import re
 import wave
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from enum import Flag, StrEnum, auto
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
+
+
+_MODALITY_ALIASES: dict[str, str] = {
+    "speech": "audio",
+    "images": "image",
+    "latents": "latent",
+    "wav": "audio",
+    "waveform": "audio",
+    "pixel_values": "image",
+    "pixels": "image",
+    "token_ids": "text",
+    "tokens": "text",
+}
+
+
+class OutputModalityNames(StrEnum):
+    """Canonical keys for output modalities (vllm-omni `output_modality.py`)."""
+
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    LATENT = "latent"
+
+
+class OutputModality(Flag):
+    """Bit-flag enum for output modalities; compound via ``|``.
+
+    Single: ``OutputModality.TEXT``, ``OutputModality.IMAGE``, ...
+    Compound: ``OutputModality.TEXT | OutputModality.IMAGE`` (text+image).
+    """
+
+    TEXT = auto()
+    IMAGE = auto()
+    AUDIO = auto()
+    LATENT = auto()
+
+    @classmethod
+    def from_string(cls, s: str | None) -> "OutputModality":
+        """Parse a free-text modality string, incl. aliases and ``+`` / ``,``.
+
+        ``OutputModality.from_string("text+image")`` -> ``TEXT | IMAGE``.
+        """
+        if not s or not s.strip():
+            return cls.TEXT
+        parts = [p.strip().lower() for p in re.split(r"[+,]", s.strip())]
+        result = cls(0)
+        for p in parts:
+            p = _MODALITY_ALIASES.get(p, p)
+            try:
+                result |= cls[p.upper()]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown modality: {p!r}. Supported: {[m.name.lower() for m in cls]}"
+                ) from None
+        return result
+
+    @property
+    def has_text(self) -> bool:
+        return OutputModality.TEXT in self
+
+    @property
+    def has_multimodal(self) -> bool:
+        return bool(self & ~OutputModality.TEXT)
 
 
 def _is_tensor(value: Any) -> bool:
@@ -140,6 +205,8 @@ class OmniRequestOutput:
     multimodal_output: MultimodalPayload | None = None
     error: str | None = None
     final_output_type: str = "text"
+    images: list[Any] = field(default_factory=list)
+    latents: Any = None
     _custom_output: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -155,11 +222,17 @@ class OmniRequestOutput:
 
     @classmethod
     def from_diffusion(cls, output: Any, request_id: str = ""):
+        images = (
+            list(output)
+            if isinstance(output, (list, tuple))
+            else ([output] if output is not None else [])
+        )
         return cls(
             request_id=request_id,
             outputs=output,
             multimodal_output=MultimodalPayload.from_dict({"image": output}),
             final_output_type="image",
+            images=images,
         )
 
     @classmethod
@@ -198,6 +271,8 @@ class OmniRequestOutput:
 
     @property
     def num_images(self) -> int:
+        if self.images:
+            return len(self.images)
         return int(bool(self.multimodal_output and "image" in self.multimodal_output))
 
     @property
@@ -232,6 +307,13 @@ class OmniRequestOutput:
                     result["multimodal_output"][key] = base64.b64encode(value.wav_bytes()).decode(
                         "ascii"
                     )
+                    # vllm-omni `multimodal_output` carries a metadata dict
+                    # alongside the payload; surface the WAV sample rate so
+                    # the HTTP adapter does not hardcode it (TK-018).
+                    result["multimodal_output"][f"{key}_metadata"] = {
+                        "format": "wav",
+                        "sample_rate": value.sample_rate,
+                    }
                 elif isinstance(value, (bytes, bytearray)):
                     result["multimodal_output"][key] = base64.b64encode(bytes(value)).decode(
                         "ascii"

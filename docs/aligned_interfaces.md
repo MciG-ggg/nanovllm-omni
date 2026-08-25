@@ -92,6 +92,8 @@
 | `multimodal_output` | `MultimodalPayload \| None` | 按 modality 分桶的张量 + 元数据容器。详见下方"输出 payload"小节。 |
 | `error` | `str \| None` | 若该次请求失败,这里放错误描述;`outputs` 和 `multimodal_output` 为 `None`。 |
 | `final_output_type` | `str` | 默认 `"text"`;记录哪个 terminal stage 产出这个 payload(`"audio"` / `"image"` / `"actions"` / ...)。 |
+| `images` | `list` | 扩散槽:vllm-omni `OmniRequestOutput.images` 对齐,`from_diffusion` 会把输出收进列表(TK-018)。 |
+| `latents` | `Any` | 扩散槽:vllm-omni `latents` 对齐,默认 `None`(TK-018)。 |
 | `_custom_output` | `dict` | 非 modal 的自定义输出槽,经 `custom_output` 属性读写。 |
 
 四个类构造方法分别走不同路径:
@@ -111,8 +113,10 @@
 另有三个对齐属性 / 方法(vllm-omni `OmniRequestOutput` 面):
 
 - `custom_output` → 可读写 `dict`,非 modal 的输出槽(`_custom_output` 字段的属性包装)。
-- `num_images` → `int`,`multimodal_output` 含 `"image"` 时为 `1` 否则 `0`(vllm-omni 是 `len(self.images)`;我们单 payload 形态下等价)。
-- `to_dict()` → JSON 可序列化 dict:`{"request_id", "final_output_type"}`,叠加 `multimodal_output`(tensor 值 `detach().cpu().tolist()`)、非空时 `custom_output`、有错时 `error`。HTTP 层序列化用。
+- `num_images` → `int`;`images` 列表非空时返回 `len(images)`,否则 `multimodal_output` 含 `"image"` 时为 `1` 否则 `0`(vllm-omni 是 `len(self.images)`)。
+- `to_dict()` → JSON 可序列化 dict:`{"request_id", "final_output_type"}`,叠加 `multimodal_output`(tensor 值 `detach().cpu().tolist()`)、非空时 `custom_output`、有错时 `error`。audio 键附带 `{key}_metadata = {"format": "wav", "sample_rate": <AudioPayload.sample_rate>}`,HTTP 层从 metadata 读采样率而非硬编码(TK-018)。
+
+模态类型枚举(`OutputModality` flag + `OutputModalityNames`,对齐 vllm-omni `outputs/output_modality.py`)也从包根导出:`OutputModality.AUDIO`、`IMAGE`、`TEXT`、`LATENT`,支持 `from_string("text+image")` 复合解析与别名(`speech`→audio、`pixels`→image 等)。
 
 `unwrap()` 在 `error` 为真时抛 `RuntimeError(self.error)`,否则返回 `outputs`。HTTP 适配器走的是 `output.multimodal_output["audio"].wav_bytes()`(见下方"HTTP 入口")。
 

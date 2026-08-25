@@ -87,6 +87,9 @@ def _chat_completion(payload: dict[str, Any], model: str, prompt_tokens: int) ->
     ChatCompletion envelope around them.
     """
     audio_b64 = payload["multimodal_output"]["audio"]
+    audio_meta = payload["multimodal_output"].get("audio_metadata", {})
+    sample_rate = audio_meta.get("sample_rate", 24000)
+    audio_format = audio_meta.get("format", "wav")
     return {
         "id": f"chatcmpl-{uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -100,8 +103,8 @@ def _chat_completion(payload: dict[str, Any], model: str, prompt_tokens: int) ->
                     "content": None,
                     "audio": {
                         "data": audio_b64,
-                        "format": "wav",
-                        "sample_rate": 24000,
+                        "format": audio_format,
+                        "sample_rate": sample_rate,
                     },
                 },
                 "finish_reason": "stop",

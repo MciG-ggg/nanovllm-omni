@@ -69,9 +69,49 @@ def test_num_images_default_zero() -> None:
 
 
 def test_num_images_diffusion() -> None:
-    out = OmniRequestOutput.from_diffusion(object(), request_id="r")
-    # from_diffusion has no images list; mirror vllm-omni by counting them.
-    assert out.num_images == 0 or out.num_images >= 0
+    out = OmniRequestOutput.from_diffusion([object(), object()], request_id="r")
+    assert out.num_images == 2
+    assert len(out.images) == 2
+
+
+def test_output_modality_flags() -> None:
+    """TK-018: OutputModality mirrors vllm-omni's flag enum + aliases."""
+    from nanovllm_omni.outputs import OutputModality
+
+    assert OutputModality.from_string("audio") == OutputModality.AUDIO
+    assert OutputModality.from_string("speech") == OutputModality.AUDIO
+    assert OutputModality.from_string("pixels") == OutputModality.IMAGE
+    assert OutputModality.from_string("text+image") == (OutputModality.TEXT | OutputModality.IMAGE)
+    assert OutputModality.from_string("text,image") == (OutputModality.TEXT | OutputModality.IMAGE)
+    assert OutputModality.from_string("") == OutputModality.TEXT
+    assert OutputModality.from_string(None) == OutputModality.TEXT
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown modality"):
+        OutputModality.from_string("hologram")
+
+
+def test_to_dict_audio_metadata_emits_sample_rate() -> None:
+    """TK-018: audio metadata rides to_dict so the HTTP adapter can read it."""
+    out = OmniRequestOutput.from_pipeline(
+        AudioPayload(data=b"RIFF....", sample_rate=48000),
+        request_id="r1",
+        final_output_type="audio",
+    )
+    d = out.to_dict()
+    assert d["multimodal_output"]["audio_metadata"] == {
+        "format": "wav",
+        "sample_rate": 48000,
+    }
+
+
+def test_from_diffusion_racks_images() -> None:
+    """TK-018: images field mirrors vllm-omni's diffusion list slot."""
+    imgs = [object(), object(), object()]
+    out = OmniRequestOutput.from_diffusion(imgs, request_id="r")
+    assert out.images == imgs
+    assert out.num_images == 3
+    assert out.is_diffusion_output is True
 
 
 def test_from_stage_output_copies_fields() -> None:

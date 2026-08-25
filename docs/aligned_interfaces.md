@@ -53,7 +53,7 @@
 | 多请求并行 | 否(单卡串行) | 受 `extra["max_concurrent"]` 控制(默认 1) |
 | 用途 | 脚本、批处理、回归测试 | HTTP 服务、异步 pipeline、与外部 `asyncio` 代码组合 |
 
-两个类的 `generate` 都接受 `prompts: str | list[str]` 和 `sampling_params: SamplingParams | None` 两个位置参数,后者为 `None` 时回落到 `deploy/*.yaml` 里 `default_sampling_params` 配的默认值(详见 `PipelineRunner._stage_sampling`)。`Omni.generate` 另支持两个 keyword(vllm-omni 对齐面,见 `issues/04-contract-cleanup`):
+两个类的 `generate` 都接受 `prompts: str | list[str]` 和 `sampling_params: SamplingParams | None` 两个位置参数,后者为 `None` 时回落到 `deploy/*.yaml` 里 `default_sampling_params` 配的默认值(详见 `PipelineRunner._stage_sampling`)。`prompts` 元素除 `str` 外还接受 dict(TK-017,对齐 vllm-omni 的 `OmniTextPrompt`):dict 的 `prompt` 键是文本,其余非 None 键(如 `image`)作为模态 payload 注入 `sampling.extra`(smolvla 已在消费 `extra["image"]`)。纯文本 `str` 或无边字段的 dict 行为完全一致。`Omni.generate` 另支持两个 keyword(vllm-omni 对齐面,见 `issues/04-contract-cleanup`):
 
 - `sampling_params_list: Iterable[SamplingParams] | None` — 逐 prompt 的采样覆盖;与 `prompts` 等长时逐项生效,单一值时会广播到所有 prompt。
 - `py_generator: bool = False` — 为 `True` 时 `generate` 返回惰性 `Generator[OmniRequestOutput]`(按提交顺序逐个执行,消费时才跑);默认返回 `list`。SPEC 锁定的 `sampling_params` 单值签名保持不变,"纯新增、向前兼容"。
@@ -334,9 +334,11 @@ Content-Type: application/json
 
 支持的形态:
 
-- `messages[i].content` 必须是 OpenAI multimodal 内容块数组(对齐 vllm-omni 的 `run_curl_multimodal_generation.sh`),目前只接受 `type: "text"` 块,adapter 拼接最后一个 `role=user` 消息的所有文本块
-- 裸字符串 `content: "..."`、未知 `type`(如 `image_url`、`audio_url`)或缺 `user` 消息都会返回 400 `invalid_request_error`
-- 图像 / 音频输入尚未实现(TICKET-06 才考虑)
+- `messages[i].content` 必须是 OpenAI multimodal 内容块数组(对齐 vllm-omni 的 `run_curl_multimodal_generation.sh`),接受 `type: "text"` 与 `type: "image_url"` 块;adapter 拼接最后一个 `role=user` 消息的所有文本块,并把 `image_url` 的 base64 data URI 解码为字节喂给 `OmniPromptType`(TK-017)
+- `image_url` 块必须是 data URI(`data:image/...;base64,...`),远程 `http(s)` URL 会返回 400——单卡本地服务不做网络回源
+- 裸字符串 `content: "..."`、未知 `type`(如 `audio_url`)或缺 `user` 消息都会返回 400 `invalid_request_error`
+- 字节图在 smolvla stage 的 `_as_nchw` 里经 Pillow 解码为 NCHW tensor;MiniMind-O 管线忽略 `image` 字段(纯文本行为不变)
+- 音频输入尚未实现
 
 ### 响应
 

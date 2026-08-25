@@ -185,3 +185,17 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
     assert base._compute_final_stage_id(["audio"]) == 2
     # Unknown modality falls back to last stage.
     assert base._compute_final_stage_id(["video"]) == 2
+
+
+def test_as_nchw_accepts_image_bytes(monkeypatch) -> None:
+    """TK-017: base64-decoded image bytes decode to a batch-NCHW tensor."""
+    from io import BytesIO
+
+    import numpy as np
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.fromarray(np.zeros((16, 24, 3), dtype=np.uint8)).save(buf, format="PNG")
+    tensor = smolvla_stage._as_nchw(buf.getvalue(), None)
+    assert tuple(tensor.shape) == (1, 3, 16, 24)
+    assert tensor.dtype != "object"

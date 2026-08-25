@@ -68,12 +68,65 @@ def test_extract_text_rejects_unknown_block_type() -> None:
             "role": "user",
             "content": [
                 {"type": "text", "text": "hi"},
-                {"type": "image_url", "image_url": {"url": "http://x"}},
+                {"type": "audio_url", "audio_url": {"url": "http://x"}},
             ],
         }
     ]
     with pytest.raises(ValueError, match="unsupported content block type"):
         _extract_text(messages)
+
+
+def test_extract_prompt_accepts_image_url_data_uri() -> None:
+    import base64
+
+    from nanovllm_omni.serving.openai_adapter import _extract_prompt
+
+    png = b"\x89PNG\r\n\x1a\nFAKE"
+    uri = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": uri}},
+            ],
+        }
+    ]
+    assert _extract_prompt(messages) == ("what is this?", png)
+
+
+def test_extract_prompt_rejects_remote_image_url() -> None:
+    from nanovllm_omni.serving.openai_adapter import _extract_prompt
+
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "http://x/y.png"}}],
+        }
+    ]
+    with pytest.raises(ValueError, match="base64 data URI"):
+        _extract_prompt(messages)
+
+
+def test_extract_text_ignores_image_block_in_text_compat() -> None:
+    """TK-017: image_url block no longer rejected; _extract_text drops it."""
+    import base64
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64," + base64.b64encode(b"x").decode("ascii")
+                    },
+                },
+            ],
+        }
+    ]
+    assert _extract_text(messages) == "hi"
 
 
 def test_extract_text_raises_when_no_user_message() -> None:

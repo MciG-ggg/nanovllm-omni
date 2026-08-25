@@ -1,6 +1,14 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeAlias
+
+OmniPromptType: TypeAlias = str | dict[str, Any]
+"""One generate() prompt: text, or a dict carrying modal content.
+
+The dict shape mirrors vllm-omni's OmniTextPrompt -- a ``prompt`` key plus
+optional modal payload fields (``image``, ...). A text-only str or a dict
+without modal fields behave identically.
+"""
 
 
 @dataclass(frozen=True)

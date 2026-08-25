@@ -124,3 +124,32 @@ def test_async_generate_unchanged_shape() -> None:
 
     result = asyncio.run(collect())
     assert result == [OmniRequestOutput, OmniRequestOutput]
+
+
+def test_generate_accepts_dict_prompt_with_image() -> None:
+    """TK-017: a dict prompt's ``image`` rides into sampling.extra['image']."""
+    runner = _RunnerStub()
+    omni = _make_omni(runner)
+    img = b"fake-png-bytes"
+    omni.generate([{"prompt": "pick up the block", "image": img}])  # type: ignore[arg-type]
+    text, sampling = runner.calls[0]
+    assert text == "pick up the block"
+    assert sampling is not None and sampling.extra["image"] == img
+
+
+def test_generate_dict_prompt_without_modal_is_text_only() -> None:
+    """TK-017: a dict without modal fields behaves like a plain str."""
+    runner = _RunnerStub()
+    omni = _make_omni(runner)
+    omni.generate([{"prompt": "hello"}])  # type: ignore[arg-type]
+    text, sampling = runner.calls[0]
+    assert text == "hello"
+    assert sampling is None
+
+
+def test_split_prompt_dict_preserves_prompt_and_drops_none() -> None:
+    from nanovllm_omni.entrypoints.omni import _split_prompt
+
+    assert _split_prompt("hi") == ("hi", None)
+    assert _split_prompt({"prompt": "do it", "image": b"x"}) == ("do it", {"image": b"x"})
+    assert _split_prompt({"prompt": "do it", "image": None}) == ("do it", None)

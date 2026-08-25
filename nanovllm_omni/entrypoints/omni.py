@@ -7,26 +7,56 @@ the caller-supplied SamplingParams overrides them per request.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Generator, Iterable
 from typing import Any
 
-from ..config.params import SamplingParams
+from ..config.params import OmniPromptType, SamplingParams
 from ..outputs import OmniRequestOutput
 from .base import OmniBase
 
 
-def _as_list(prompts: str | Iterable[str]) -> list[str]:
-    return [prompts] if isinstance(prompts, str) else list(prompts)
+def _as_list(prompts: OmniPromptType | Iterable[OmniPromptType]) -> list[OmniPromptType]:
+    if isinstance(prompts, (str, dict)):
+        return [prompts]
+    return list(prompts)
+
+
+def _split_prompt(prompt: OmniPromptType) -> tuple[str, dict[str, Any] | None]:
+    """Extract text + modal payload from a single prompt.
+
+    A str prompt is text-only. A dict prompt has a ``prompt`` key (text)
+    and may carry modal payloads (``image``, ...) that ride along in
+    ``sampling.extra`` so stages can consume them without a new seam --
+    smolvla already reads ``extra["image"]`` (HWC uint8 RGB or PIL bytes).
+    """
+    if not isinstance(prompt, dict):
+        return prompt, None
+    text = prompt.get("prompt", "")
+    modal = {key: value for key, value in prompt.items() if key != "prompt" and value is not None}
+    return str(text), (modal or None)
 
 
 class Omni(OmniBase):
     def _one(
         self,
-        prompt: str,
+        prompt: OmniPromptType,
         sampling_params: SamplingParams | None = None,
     ) -> OmniRequestOutput:
         executor = self._ensure_executor()
-        payload = executor._runner.run(prompt, sampling_params)
+        text, modal = _split_prompt(prompt)
+        if modal:
+            extra = dict(getattr(sampling_params, "extra", None) or {})
+            extra.update(modal)
+            sampling_params = (
+                dataclasses.replace(
+                    sampling_params,
+                    extra=extra,
+                )
+                if sampling_params is not None
+                else SamplingParams(extra=extra)
+            )
+        payload = executor._runner.run(text, sampling_params)
         return OmniRequestOutput.from_pipeline(
             payload,
             final_output_type=self._final_output_type(),
@@ -48,7 +78,7 @@ class Omni(OmniBase):
 
     def generate(
         self,
-        prompts: str | Iterable[str],
+        prompts: OmniPromptType | Iterable[OmniPromptType],
         sampling_params: SamplingParams | None = None,
         use_tqdm: bool = True,  # accepted for vllm-omni parity; no-op corpus is small
         *,

@@ -1,4 +1,4 @@
-from .config.params import OmniEngineArgs, SamplingParams
+from .config.params import OmniEngineArgs, OmniPromptType, SamplingParams
 from .entrypoints import AsyncOmni, Omni, OmniBase
 from .outputs import MultimodalPayload, OmniRequestOutput
 
@@ -10,6 +10,7 @@ __all__ = [
     "OmniBase",
     "SamplingParams",
     "OmniEngineArgs",
+    "OmniPromptType",
     "OmniRequestOutput",
     "MultimodalPayload",
 ]

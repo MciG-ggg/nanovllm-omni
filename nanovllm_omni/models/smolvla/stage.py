@@ -117,6 +117,12 @@ def _as_nchw(image: Any, device: Any) -> Any:
     import numpy as np
     import torch
 
+    if isinstance(image, bytes):
+        from io import BytesIO
+
+        from PIL import Image
+
+        image = Image.open(BytesIO(image)).convert("RGB")
     arr = np.asarray(image)
     if arr.ndim == 3 and arr.shape[-1] in (1, 3, 4):
         arr = np.transpose(arr, (2, 0, 1))

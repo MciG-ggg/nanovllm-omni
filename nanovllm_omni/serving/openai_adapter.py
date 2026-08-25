@@ -17,21 +17,25 @@ from typing import Any
 from uuid import uuid4
 
 from nanovllm_omni import Omni, SamplingParams
+from nanovllm_omni.config.params import OmniPromptType
 from nanovllm_omni.config.registry import load_deploy_config
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
 
 
-_ALLOWED_BLOCK_TYPES = frozenset({"text"})
+_ALLOWED_BLOCK_TYPES = frozenset({"text", "image_url"})
 
 
-def _extract_text(messages: list[dict[str, Any]]) -> str:
-    """Concatenate the text blocks of the last user-role message.
+def _extract_prompt(messages: list[dict[str, Any]]) -> tuple[str, bytes | None]:
+    """Extract ``(text, image_bytes)`` from the last user-role message.
 
-    `content` MUST be a list of OpenAI-shape content blocks, e.g.
-    ``[{"type": "text", "text": "..."}, ...]``. Bare strings and any
-    block type other than ``text`` raise ``ValueError`` so the handler
-    returns HTTP 400 instead of silently dropping user intent.
+    ``content`` MUST be a list of OpenAI-shape content blocks, e.g.
+    ``[{"type": "text", "text": "..."}]`` and / or
+    ``[{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}]``.
+    Bare strings and any block type other than ``text`` / ``image_url``
+    raise ``ValueError`` so the handler returns HTTP 400 instead of
+    silently dropping user intent. A ``image_url`` block must carry a
+    data-URI (`data:...;base64,...`); remote http(s) URLs are rejected.
     """
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -44,6 +48,7 @@ def _extract_text(messages: list[dict[str, Any]]) -> str:
                 f"got {type(content).__name__}"
             )
         parts: list[str] = []
+        image: bytes | None = None
         for block in content:
             if not isinstance(block, dict):
                 raise ValueError(f"content block must be an object, got {type(block).__name__}")
@@ -53,9 +58,25 @@ def _extract_text(messages: list[dict[str, Any]]) -> str:
                     f"unsupported content block type {block_type!r}; "
                     f"only {sorted(_ALLOWED_BLOCK_TYPES)} are accepted"
                 )
-            parts.append(block.get("text", ""))
-        return "".join(parts)
+            if block_type == "text":
+                parts.append(block.get("text", ""))
+            else:  # image_url
+                url = (block.get("image_url") or {}).get("url", "")
+                if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url:
+                    raise ValueError(
+                        "image_url must be a base64 data URI " '(e.g. "data:image/png;base64,...")'
+                    )
+                import base64
+
+                image = base64.b64decode(url.split(";base64,", 1)[1])
+        return "".join(parts), image
     raise ValueError("no user text message found")
+
+
+def _extract_text(messages: list[dict[str, Any]]) -> str:
+    """Back-compat: text parts only, ignore image blocks."""
+    text, _ = _extract_prompt(messages)
+    return text
 
 
 def _chat_completion(payload: dict[str, Any], model: str, prompt_tokens: int) -> dict[str, Any]:
@@ -143,9 +164,12 @@ def serve(state, host: str, port: int) -> None:
                 messages = body.get("messages")
                 if not isinstance(messages, list) or not messages:
                     raise ValueError("messages must be a non-empty array")
-                text = _extract_text(messages)
+                text, image = _extract_prompt(messages)
                 model = body.get("model", engine.model)
-                output = engine.generate([text], sampling_params=sampling)[0]
+                prompt: OmniPromptType = text
+                if image is not None:
+                    prompt = {"prompt": text, "image": image}
+                output = engine.generate([prompt], sampling_params=sampling)[0]
                 payload = output.to_dict()
                 self._json(200, _chat_completion(payload, model, len(text.split())))
             except (ValueError, TypeError, json.JSONDecodeError) as exc:

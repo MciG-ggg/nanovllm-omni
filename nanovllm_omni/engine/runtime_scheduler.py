@@ -25,7 +25,6 @@ is the request-grouping + FSM convenience used by
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,10 +38,11 @@ class RuntimeGroup:
     A prefill group is a list of ``PrefillChunk`` (chunked prefill supported
     via the ``start``/``end`` range); a decode group is a list of
     ``Sequence`` whose current ``num_tokens`` matches a single stage
-    forward's single-scalar ``start_pos``.
+    forward's single-scalar ``start_pos``. The caller already distinguishes
+    prefill from decode by which list it reads (``prefill_groups`` vs
+    ``decode_groups``).
     """
 
-    kind: str  # "prefill" | "decode"
     items: list[Any] = field(default_factory=list)  # list[PrefillChunk] | list[Sequence]
 
 
@@ -127,13 +127,13 @@ class RuntimeScheduler:
                 elif seq.status is SequenceStatus.DECODE:
                     decode_items.append(seq)
             for _n_pos, chunks in sorted(prefill_by_len.items()):
-                out.prefill_groups.append(RuntimeGroup(kind="prefill", items=chunks))
+                out.prefill_groups.append(RuntimeGroup(items=chunks))
             # Decode groups: identical num_tokens -> one rectangular forward.
             by_len: dict[int, list[Sequence]] = {}
             for seq in decode_items:
                 by_len.setdefault(seq.num_tokens, []).append(seq)
             for _num_tokens, group in sorted(by_len.items()):
-                out.decode_groups.append(RuntimeGroup(kind="decode", items=group))
+                out.decode_groups.append(RuntimeGroup(items=group))
 
         return out
 
@@ -162,11 +162,6 @@ class RuntimeScheduler:
                 self.finished[rid] = seq
                 just_finished[rid] = seq.num_tokens
         return just_finished
-
-    # -- iteration helpers (for tests + introspection) ----------------------
-
-    def __iter__(self) -> Iterator[Sequence]:
-        return iter(list(self.waiting) + list(self.running.values()) + list(self.finished.values()))
 
 
 __all__ = ["RuntimeGroup", "RuntimeScheduler", "RuntimeSchedulerOutput"]

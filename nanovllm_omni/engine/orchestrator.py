@@ -5,23 +5,21 @@ across replica pools, running in a background thread with janus queues and
 distributed membership. This module keeps the *shape* in the single-process,
 single-GPU scope the project targets:
 
-  - no background thread: ``submit()`` is synchronous and drives every stage
-    pool to completion before returning
+  - no background thread: ``submit()`` is synchronous and drives every
+    replica to completion before returning
   - no janus queues / membership: each replica is a plain ``(scheduler,
     runner)`` pair built at pool construction
-  - the lifecycle FSM is each stage's ``RuntimeScheduler`` WAITING ->
-    PREFILL -> DECODE -> FINISHED progression
+  - the lifecycle FSM is the ``RuntimeScheduler`` WAITING -> PREFILL ->
+    DECODE -> FINISHED progression
 
-Flow (mirrors vllm-omni's request-through-stages):
+Flow (single-stage MiniMind-O: the thinker pool, codec runs inside the
+drive hook):
 
     Omni.generate(prompts)
         -> Orchestrator.submit(prompts)
-        -> stage0 (LLM/thinker): route each prompt to a replica via
-           LoadBalancer; drive the pool's schedulers to completion. Emits
-           per-rid intermediate outputs (e.g. Mimi codebook frames).
-        -> stage1 (codec): for each finished rid, run the codec stage to
-           produce the final payload (WAV bytes).
-        -> [{rid: output}]
+        -> route each prompt to a replica via the LoadBalancer; drive every
+           replica's schedulers to completion (codec chain included).
+        -> [outputs in submission order]
 """
 
 from __future__ import annotations
@@ -37,19 +35,15 @@ from nanovllm_omni.engine.load_balancer import LoadBalancer, RoundRobinBalancer
 class Replica:
     """A single stage replica: one scheduler + one runner built over it.
 
-    ``sched`` is the per-replica ``RuntimeScheduler``; ``runner`` is the
-    model-level batched runner (e.g. ``BatchedThinkerRunner``) that executes
-    the scheduler's groups. Mirrors vllm-omni's "one engine core per
-    replica" without the distributed executor.
+    ``sched`` is the ``RuntimeScheduler``; ``runner`` is the model-level
+    batched runner (e.g. ``BatchedThinkerRunner``) that executes the
+    scheduler's groups. Mirrors vllm-omni's "one engine core per replica"
+    without the distributed executor.
     """
 
     sched: Any
     runner: Any
     replica_id: int = 0
-
-    @property
-    def states(self) -> dict[str, Any]:
-        return getattr(self.runner, "states", {})
 
 
 @dataclass
@@ -74,69 +68,47 @@ class StagePool:
 
 
 class Orchestrator:
-    """Pipeline-level dispatcher over one or more ``StagePool``s.
+    """Dispatch over a single ``StagePool``: fan out, drain, return in order.
 
-    ``submit(prompts)`` fans each prompt across the stage-0 pool via its
-    LoadBalancer, drains every replica's scheduler (the ``drive`` hook), then
-    passes each finished rid through the remaining stages. Returns a dict
-    ``rid -> final_output``.
+    ``submit(prompts)`` routes each prompt to a replica via the pool's
+    LoadBalancer, then drives every replica's scheduler to completion via the
+    ``drive`` hook. Returns ``[outputs]`` in submission order (the codec /
+    downstream chain runs inside ``add_request`` / ``drive``).
 
-    The ``drive`` and ``finalize`` hooks keep this class model-agnostic
+    The ``drive`` and ``add_request`` hooks keep this class model-agnostic
     (same seam vllm-omni uses for per-stage executors):
-      - ``drive(replica, finished_rids) -> dict[rid, output]`` runs one
-        replica's scheduler loop and returns its finished outputs.
-      - ``finalize(stage_id, rid, intermediate) -> output`` transforms one
-        intermediate into the next stage's input / the final payload.
+      - ``add_request(replica, prompt) -> rid`` submits one request to a
+        replica.
+      - ``drive(replica) -> dict[rid, output]`` drains one replica's
+        scheduler and returns its finished outputs.
     """
 
-    def __init__(self, pools: list[StagePool]) -> None:
-        if not pools:
-            raise ValueError("Orchestrator needs at least one StagePool")
-        self.pools = pools
+    def __init__(self, pool: StagePool) -> None:
+        self.pool = pool
 
     def submit(
         self,
         prompts: list[Any],
         *,
         add_request: Callable[[Replica, Any], str],
-        drive: Callable[[Replica, list[str]], dict[str, Any]],
-        finalize: Callable[[int, str, Any], Any] | None = None,
-    ) -> dict[str, Any]:
-        """Route ``prompts`` through stage 0, then downstream stages.
+        drive: Callable[[Replica], dict[str, Any]],
+    ) -> list[Any]:
+        """Route ``prompts`` through the pool's replicas; return outputs in order.
 
-        ``add_request(replica, prompt) -> rid`` submits one request to a
-        replica. ``drive(replica, rids)`` drains that replica's scheduler for
-        the given rids, returning ``{rid: intermediate}``. ``finalize``
-        transforms intermediates through the remaining stages; when ``None``
-        the stage-0 output is returned as-is.
+        ``add_request`` must mint globally-unique rids (per-replica scheduler
+        ids collide across replicas); ``drive`` is called once per replica.
         """
-        pool = self.pools[0]
+        pool = self.pool
         order: list[str] = []
-        entered: dict[int, list[str]] = {r.replica_id: [] for r in pool.replicas}
         for prompt in prompts:
-            replica_id = pool.select()
-            replica = pool[replica_id]
-            rid = add_request(replica, prompt)
+            rid = add_request(pool[pool.select()], prompt)
             order.append(rid)
-            entered[replica_id].append(rid)
 
-        stage0_out: dict[str, Any] = {}
+        by_rid: dict[str, Any] = {}
         for replica in pool.replicas:
-            stage0_out.update(drive(replica, entered[replica.replica_id]))
+            by_rid.update(drive(replica))
 
-        if finalize is None:
-            self._order = order
-            return stage0_out
-
-        full: dict[str, Any] = {}
-        for rid in order:
-            intermediate = stage0_out[rid]
-            out = intermediate
-            for stage_id in range(1, len(self.pools)):
-                out = finalize(stage_id, rid, out)
-            full[rid] = out
-        self._order = order
-        return full
+        return [by_rid[rid] for rid in order]
 
 
 __all__ = ["Orchestrator", "Replica", "StagePool"]

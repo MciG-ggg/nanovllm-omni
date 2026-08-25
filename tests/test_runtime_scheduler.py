@@ -148,9 +148,10 @@ def test_scheduler_output_is_empty_when_idle() -> None:
     assert out.is_empty
 
 
-def test_runtime_group_kind_is_prefill_or_decode() -> None:
-    """Per SPEC: a group is either prefill or decode, never mixed."""
-    prefill_group = RuntimeGroup(kind="prefill", items=[])
-    decode_group = RuntimeGroup(kind="decode", items=[])
-    assert prefill_group.kind == "prefill"
-    assert decode_group.kind == "decode"
+def test_runtime_group_carries_items_without_kind_flag() -> None:
+    """A group is just a list of items; prefill vs decode is implied by which
+    scheduler-output list it lives in."""
+    prefill_group = RuntimeGroup(items=[])
+    decode_group = RuntimeGroup(items=[])
+    assert prefill_group.items == []
+    assert decode_group.items == []

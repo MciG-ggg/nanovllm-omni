@@ -22,9 +22,16 @@ Layering:
 
 from __future__ import annotations
 
+from itertools import count
 from typing import Any
 
 from nanovllm_omni.engine.orchestrator import Orchestrator, Replica, StagePool
+
+# Globally-unique request id across replicas. Each replica's
+# ``BatchedThinkerRunner.add_request`` would otherwise default to
+# ``req-<local count>`` and collide across replicas (two ``req-0``). The
+# leading ``seq-`` prefix keeps ids distinct from replica-internal naming.
+_rids = count()
 
 
 def run_batched_generate(
@@ -83,13 +90,13 @@ def run_batched_generate(
         )
         pool.add_replica(sched, runner)
 
-    orch = Orchestrator([pool])
+    orch = Orchestrator(pool)
 
     def add_request(replica: Replica, prompt: str) -> str:
         ids = tokenize_for_generate(bundle.tokenizer, prompt, open_thinking)
-        return replica.runner.add_request(ids[0].tolist(), request_id=_unique_rid(orch))
+        return replica.runner.add_request(ids[0].tolist(), request_id=f"seq-{next(_rids)}")
 
-    def drive(replica: Replica, _rids: list[str]) -> dict[str, Any]:
+    def drive(replica: Replica) -> dict[str, Any]:
         sched = replica.sched
         runner = replica.runner
         done: dict[str, Any] = {}
@@ -118,23 +125,7 @@ def run_batched_generate(
                     done[rid] = AudioPayload(data=wav, sample_rate=24_000)
         return done
 
-    by_rid: dict[str, Any] = orch.submit(prompts, add_request=add_request, drive=drive)
-    order = orch._order
-    return [by_rid[rid] for rid in order]
-
-
-def _unique_rid(orch: Orchestrator) -> str:
-    """Allocate a globally-unique request id across replicas.
-
-    Each replica's ``BatchedThinkerRunner.add_request`` would otherwise
-    default to ``req-<local count>`` and collide across replicas (two
-    ``req-0``). The id is derived from the submitters-seen counter so the
-    resulting order stays stable; the leading ``seq-`` prefix keeps ids
-    distinct from any replica-internal naming.
-    """
-    counter = getattr(orch, "_rid_counter", 0)
-    orch._rid_counter = counter + 1
-    return f"seq-{counter}"
+    return orch.submit(prompts, add_request=add_request, drive=drive)
 
 
 __all__ = ["run_batched_generate"]

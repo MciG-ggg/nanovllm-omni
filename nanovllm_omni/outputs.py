@@ -126,18 +126,32 @@ class AudioPayload:
         return out.getvalue()
 
 
-@dataclass(frozen=True)
+@dataclass
 class OmniRequestOutput:
+    """Unified request output (vllm-omni `OmniRequestOutput` shape).
+
+    ``multimodal_output`` carries the modality payload (audio / image / actions);
+    ``custom_output`` is a free-form dict for non-modal extras. ``final_output_type``
+    records which terminal stage emitted this payload.
+    """
+
     request_id: str = ""
     outputs: Any = None
     multimodal_output: MultimodalPayload | None = None
     error: str | None = None
+    final_output_type: str = "text"
+    _custom_output: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_pipeline(cls, output: Any, request_id: str = "", final_output_type: str = "audio"):
         value = output.audio if hasattr(output, "audio") else output
         payload = MultimodalPayload.from_dict({final_output_type: value})
-        return cls(request_id=request_id, outputs=output, multimodal_output=payload)
+        return cls(
+            request_id=request_id,
+            outputs=output,
+            multimodal_output=payload,
+            final_output_type=final_output_type,
+        )
 
     @classmethod
     def from_diffusion(cls, output: Any, request_id: str = ""):
@@ -145,11 +159,46 @@ class OmniRequestOutput:
             request_id=request_id,
             outputs=output,
             multimodal_output=MultimodalPayload.from_dict({"image": output}),
+            final_output_type="image",
         )
 
     @classmethod
     def from_error(cls, error: str, request_id: str = ""):
         return cls(request_id=request_id, error=error)
+
+    @classmethod
+    def from_stage_output(
+        cls,
+        source: Any,
+        request_id: str = "",
+        final_output_type: str = "text",
+        **kwargs: Any,
+    ):
+        """Build from a stage's raw output, copying content fields (vllm-omni shape).
+
+        ``outputs`` and ``multimodal_output`` are copied from *source* when present;
+        ``request_id`` / ``final_output_type`` / extra kwargs override defaults.
+        """
+        return cls(
+            request_id=request_id,
+            final_output_type=final_output_type,
+            outputs=getattr(source, "outputs", source),
+            multimodal_output=getattr(source, "multimodal_output", None)
+            or MultimodalPayload.from_dict({final_output_type: getattr(source, "audio", source)}),
+            **kwargs,
+        )
+
+    @property
+    def custom_output(self) -> dict[str, Any]:
+        return self._custom_output
+
+    @custom_output.setter
+    def custom_output(self, value: dict[str, Any]) -> None:
+        self._custom_output = value
+
+    @property
+    def num_images(self) -> int:
+        return int(bool(self.multimodal_output and "image" in self.multimodal_output))
 
     @property
     def is_pipeline_output(self):
@@ -158,6 +207,31 @@ class OmniRequestOutput:
     @property
     def is_diffusion_output(self):
         return self.multimodal_output is not None and "image" in self.multimodal_output
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable dict (vllm-omni ``to_dict`` shape).
+
+        ``multimodal_output`` is materialized as ``{key: value}`` where tensor
+        values are detached to CPU and converted to lists so the result is
+        ``json.dumps``-friendly.
+        """
+        result = {
+            "request_id": self.request_id,
+            "final_output_type": self.final_output_type,
+        }
+        if self.multimodal_output is not None:
+            result["multimodal_output"] = {}
+            for key, value in self.multimodal_output.to_dict().items():
+                if _is_tensor(value):
+
+                    result["multimodal_output"][key] = value.detach().cpu().tolist()
+                else:
+                    result["multimodal_output"][key] = value
+        if self._custom_output:
+            result["custom_output"] = dict(self._custom_output)
+        if self.error is not None:
+            result["error"] = self.error
+        return result
 
     def unwrap(self):
         if self.error:

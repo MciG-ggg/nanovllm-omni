@@ -13,8 +13,7 @@
   - `OmniRequestOutput`
   - `PipelineConfig`, `DeployConfig`, registry functions
   - `POST /v1/chat/completions` OpenAI response shape
-- Keep implementation scope limited to the MiniMind-O audio pipeline. Do not add image/video/VLA/vision, diffusion, full-duplex S2S, WebSockets, distributed execution, FastAPI, uvicorn, Pydantic, or new dependencies.
-- Use stdlib `@dataclass` for contracts and stdlib `http.server` for serving.
+- Scope is any model family that runs locally on the user's hardware (RTX 3050 4 GB). Add a family through the registry contract; the full runbook lives in `.agents/skills/add-new-model/SKILL.md`. The must-not list and stack constraints (stdlib-only contracts/serving, no new dependencies, no FastAPI/uvicorn/Pydantic/WebSockets/distributed execution/full-duplex S2S, closed-set `StageExecutionType` unless a ticket) live in that skill, not here.
 - Prefer package modules with one responsibility. `__init__.py` files should primarily re-export public symbols; implementation classes and runtime logic belong in dedicated modules. The configuration layer lives in `nanovllm_omni/config/` (`registry.py` + `params.py`) behind a thin `__init__.py` facade; keep `config/__init__.py` leaf-only (no engine/model/entrypoint imports) so the import graph stays acyclic.
 - Do not copy vllm-omni code. Inspect it only to verify names, signatures, field shapes, and architecture patterns, then adapt to this repository's smaller scope.
 - Keep deploy/runtime knobs separate from pipeline topology. Pipeline topology belongs in model-family `pipeline.py`; sampling/resource defaults belong in `deploy/*.yaml`.
@@ -50,4 +49,4 @@
 
 ## Definition of aligned
 
-Alignment means consumer-visible compatibility, not identical internals. A difference is acceptable only when it is required by this project's explicit scope (for example, MiniMind-O audio only, local single-process execution, and stdlib serving). Document such differences in `docs/aligned_interfaces.md` rather than claiming unsupported parity.
+Alignment means consumer-visible compatibility, not identical internals. A difference is acceptable only when it is required by this project's explicit scope (for example, local single-process execution on small models and stdlib serving). Document such differences in `docs/aligned_interfaces.md` rather than claiming unsupported parity.

@@ -192,10 +192,11 @@ def test_as_nchw_accepts_image_bytes(monkeypatch) -> None:
     from io import BytesIO
 
     import numpy as np
-    from PIL import Image
+
+    image_cls = pytest.importorskip("PIL.Image")
 
     buf = BytesIO()
-    Image.fromarray(np.zeros((16, 24, 3), dtype=np.uint8)).save(buf, format="PNG")
+    image_cls.fromarray(np.zeros((16, 24, 3), dtype=np.uint8)).save(buf, format="PNG")
     tensor = smolvla_stage._as_nchw(buf.getvalue(), None)
     assert tuple(tensor.shape) == (1, 3, 16, 24)
     assert tensor.dtype != "object"

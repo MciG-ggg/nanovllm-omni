@@ -1,0 +1,5 @@
+max_batch: 2
+stages:
+  - name: vlm
+    default_sampling_params:
+      max_new_tokens: 512

@@ -82,16 +82,32 @@ def try_infer_model_type(
     """
     model_dir = Path(model) if Path(model).is_dir() else None
 
-    # L1: transformers PretrainedConfig (skipped if not installed)
+    # L1: transformers PretrainedConfig (skipped if not installed).
+    # Only short-circuit when the discovered model_type is itself a
+    # registered pipeline name; if it's a base HF class like ``idefics3``
+    # (SmolVLM is built on Idefics3) fall through to L5 / L6 so the
+    # architecture-list / path-substring layers can still resolve it.
     cfg = _load_pretrained_config(model, trust_remote_code)
-    if cfg is not None and getattr(cfg, "model_type", None):
-        return cfg.model_type
+    if cfg is not None:
+        mt = getattr(cfg, "model_type", None)
+        if mt and mt in OMNI_PIPELINES:
+            return mt
 
-    # L2 / L3: config.json
+    # L2: config.json's ``model_type`` (gated by registry membership so the
+    # base HF ``idefics3`` / ``llama`` / etc. tags fall through to L5 / L6).
     if model_dir is not None:
         data = _read_json(model_dir / "config.json")
         if data is not None:
-            for key in ("model_type", "type", "architecture"):
+            mt = data.get("model_type")
+            if isinstance(mt, str) and mt and mt in OMNI_PIPELINES:
+                return mt
+
+    # L3: ``type`` and ``architecture`` (singular) -- VoxCPM2-style raw
+    # tag, kept as-is for callers that know how to handle unregistered tags.
+    if model_dir is not None:
+        data = _read_json(model_dir / "config.json")
+        if data is not None:
+            for key in ("type", "architecture"):
                 raw = data.get(key)
                 if isinstance(raw, str) and raw:
                     return raw
@@ -109,7 +125,6 @@ def try_infer_model_type(
         return best
 
     # L6: hf_architectures match (needs transformers)
-    cfg = _load_pretrained_config(model, trust_remote_code)
     if cfg is not None:
         archs = set(getattr(cfg, "architectures", []) or [])
         if archs:

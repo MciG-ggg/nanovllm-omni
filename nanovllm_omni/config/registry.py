@@ -283,6 +283,7 @@ def _load_builtin_pipelines() -> None:
     from nanovllm_omni.models.minimind_omni import pipeline as _minimind_pipeline  # noqa: F401
     from nanovllm_omni.models.sd_turbo import pipeline as _sd_turbo_pipeline  # noqa: F401
     from nanovllm_omni.models.smolvla import pipeline as _smolvla_pipeline  # noqa: F401
+    from nanovllm_omni.models.smolvlm import pipeline as _smolvlm_pipeline  # noqa: F401
 
 
 _load_builtin_pipelines()

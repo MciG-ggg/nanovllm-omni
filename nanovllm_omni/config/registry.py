@@ -269,6 +269,7 @@ def _load_builtin_pipelines() -> None:
     the imported modules call it. New families add one import here.
     """
     from nanovllm_omni.models.minimind_omni import pipeline as _minimind_pipeline  # noqa: F401
+    from nanovllm_omni.models.sana_06b import pipeline as _sana_06b_pipeline  # noqa: F401
     from nanovllm_omni.models.smolvla import pipeline as _smolvla_pipeline  # noqa: F401
 
 

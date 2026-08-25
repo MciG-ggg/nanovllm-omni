@@ -20,7 +20,13 @@
 
 ## 对齐边界
 
-这是**消费方可见的对齐**,不是逐行实现。当前垂直支持的模型族是 MiniMind-O 音频 + Wan2.2 TI2V 扩散(后者由 TICKET-06 gate)。我们**有意省略** vllm-omni 的以下能力:
+这是**消费方可见的对齐**,不是逐行实现。当前垂直支持的模型族:
+
+- **MiniMind-O** 音频(`minimind_o`,3-stage AR+CODEC,TK-006)
+- **SmolVLA** 动作(`smolvla`,1-stage LLM_GENERATION)
+- **Sana-0.6B** 图片(`sana_06b`,1-stage **DIFFUSION**,TK-009——首个用 `StageExecutionType.DIFFUSION` 的已注册族)。文本 → 1024×1024 `PIL.Image`,`Omni._one` 经 `from_pipeline(final_output_type="image")` 装进 `multimodal_output["image"]`,与 `from_diffusion` 形状一致。
+
+我们**有意省略** vllm-omni 的以下能力:
 
 - **多副本路由、负载均衡、副本指标、动态成员管理**(`vllm_omni.engine.stage_pool` 1281 行)。单进程单副本用 `PipelineRunner` 即可。
 - **跨 stage 请求生命周期、CFG 伴随派发、双工会话跟踪、错误恢复、死副本检测**(`vllm_omni.engine.orchestrator` 2428 行)。`PipelineExecutor` 的 `asyncio.Semaphore` + `ThreadPoolExecutor` 就够了。
@@ -189,7 +195,7 @@ TICKET-02 之后的最小字段集(设计记录见 `.scratch/aligned-interfaces/
 
 | 字段 | 类型 | 用途 |
 |---|---|---|
-| `name` | `str` | 规范模型标识(如 `"minimind_o"`、`"smolvla"`、`"wan2_2_ti2v"`) |
+| `name` | `str` | 规范模型标识(如 `"minimind_o"`、`"smolvla"`、`"sana_06b"`、`"wan2_2_ti2v"`) |
 | `stages` | `tuple[StageConfig, ...]` | 有序 stages;长度 1 = 单 stage(扩散),长度 N = 多 stage AR pipeline |
 | `default_deploy_config_name` | `str` | `deploy/` 目录下的文件名,加载到 `DeployConfig` |
 | `registration_handles` | `tuple[str, ...]` | 该 pipeline 注册时挂的备用 key(如 HF repo id `"jingyaogong/minimind-3o"`)。默认 `(name,)` |

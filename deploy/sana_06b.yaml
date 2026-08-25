@@ -1,0 +1,5 @@
+max_batch: 2
+stages:
+  - name: sana
+    default_sampling_params:
+      num_inference_steps: 20

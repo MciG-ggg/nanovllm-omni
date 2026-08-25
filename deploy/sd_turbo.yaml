@@ -1,0 +1,8 @@
+max_batch: 2
+stages:
+  - name: sd_turbo
+    default_sampling_params:
+      num_inference_steps: 1
+      guidance_scale: 0.0
+      height: 512
+      width: 512

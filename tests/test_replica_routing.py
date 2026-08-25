@@ -115,15 +115,15 @@ def test_each_replica_has_its_own_runtime_scheduler_instance() -> None:
     # Reach into the engine by patching RuntimeScheduler + checking identity.
     seen: list[RuntimeScheduler] = []
 
-    from nanovllm_omni.engine import batched_runner as br
+    from nanovllm_omni.engine import runtime_scheduler as rs
 
-    original_init = br.RuntimeScheduler.__init__
+    original_init = rs.RuntimeScheduler.__init__
 
     def traced_init(self, **kwargs):  # type: ignore[no-untyped-def]
         seen.append(self)
         original_init(self, **kwargs)
 
-    br.RuntimeScheduler.__init__ = traced_init  # type: ignore[method-assign]
+    rs.RuntimeScheduler.__init__ = traced_init  # type: ignore[method-assign]
     try:
         run_batched_generate(
             bundle,
@@ -135,7 +135,7 @@ def test_each_replica_has_its_own_runtime_scheduler_instance() -> None:
             balancer=RoundRobinBalancer(),
         )
     finally:
-        br.RuntimeScheduler.__init__ = original_init  # type: ignore[method-assign]
+        rs.RuntimeScheduler.__init__ = original_init  # type: ignore[method-assign]
 
     assert len(seen) == 2
     # Each replica gets a distinct scheduler instance (no aliasing).

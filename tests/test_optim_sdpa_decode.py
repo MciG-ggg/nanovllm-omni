@@ -25,9 +25,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-import torch.nn.functional as functional
 
 torch = pytest.importorskip("torch")
+import torch.nn.functional as functional  # noqa: E402 -- after importorskip
 
 # ---------------------------------------------------------------------------
 # helpers

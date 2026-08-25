@@ -8,7 +8,6 @@ Stdlib only -- no fastapi, no uvicorn, no pydantic.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +18,6 @@ from uuid import uuid4
 
 from nanovllm_omni import Omni, SamplingParams
 from nanovllm_omni.config.registry import load_deploy_config
-from nanovllm_omni.outputs import AudioPayload
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
 
@@ -60,8 +58,14 @@ def _extract_text(messages: list[dict[str, Any]]) -> str:
     raise ValueError("no user text message found")
 
 
-def _chat_completion(audio: AudioPayload, model: str, prompt_tokens: int) -> dict[str, Any]:
-    """Shape one aligned Omni audio output into an OpenAI response."""
+def _chat_completion(payload: dict[str, Any], model: str, prompt_tokens: int) -> dict[str, Any]:
+    """Shape one aligned Omni output's ``to_dict()`` payload into an OpenAI response.
+
+    ``payload`` is ``OmniRequestOutput.to_dict()``: multimodal bytes (audio)
+    arrive already base64-encoded, so this function only builds the
+    ChatCompletion envelope around them.
+    """
+    audio_b64 = payload["multimodal_output"]["audio"]
     return {
         "id": f"chatcmpl-{uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -74,7 +78,7 @@ def _chat_completion(audio: AudioPayload, model: str, prompt_tokens: int) -> dic
                     "role": "assistant",
                     "content": None,
                     "audio": {
-                        "data": base64.b64encode(audio.wav_bytes()).decode("ascii"),
+                        "data": audio_b64,
                         "format": "wav",
                         "sample_rate": 24000,
                     },
@@ -142,8 +146,8 @@ def serve(state, host: str, port: int) -> None:
                 text = _extract_text(messages)
                 model = body.get("model", engine.model)
                 output = engine.generate([text], sampling_params=sampling)[0]
-                audio = output.multimodal_output["audio"]
-                self._json(200, _chat_completion(audio, model, len(text.split())))
+                payload = output.to_dict()
+                self._json(200, _chat_completion(payload, model, len(text.split())))
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except Exception as exc:

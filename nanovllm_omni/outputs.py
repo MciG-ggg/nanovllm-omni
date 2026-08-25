@@ -212,9 +212,12 @@ class OmniRequestOutput:
         """JSON-serializable dict (vllm-omni ``to_dict`` shape).
 
         ``multimodal_output`` is materialized as ``{key: value}`` where tensor
-        values are detached to CPU and converted to lists so the result is
-        ``json.dumps``-friendly.
+        values are detached to CPU and converted to lists, and ``bytes`` values
+        (e.g. WAV audio) are base64-encoded, so the result survives
+        ``json.dumps``.
         """
+        import base64
+
         result = {
             "request_id": self.request_id,
             "final_output_type": self.final_output_type,
@@ -225,6 +228,14 @@ class OmniRequestOutput:
                 if _is_tensor(value):
 
                     result["multimodal_output"][key] = value.detach().cpu().tolist()
+                elif isinstance(value, AudioPayload):
+                    result["multimodal_output"][key] = base64.b64encode(value.wav_bytes()).decode(
+                        "ascii"
+                    )
+                elif isinstance(value, (bytes, bytearray)):
+                    result["multimodal_output"][key] = base64.b64encode(bytes(value)).decode(
+                        "ascii"
+                    )
                 else:
                     result["multimodal_output"][key] = value
         if self._custom_output:

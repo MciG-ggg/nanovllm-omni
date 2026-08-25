@@ -27,13 +27,34 @@ def test_to_dict_audio_pipeline() -> None:
     d = out.to_dict()
     assert d["request_id"] == "r1"
     assert "multimodal_output" in d
-    assert "audio" in d["multimodal_output"]
+    # bytes are serialized to base64 so the dict survives json.dumps.
+    import base64
+    import json
+
+    assert base64.b64decode(d["multimodal_output"]["audio"]) == b"RIFF...."
+    json.dumps(d)  # must not raise on bytes
 
 
 def test_to_dict_no_payload() -> None:
     out = OmniRequestOutput(request_id="empty")
     d = out.to_dict()
     assert d["request_id"] == "empty"
+
+
+def test_to_dict_plain_str_value_stays_readable() -> None:
+    out = OmniRequestOutput(request_id="r")
+    out.multimodal_output = MultimodalPayload.from_dict({"text": "hi"})
+    d = out.to_dict()
+    assert d["multimodal_output"]["text"] == "hi"
+    assert d["multimodal_output"].get("audio") is None
+
+
+def test_to_dict_custom_output_and_error() -> None:
+    out = OmniRequestOutput(request_id="r", error="boom")
+    out.custom_output = {"metric": 1}  # type: ignore[attr-defined]
+    d = out.to_dict()
+    assert d["error"] == "boom"
+    assert d["custom_output"] == {"metric": 1}
 
 
 def test_custom_output_roundtrip() -> None:

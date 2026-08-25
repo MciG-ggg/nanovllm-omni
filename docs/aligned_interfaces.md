@@ -334,6 +334,8 @@ Content-Type: application/json
 
 ### 响应
 
+响应组装路径:引擎产物 → `OmniRequestOutput.to_dict()` → `_chat_completion(payload, ...)`。`to_dict()` 把 `multimodal_output` 里的 `AudioPayload`/bytes 序列化成 base64(tensor 则 `detach().cpu().tolist()`),adapter 只负责把它嵌进 ChatCompletion envelope——序列化逻辑收敛在 `outputs.py`,HTTP 层不再手写 base64。
+
 ```json
 {
   "id": "chatcmpl-<uuid24>",

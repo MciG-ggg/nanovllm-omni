@@ -10,7 +10,27 @@ from __future__ import annotations
 
 import pytest
 
-from nanovllm_omni.serving.openai_adapter import _extract_text
+from nanovllm_omni.serving.openai_adapter import _chat_completion, _extract_text
+
+
+def test_chat_completion_reads_base64_audio_from_payload() -> None:
+    """The OpenAI envelope consumes ``to_dict()``'s payload, not an AudioPayload."""
+    import base64
+    import json
+
+    payload = {
+        "request_id": "r1",
+        "final_output_type": "audio",
+        "multimodal_output": {"audio": base64.b64encode(b"RIFF....").decode("ascii")},
+    }
+    body = _chat_completion(payload, "minimind-o", prompt_tokens=3)
+    # Round-trips through the same base64 the adapter produces.
+    data = json.loads(json.dumps(body))["choices"][0]["message"]["audio"]["data"]
+    assert base64.b64decode(data) == b"RIFF...."
+    assert body["choices"][0]["message"]["audio"]["format"] == "wav"
+    assert body["choices"][0]["message"]["audio"]["sample_rate"] == 24000
+    assert body["object"] == "chat.completion"
+    assert body["usage"]["prompt_tokens"] == 3
 
 
 def test_extract_text_concatenates_text_blocks() -> None:

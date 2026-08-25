@@ -7,7 +7,8 @@ forward). This module owns the loop shape that mirrors vllm-omni's
 serial hand-off of finished thinkers into the codec chain.
 
 Layering (locked in the TICKET design session):
-- ``engine/sched.py``        -> scheduler + fixed-slot KV pool (pure lifecycle)
+- ``engine/runtime_scheduler.py`` -> per-stage scheduler + Sequence (TK-004)
+- ``engine/sched.py``        -> fixed-slot KV pool (pure lifecycle)
 - ``engine/batched_runner.py`` -> engine loop, tokenization, serial codec chain
 - ``models/minimind_omni/batched_generation.py`` -> per-request runner + forward
 """
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nanovllm_omni.engine.sched import OmniScheduler
+from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
 
 
 def run_batched_generate(
@@ -56,9 +57,7 @@ def run_batched_generate(
 
     if max_batch is None:
         max_batch = getattr(deploy, "max_batch", 2) if deploy is not None else 2
-    cfg = getattr(bundle.model, "config", None)
-    max_seq = int(getattr(cfg, "max_position_embeddings", 4096))
-    sched = OmniScheduler(max_batch=max_batch, max_seq=max_seq)
+    sched = RuntimeScheduler(max_num_seqs=max_batch)
     runner = BatchedThinkerRunner(
         bundle,
         sched,
@@ -79,25 +78,25 @@ def run_batched_generate(
 
     payloads: dict[str, Any] = {}
     with torch.no_grad():
-        while sched.has_requests():
+        while sched.has_work():
             out = sched.schedule()
             if out.is_empty:
                 break
             prefilled: set[str] = set()
-            generated: dict[str, int] = {}
             finished: set[str] = set()
             for group in out.prefill_groups:
                 runner.prefill_group(group)
-                prefilled.update(group.req_ids)
+                prefilled.update(chunk.seq.request_id for chunk in group.items)
             for group in out.decode_groups:
                 runner.decode_group(group)
-                for rid in group.req_ids:
-                    generated[rid] = runner.states[rid].step
+                for seq in group.items:
+                    rid = seq.request_id
                     if runner.step_finished(rid):
                         finished.add(rid)
-            newly = sched.update_from_output(
-                prefilled=prefilled, generated=generated, finished=finished
-            )
+            # ``update_from_output`` returns rid -> generated_count for just-
+            # finished sequences; we reuse that as the iteration order for
+            # codec hand-off below.
+            newly = sched.update_from_output(prefilled=prefilled, finished=finished)
             for rid in newly:
                 st = runner.states[rid]
                 if not st.frames:

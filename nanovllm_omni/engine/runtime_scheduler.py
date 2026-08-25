@@ -111,19 +111,23 @@ class RuntimeScheduler:
             seq.status = SequenceStatus.PREFILL
             self.running[seq.request_id] = seq
 
-        # Prefill chunks: every PREFILL sequence becomes a single chunk
-        # covering its full prompt. Chunked prefill (start > 0) is supported
-        # by the data structure but not emitted here.
+        # Prefill chunks: every PREFILL sequence becomes a single chunk covering
+        # its full prompt. Partition by ``num_tokens`` so the model forward sees
+        # a rectangular [B, 9, P] tensor (one length per prefill group). Chunked
+        # prefill (start > 0) is supported by the data structure but not emitted
+        # here.
         if self.running:
-            prefill_items: list[PrefillChunk] = []
             decode_items: list[Sequence] = []
+            prefill_by_len: dict[int, list[PrefillChunk]] = {}
             for seq in self.running.values():
                 if seq.status is SequenceStatus.PREFILL:
-                    prefill_items.append(PrefillChunk(seq=seq, start=0, end=seq.num_tokens))
+                    prefill_by_len.setdefault(seq.num_tokens, []).append(
+                        PrefillChunk(seq=seq, start=0, end=seq.num_tokens)
+                    )
                 elif seq.status is SequenceStatus.DECODE:
                     decode_items.append(seq)
-            if prefill_items:
-                out.prefill_groups.append(RuntimeGroup(kind="prefill", items=prefill_items))
+            for _n_pos, chunks in sorted(prefill_by_len.items()):
+                out.prefill_groups.append(RuntimeGroup(kind="prefill", items=chunks))
             # Decode groups: identical num_tokens -> one rectangular forward.
             by_len: dict[int, list[Sequence]] = {}
             for seq in decode_items:
@@ -138,21 +142,26 @@ class RuntimeScheduler:
         *,
         prefilled: list[str] | None = None,
         finished: list[str] | None = None,
-    ) -> None:
+    ) -> dict[str, int]:
         """Advance per-sequence status from one round's runner output.
 
         ``prefilled``: request_ids whose prefill forward just wrote KV.
         ``finished``: request_ids whose stage generation is done.
+        Returns ``{rid: num_tokens}`` for the just-finished sequences, so the
+        caller can iterate them in submission order for codec hand-off.
         """
         for rid in prefilled or ():
             seq = self.running.get(rid)
             if seq is not None and seq.status is SequenceStatus.PREFILL:
                 seq.status = SequenceStatus.DECODE
+        just_finished: dict[str, int] = {}
         for rid in finished or ():
             seq = self.running.pop(rid, None)
             if seq is not None:
                 seq.status = SequenceStatus.FINISHED
                 self.finished[rid] = seq
+                just_finished[rid] = seq.num_tokens
+        return just_finished
 
     # -- iteration helpers (for tests + introspection) ----------------------
 

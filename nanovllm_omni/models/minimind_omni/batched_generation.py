@@ -27,11 +27,12 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from nanovllm_omni.engine.sched import (
-    FixedKvSlotPool,
-    OmniScheduler,
-    SchedulerGroup,
+from nanovllm_omni.engine.runtime_scheduler import (
+    RuntimeGroup,
+    RuntimeScheduler,
 )
+from nanovllm_omni.engine.sched import FixedKvSlotPool
+from nanovllm_omni.engine.sequence import PrefillChunk, Sequence
 
 from ._sampling import (
     AUDIO_VOCAB_BOUNDARY,
@@ -83,7 +84,7 @@ class BatchedThinkerRunner:
     def __init__(
         self,
         bundle: Any,
-        sched: OmniScheduler,
+        sched: RuntimeScheduler,
         *,
         temperature: float = 0.75,
         top_p: float = 0.90,
@@ -135,7 +136,17 @@ class BatchedThinkerRunner:
     # -- submission / registration -----------------------------------------
 
     def add_request(self, prompt_ids: list[int], request_id: str | None = None) -> str:
-        rid = self.sched.add_request(prompt_ids, request_id=request_id)
+        # Build the per-stage Sequence first (TK-004 spec data structure),
+        # then submit it to the scheduler. ``request_id`` defaults to a
+        # scheduler-assigned id; we read it back via ``seq.request_id``
+        # so callers can index ``self.states`` by the same key.
+        rid = request_id or f"req-{len(self.sched.running) + len(self.sched.waiting)}"
+        seq = Sequence(
+            request_id=rid,
+            token_ids=list(prompt_ids),
+            num_tokens=len(prompt_ids),
+        )
+        self.sched.add_sequence(seq)
         # stable seed from the name so admission order never changes draws
         seed = self.base_seed + int(hashlib.sha1(rid.encode()).hexdigest()[:8], 16) % 1_000_000
         import torch
@@ -238,13 +249,16 @@ class BatchedThinkerRunner:
 
     # -- group execution ----------------------------------------------------
 
-    def prefill_group(self, group: SchedulerGroup) -> None:
-        """One rectangular [B, 9, P] forward over the group's prompts."""
+    def prefill_group(self, group: RuntimeGroup) -> None:
+        """One rectangular [B, 9, P] forward over the group's prompt chunks."""
         import torch
 
-        req_ids = group.req_ids
+        # RuntimeGroup.items is list[PrefillChunk] for a prefill group; the
+        # rid is on each chunk's ``seq.request_id`` (Sequence per TK-004).
+        chunks: list[PrefillChunk] = group.items
+        req_ids = [chunk.seq.request_id for chunk in chunks]
         n_req = len(req_ids)
-        n_pos = group.start_pos
+        n_pos = chunks[0].end  # all chunks share end == seq.num_tokens
         text = torch.tensor(
             [self.states[r].prompt_ids for r in req_ids],
             dtype=torch.long,
@@ -257,7 +271,7 @@ class BatchedThinkerRunner:
         out = self.model.forward(inp, past_key_values=None, use_cache=True, logits_to_keep=1)
         for layer, (k, v) in enumerate(out.past_key_values):
             for r, rid in enumerate(req_ids):
-                self.kv_pool.write(rid, layer, k, v, row=r)
+                self.kv_pool.write(rid, layer, key=k, value=v, row=r)
 
         # first token predicted by the prompt's last position; no audio yet
         text_logits = out.logits  # [B, 1, V]
@@ -271,16 +285,17 @@ class BatchedThinkerRunner:
             if not st.text_finished and tok == self.sampling["eos"]:
                 st.text_finished = True
 
-    def decode_group(self, group: SchedulerGroup) -> None:
+    def decode_group(self, group: RuntimeGroup) -> None:
         """One rectangular [B, 9, 1] forward for a same-KV-length decode group."""
-
-        req_ids = group.req_ids
+        # RuntimeGroup.items is list[Sequence] for a decode group; rid is on
+        # each Sequence.request_id.
+        req_ids = [seq.request_id for seq in group.items]
         inp = self._decode_col(req_ids)
         past = self.kv_pool.gather(req_ids)
         out = self.model.forward(inp, past_key_values=past, use_cache=True, logits_to_keep=1)
         for layer, (k, v) in enumerate(out.past_key_values):
             for r, rid in enumerate(req_ids):
-                self.kv_pool.write(rid, layer, k, v, row=r)
+                self.kv_pool.write(rid, layer, key=k, value=v, row=r)
 
         text_logits = out.logits  # [B, 1, V]
         audio_logits = out.audio_logits  # list of 8 × [B, 1, V]

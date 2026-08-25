@@ -17,10 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanovllm_omni.engine.sched import (
-    FixedKvSlotPool,
-    OmniScheduler,
-)
+from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
+from nanovllm_omni.engine.sched import FixedKvSlotPool
 
 torch = pytest.importorskip("torch")
 
@@ -90,7 +88,7 @@ class FakeMiniMindOmni:
 def _make_runner(model, prompts, **kwargs):
     from nanovllm_omni.models.minimind_omni.batched_generation import BatchedThinkerRunner
 
-    sched = OmniScheduler(max_batch=kwargs.pop("max_batch", 2), max_seq=256)
+    sched = RuntimeScheduler(max_num_seqs=kwargs.pop("max_batch", 2))
     runner = BatchedThinkerRunner(
         SimpleNamespace(model=model),
         sched,
@@ -111,21 +109,22 @@ def _make_runner(model, prompts, **kwargs):
 def _drain(runner, sched):
     """Run the engine loop (schedule -> prefill/decode -> update) to completion."""
     finished = set()
-    while sched.has_requests():
+    while sched.has_work():
         out = sched.schedule()
         if out.is_empty:
             break
-        prefilled, generated = set(), {}
+        prefilled: set[str] = set()
+        finished_now: set[str] = set()
         for g in out.prefill_groups:
             runner.prefill_group(g)
-            prefilled.update(g.req_ids)
+            prefilled.update(chunk.seq.request_id for chunk in g.items)
         for g in out.decode_groups:
             runner.decode_group(g)
-            for rid in g.req_ids:
-                generated[rid] = runner.states[rid].step
-                if runner.step_finished(rid):
-                    finished.add(rid)
-        sched.update_from_output(prefilled=prefilled, generated=generated, finished=finished)
+            for seq in g.items:
+                if runner.step_finished(seq.request_id):
+                    finished_now.add(seq.request_id)
+        sched.update_from_output(prefilled=prefilled, finished=finished_now)
+        finished.update(finished_now)
     return finished
 
 
@@ -138,15 +137,15 @@ def test_prefill_groups_by_prompt_length_and_decode_by_kv_length():
 
     out = sched.schedule()
     assert len(out.prefill_groups) == 1  # same length -> one batch
-    assert out.prefill_groups[0].req_ids == [a, b]
+    assert [chunk.seq.request_id for chunk in out.prefill_groups[0].items] == [a, b]
     assert not out.decode_groups  # not ready yet
 
     # mark both prefilled -> they become a single decode group (same KV length)
-    sched.update_from_output(prefilled={a, b})
+    sched.update_from_output(prefilled=[a, b])
     out = sched.schedule()
     assert not out.prefill_groups
     assert len(out.decode_groups) == 1
-    assert out.decode_groups[0].req_ids == [a, b]
+    assert [seq.request_id for seq in out.decode_groups[0].items] == [a, b]
 
 
 def test_mixed_prompt_lengths_never_mix_in_one_forward():
@@ -155,7 +154,7 @@ def test_mixed_prompt_lengths_never_mix_in_one_forward():
 
     out = sched.schedule()
     assert len(out.prefill_groups) == 2  # different lengths -> separate prefills
-    lengths = sorted(len(g.req_ids) for g in out.prefill_groups)
+    lengths = sorted(len(g.items) for g in out.prefill_groups)
     assert lengths == [1, 1]
 
 
@@ -164,7 +163,7 @@ def test_max_batch_caps_concurrent_running():
     runner, sched, rids = _make_runner(model, [[1, 2, 3], [4, 5, 6]], max_batch=1)
 
     out = sched.schedule()
-    assert len(out.prefill_groups[0].req_ids) == 1  # only one admitted
+    assert len(out.prefill_groups[0].items) == 1  # only one admitted
 
 
 # -- batched forward really happens -----------------------------------------

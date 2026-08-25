@@ -1,7 +1,7 @@
 """Project-owned streaming MiniMind-O generation loop.
 
 The single-request path (``stream_generate``) is a thin wrapper that drives a
-``BatchedThinkerRunner`` with ``max_batch=1`` and yields one
+``BatchedThinkerRunner`` with a 1-slot ``RuntimeScheduler`` and yields one
 ``(text_chunk, audio_frame)`` pair per decode step. All per-step work
 (forward, sampling, EOS bookkeeping, frame emission, open_thinking audio
 gating) is shared with the batched engine path used by
@@ -48,11 +48,9 @@ def stream_generate(
     """
     import torch
 
-    from nanovllm_omni.engine.sched import OmniScheduler
+    from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
 
-    cfg = getattr(model, "config", None)
-    max_seq = int(getattr(cfg, "max_position_embeddings", 4096))
-    sched = OmniScheduler(max_batch=1, max_seq=max_seq)
+    sched = RuntimeScheduler(max_num_seqs=1)
     runner = BatchedThinkerRunner(
         SimpleNamespace(model=model),
         sched,
@@ -66,18 +64,20 @@ def stream_generate(
     rid = runner.add_request(input_ids[0].tolist())
 
     seen_frames = 0
-    while sched.has_requests():
+    while sched.has_work():
         out = sched.schedule()
         if out.is_empty:
             break
         prefilled: set[str] = set()
         finished: set[str] = set()
         for group in out.prefill_groups:
-            if rid in group.req_ids:
+            group_rids = [chunk.seq.request_id for chunk in group.items]
+            if rid in group_rids:
                 runner.prefill_group(group)
                 prefilled.add(rid)
         for group in out.decode_groups:
-            if rid not in group.req_ids:
+            group_rids = [seq.request_id for seq in group.items]
+            if rid not in group_rids:
                 continue
             runner.decode_group(group)
             st = runner.states[rid]

@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nanovllm_omni.engine.kv_pool import FixedKvSlotPool
 from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
-from nanovllm_omni.engine.sched import FixedKvSlotPool
 
 torch = pytest.importorskip("torch")
 

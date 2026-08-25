@@ -27,11 +27,11 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
+from nanovllm_omni.engine.kv_pool import FixedKvSlotPool
 from nanovllm_omni.engine.runtime_scheduler import (
     RuntimeGroup,
     RuntimeScheduler,
 )
-from nanovllm_omni.engine.sched import FixedKvSlotPool
 from nanovllm_omni.engine.sequence import PrefillChunk, Sequence
 
 from ._sampling import (

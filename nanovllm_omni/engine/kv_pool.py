@@ -1,4 +1,4 @@
-"""Per-request fixed-slot KV pool (engine/sched.py).
+"""Per-request fixed-slot KV pool (engine/kv_pool.py).
 
 After TK-004 the request lifecycle + group formation moved to
 ``engine.runtime_scheduler.RuntimeScheduler``. This module keeps only the

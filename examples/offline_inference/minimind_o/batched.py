@@ -1,7 +1,7 @@
 """Smoke: batched continuous-batching generate -> audio.wav (MiniMind-O).
 
 Real-weight check for the batched engine loop
-(``engine/sched.py`` + ``engine/batched_runner.py``). Asserts two
+(``engine/kv_pool.py`` + ``engine/batched_runner.py``). Asserts two
 properties that would otherwise be invisible in the fake-model unit
 tests:
 

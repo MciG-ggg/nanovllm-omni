@@ -252,6 +252,9 @@ vllm-omni 的 `StagePool`(1281 LOC)和 `Orchestrator`(2428 LOC)是面向**多副
 - **`PipelineExecutor`**:`PipelineRunner` 的 async 包装,给 HTTP / `AsyncOmni` 用。用 `asyncio.run_in_executor` 把同步的 `PipelineRunner.run` 投出去。`max_concurrent` 默认 `1`(单 GPU),~80 LOC。
 - **`RuntimeScheduler` / `Sequence` / `PrefillChunk`**(TK-004):per-stage continuous-batching 调度器的 spec 数据结构。`RuntimeScheduler` 是一个 instance 管一个 LLM stage 的 waiting/running/finished 队列;`schedule()` 产出 prefill 组 + 按 `num_tokens` 分块的 decode 组;`update_from_output()` 驱动 `PREFILL → DECODE → FINISHED` 生命周期。`Sequence` 是 per-request 可变状态(含 kv_blocks 引用);`PrefillChunk` 标记 prompt 子范围(chunked prefill 的数据结构钩子)。
 - **`LoadBalancer` ABC + `RoundRobinBalancer`**(TK-007):per-stage replica 的负载均衡。`StageConfig.num_replicas` 默认 `1`,所以单设备下 `select()` 恒返回 0,执行路径不变;`PipelineRunner.last_routes` 记录每 stage 的 `(stage_id, replica_id)` 选择供 per-request trace。
+- **`Orchestrator` + `StagePool` + `Replica`**(vllm-omni 单设备降级):`engine/orchestrator.py` 保留 vllm-omni Orchestrator 的“请求穿过 stage → 各 stage replica pool → LoadBalancer 派发”形状,但不带后台线程 / janus queue / 分布式成员资格。`Orchestrator.submit(prompts)` 同步把 prompts 穿过 stage-0 的 replica pool(drive 钩子驱动每个 replica 的 scheduler 到完成),再对每个 finished rid 应用 finalize 钩子过下游 stage。`Replica` = 一个 `RuntimeScheduler` + 一个 runner(`引擎 core per replica` 的降级)。
+
+`run_batched_generate` 现在委托 `Orchestrator`(tk-t004 的 scheduler + (tk-007 的 replica pool),只保留 MiniMind-O 的 tokenize / drive / finalize seam。`num_replicas=1` 默认行为不变。
 
 划分跟 vllm-omni 的“pool 路由到副本,orchestrator 跟踪请求”同构,但合并到一条直线:runner 是 pipeline config 的唯一消费者,executor 是 runner 的唯一消费者。`nanovllm_omni.engine/` 下**不出现** `StagePool` 或 `Orchestrator` 类名——这两个名字**留给真正多副本(跨设备)的引入时再用**,TK-007 在单设备范围内只落地 replica 编号 + 负载均衡,不引入跨设备 Orchestrator。
 

@@ -1,10 +1,19 @@
 import io
 import re
+import sys
 import wave
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from enum import Flag, StrEnum, auto
+from enum import Enum, Flag, auto
 from typing import Any, TypeVar
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum  # type: ignore[attr-defined]
+else:
+
+    class StrEnum(str, Enum):  # type: ignore[no-redef]
+        """Backport of ``enum.StrEnum`` for Python <3.11."""
+
 
 _T = TypeVar("_T")
 

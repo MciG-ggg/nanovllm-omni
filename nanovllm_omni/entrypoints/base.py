@@ -32,10 +32,12 @@ def _name_match_candidate(model: str) -> str:
 
     vllm-omni uses this same trick for the path-substring fallback (e.g.
     ``cosyvoice3`` beats ``cosyvoice`` by length). Mirrors their helper so
-    existing local-dir inference matches what vllm-omni would do.
+    existing local-dir inference matches what vllm-omni would do. Dots
+    are stripped too so version-suffixed names like ``Mimir-1.6B-Instruct``
+    still match against the un-dotted handle ``mimir_1_6b_instruct``.
     """
     name = Path(model.rstrip("/")).name or model
-    return name.lower().replace("-", "").replace("_", "")
+    return name.lower().replace("-", "").replace("_", "").replace(".", "")
 
 
 def _load_pretrained_config(model: str, trust_remote_code: bool) -> Any | None:

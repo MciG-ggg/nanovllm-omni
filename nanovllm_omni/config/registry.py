@@ -22,13 +22,24 @@ structure" for the contract.
 from __future__ import annotations
 
 import importlib
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum  # type: ignore[attr-defined]
+else:
+    # Python <3.11 backport: ``enum.StrEnum`` was added in 3.11. The
+    # ``str, Enum`` mixin gives the same ``member == "value"`` semantics
+    # used by the rest of the codebase. ponytail: drop this branch when
+    # 3.10 is dropped from the supported matrix.
+    class StrEnum(str, Enum):  # type: ignore[no-redef]
+        """Backport of ``enum.StrEnum`` for Python <3.11."""
 
 
 class StageExecutionType(StrEnum):
@@ -268,6 +279,7 @@ def _load_builtin_pipelines() -> None:
     Kept at module bottom so ``register_pipeline`` is already defined when
     the imported modules call it. New families add one import here.
     """
+    from nanovllm_omni.models.mimir_1_6b import pipeline as _mimir_1_6b_pipeline  # noqa: F401
     from nanovllm_omni.models.minimind_omni import pipeline as _minimind_pipeline  # noqa: F401
     from nanovllm_omni.models.sd_turbo import pipeline as _sd_turbo_pipeline  # noqa: F401
     from nanovllm_omni.models.smolvla import pipeline as _smolvla_pipeline  # noqa: F401

@@ -47,7 +47,10 @@
 | 多请求并行 | 否(单卡串行) | 受 `extra["max_concurrent"]` 控制(默认 1) |
 | 用途 | 脚本、批处理、回归测试 | HTTP 服务、异步 pipeline、与外部 `asyncio` 代码组合 |
 
-两个类的 `generate` 都接受 `prompts: str | list[str]` 和 `sampling_params: SamplingParams | None` 两个位置参数,后者为 `None` 时回落到 `deploy/*.yaml` 里 `default_sampling_params` 配的默认值(详见 `PipelineRunner._stage_sampling`)。
+两个类的 `generate` 都接受 `prompts: str | list[str]` 和 `sampling_params: SamplingParams | None` 两个位置参数,后者为 `None` 时回落到 `deploy/*.yaml` 里 `default_sampling_params` 配的默认值(详见 `PipelineRunner._stage_sampling`)。`Omni.generate` 另支持两个 keyword(vllm-omni 对齐面,见 `issues/04-contract-cleanup`):
+
+- `sampling_params_list: Iterable[SamplingParams] | None` — 逐 prompt 的采样覆盖;与 `prompts` 等长时逐项生效,单一值时会广播到所有 prompt。
+- `py_generator: bool = False` — 为 `True` 时 `generate` 返回惰性 `Generator[OmniRequestOutput]`(按提交顺序逐个执行,消费时才跑);默认返回 `list`。SPEC 锁定的 `sampling_params` 单值签名保持不变,"纯新增、向前兼容"。
 
 `AsyncOmni.generate` 的返回类型是 `AsyncIterator` 而不是 `list`,意味着调用方必须 `async for` 或 `await anext(...)`。这跟 vllm-omni 的对齐面一致。
 
@@ -74,7 +77,7 @@
 
 ## `OmniRequestOutput` 形状
 
-`nanovllm_omni.outputs.OmniRequestOutput` 是 `frozen=True` 的 dataclass,封装一次请求的最终产物。
+`nanovllm_omni.outputs.OmniRequestOutput` 是 dataclass(非 frozen,因 `custom_output` setter 需要可变),封装一次请求的最终产物。字段与 vllm-omni 的 `OmniRequestOutput` 对齐:
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -82,12 +85,15 @@
 | `outputs` | `Any` | 原始 payload(例如 `AudioPayload`、`ActionArtifact`)。消费方若想直接拿字节 / 数组,从这里取。 |
 | `multimodal_output` | `MultimodalPayload \| None` | 按 modality 分桶的张量 + 元数据容器。详见下方"输出 payload"小节。 |
 | `error` | `str \| None` | 若该次请求失败,这里放错误描述;`outputs` 和 `multimodal_output` 为 `None`。 |
+| `final_output_type` | `str` | 默认 `"text"`;记录哪个 terminal stage 产出这个 payload(`"audio"` / `"image"` / `"actions"` / ...)。 |
+| `_custom_output` | `dict` | 非 modal 的自定义输出槽,经 `custom_output` 属性读写。 |
 
-三个类构造方法分别走不同路径:
+四个类构造方法分别走不同路径:
 
 | 方法 | 何时调用 | `multimodal_output` 内容 |
 |---|---|---|
 | `from_pipeline(output, request_id, final_output_type="audio")` | AR 多 stage 跑完,final stage 返回 audio payload | `{<final_output_type>: <value>}`(默认 `"audio"`) |
+| `from_stage_output(source, request_id, final_output_type, **kwargs)` | 从任意的 stage 原始输出构造(duck-typed)——从 source 复制 `outputs` / `multimodal_output`;vllm-omni 的同名方法形状 | 继承 source 的 payload,缺失时用 `{final_output_type: <value>}` |
 | `from_diffusion(output, request_id)` | 单 stage 扩散返回图片 | `{"image": <output>}` |
 | `from_error(error, request_id)` | 异常路径 | `None`;`error` 字段填值 |
 
@@ -95,6 +101,12 @@
 
 - `is_pipeline_output` → `multimodal_output` 含 `"audio"` 键
 - `is_diffusion_output` → `multimodal_output` 含 `"image"` 键
+
+另有三个对齐属性 / 方法(vllm-omni `OmniRequestOutput` 面):
+
+- `custom_output` → 可读写 `dict`,非 modal 的输出槽(`_custom_output` 字段的属性包装)。
+- `num_images` → `int`,`multimodal_output` 含 `"image"` 时为 `1` 否则 `0`(vllm-omni 是 `len(self.images)`;我们单 payload 形态下等价)。
+- `to_dict()` → JSON 可序列化 dict:`{"request_id", "final_output_type"}`,叠加 `multimodal_output`(tensor 值 `detach().cpu().tolist()`)、非空时 `custom_output`、有错时 `error`。HTTP 层序列化用。
 
 `unwrap()` 在 `error` 为真时抛 `RuntimeError(self.error)`,否则返回 `outputs`。HTTP 适配器走的是 `output.multimodal_output["audio"].wav_bytes()`(见下方"HTTP 入口")。
 
@@ -183,6 +195,14 @@ TICKET-02 之后的最小字段集(设计记录见 `.scratch/aligned-interfaces/
 | `registration_handles` | `tuple[str, ...]` | 该 pipeline 注册时挂的备用 key(如 HF repo id `"jingyaogong/minimind-3o"`)。默认 `(name,)` |
 | `hf_architectures` | `tuple[str, ...]` | HF 架构别名,用于在 `OmniBase.try_infer_model_type` 的层 6 消歧 |
 | `hf_config_predicate` | `Callable[[Any], bool] \| None` | 对加载到的 HF config 的额外谓词,默认 `None` |
+
+### registry 值与复用:vllm-omni 对齐
+
+`OMNI_PIPELINES` 的值类型从纯 `PipelineConfig` 扩展为 `PipelineConfig | PipelineResolverFunc`(vllm-omni `pipeline_registry.py` 同款):
+
+- `register_pipeline(pipeline, model_type=None, *, registration_handles=...)` 接受 `PipelineConfig` **或** callable resolver。传 callable 时必须显式给 `model_type`(它随 `hf_config` 可能解析到不同 pipeline);`registration_handles` 可选别名。
+- `resolve_pipeline_config(name, hf_config=None)` 命中 callable 时调用它并返回其结果;结果为 `None` 表示"该 config 无匹配 pipeline"。
+- 可搭配 `hf_config_predicate` / `hf_architectures` 实现"一个 HF repo 名 → 依 config 选 variant"(vllm-omni 的 `pipeline_cfg_resolver` 形态)。
 
 ---
 

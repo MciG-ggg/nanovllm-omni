@@ -19,6 +19,8 @@ _MODEL_ID = "Efficient-Large-Model/Sana_600M_1024px_diffusers"
 # ``args.model`` is a registry handle unless the caller passed a real
 # repo id / local snapshot dir; only the bare handle maps to the default.
 _REGISTERED_HANDLES = {"sana_06b"}
+# Only float dtypes are accepted; ``int8`` (used by SmolVLA's quantisation
+# path) is rejected to avoid a bogus ``torch.int8`` cast for a diffusion stage.
 _TORCH_DTYPES = {"float16", "bfloat16", "float32"}
 
 
@@ -35,7 +37,17 @@ def _import_sana_pipeline() -> Any:
 
 
 def _sana_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: load the SanaPipeline, return a forward callable."""
+    """Stage 0 factory: load the SanaPipeline, return a forward callable.
+
+    The snapshot must include ``transformer/diffusion_pytorch_model.fp16.safetensors``
+    (and ideally the matching ``vae`` / ``text_encoder`` fp16 variants). The
+    HF repo ships a 32-bit ``diffusion_pytorch_model.safetensors`` for the
+    DiT that is the reference precision -- casting it to bf16 at load time
+    produces denoised noise rather than a real image (verified empirically).
+    ``variant="fp16"`` selects the inference weights; diffusers falls back
+    per-component to the non-variant file when its fp16 sibling is absent
+    (text encoder / VAE are tolerant; the DiT is not).
+    """
     import torch
     from diffusers import SanaPipeline
 
@@ -47,7 +59,7 @@ def _sana_stage(deploy: Any, args: Any) -> Any:
     model = getattr(args, "model", None) or _MODEL_ID
     model_id = _MODEL_ID if model in _REGISTERED_HANDLES else model
 
-    kwargs = {"torch_dtype": torch_dtype}
+    kwargs = {"torch_dtype": torch_dtype, "variant": "fp16"}
     if not allow_hf:
         kwargs["local_files_only"] = True
     pipe = SanaPipeline.from_pretrained(model_id, **kwargs)

@@ -18,6 +18,10 @@ from pathlib import Path
 from nanovllm_omni import Omni
 from nanovllm_omni.config.params import SamplingParams
 
+# Repo root = parents[3] from examples/offline_inference/sana_06b/run.py.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEPLOY_YAML = _REPO_ROOT / "deploy" / "sana_06b.yaml"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sana-0.6B text-to-image demo")
@@ -35,7 +39,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    extra = {} if args.allow_download else {"allow_hf_download": False}
+    extra = {"deploy_config_path": str(_DEPLOY_YAML)}
+    if not args.allow_download:
+        extra["allow_hf_download"] = False
     omni = Omni(args.model, device=args.device, extra=extra)
     out = omni.generate(
         [args.prompt],

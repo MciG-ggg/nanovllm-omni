@@ -223,13 +223,15 @@ def test_bundle_from_pretrained_receives_trust_remote_code_false(monkeypatch):
         "nanovllm_omni.models.minimind_omni.attention.enable_sdpa_decode", lambda m: None
     )
     monkeypatch.setattr(
-        "nanovllm_omni.models.minimind_omni.qkv_fusion.enable_fused_projections",
+        "nanovllm_omni.models.minimind_omni.attention.enable_fused_projections",
         lambda m: None,
     )
     monkeypatch.setattr(
-        "nanovllm_omni.models.minimind_omni.rms_norm.enable_fused_rmsnorm", lambda m: None
+        "nanovllm_omni.models.minimind_omni.attention.enable_fused_rmsnorm", lambda m: None
     )
-    monkeypatch.setattr("nanovllm_omni.models.minimind_omni.rope.enable_fused_rope", lambda m: None)
+    monkeypatch.setattr(
+        "nanovllm_omni.models.minimind_omni.attention.enable_fused_rope", lambda m: None
+    )
 
     bundle_mod.load_minimind_omni_bundle(
         model_id="any",

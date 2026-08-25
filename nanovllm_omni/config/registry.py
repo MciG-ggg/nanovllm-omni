@@ -171,22 +171,60 @@ class DeployConfig:
     max_batch: int = 2
 
 
-OMNI_PIPELINES: dict[str, PipelineConfig] = {}
+OMNI_PIPELINES: dict[str, PipelineConfig | Callable[[Any], PipelineConfig | None]] = {}
 
 
-def register_pipeline(pipeline: PipelineConfig) -> None:
-    """Register a PipelineConfig under ``pipeline.name`` and every entry in
-    ``pipeline.registration_handles`` (e.g. HF repo ids)."""
+PipelineResolver = Callable[[Any], PipelineConfig | None]
+
+
+def _resolve_value(
+    value: PipelineConfig | PipelineResolver | None, hf_config: Any | None
+) -> PipelineConfig | None:
+    """Resolve a registry entry. Callables are invoked with ``hf_config``."""
+    if value is None:
+        return None
+    return value(hf_config) if callable(value) else value
+
+
+def register_pipeline(
+    pipeline: PipelineConfig | PipelineResolver,
+    model_type: str | None = None,
+    *,
+    registration_handles: tuple[str, ...] | None = None,
+) -> None:
+    """Register a PipelineConfig (or resolver) under a model_type key.
+
+    Mirrors vllm-omni's ``register_pipeline``: a ``PipelineConfig`` registers
+    under ``pipeline.name`` plus its ``registration_handles``; a callable
+    resolver needs an explicit ``model_type`` (it can resolve to different
+    pipelines depending on ``hf_config``).
+    """
+    if callable(pipeline):
+        if model_type is None:
+            raise ValueError("model_type must be provided when registering a pipeline resolver")
+        OMNI_PIPELINES[model_type] = pipeline
+        if registration_handles:
+            for handle in registration_handles:
+                OMNI_PIPELINES[handle] = pipeline
+        return
     if not isinstance(pipeline, PipelineConfig):
-        raise TypeError(f"register_pipeline expected PipelineConfig, got {type(pipeline).__name__}")
+        raise TypeError(
+            f"register_pipeline expected PipelineConfig or callable, "
+            f"got {type(pipeline).__name__}"
+        )
     OMNI_PIPELINES[pipeline.name] = pipeline
     for handle in pipeline.registration_handles:
         OMNI_PIPELINES[handle] = pipeline
 
 
-def resolve_pipeline_config(name: str) -> PipelineConfig | None:
-    """Look up a registered pipeline by name or alias handle."""
-    return OMNI_PIPELINES.get(name)
+def resolve_pipeline_config(name: str, hf_config: Any | None = None) -> PipelineConfig | None:
+    """Look up a registered pipeline by name or alias handle.
+
+    ``OMNI_PIPELINES`` may hold either a ``PipelineConfig`` (returned as-is)
+    or a callable resolver ``(hf_config) -> PipelineConfig | None`` (invoked
+    with ``hf_config``). This mirrors vllm-omni's pipeline registry.
+    """
+    return _resolve_value(OMNI_PIPELINES.get(name), hf_config)
 
 
 def load_deploy_config(path: str | Path) -> DeployConfig:

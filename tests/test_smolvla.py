@@ -188,11 +188,14 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
 
 
 def test_as_nchw_accepts_image_bytes(monkeypatch) -> None:
-    """TK-017: base64-decoded image bytes decode to a batch-NCHW tensor."""
+    """TK-017: base64-decoded image bytes decode to a batch-NCHW tensor.
+
+    Needs numpy + Pillow, so it skips cleanly on the no-torch / no-PIL CI
+    jobs (dev extra has neither).
+    """
     from io import BytesIO
 
-    import numpy as np
-
+    np = pytest.importorskip("numpy")
     image_cls = pytest.importorskip("PIL.Image")
 
     buf = BytesIO()

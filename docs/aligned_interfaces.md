@@ -24,9 +24,8 @@
 
 - **MiniMind-O** 音频(`minimind_o`,3-stage AR+CODEC,TK-006)
 - **SmolVLA** 动作(`smolvla`,1-stage LLM_GENERATION)
-- **SmolVLM-500M-Instruct** VLM(`smolvlm`,1-stage LLM_GENERATION,TK-011)。`HuggingFaceTB/SmolVLM-500M-Instruct`:纯视觉-语言融合模型,BF16 推理(image + text → text)。`transformers.AutoModelForVision2Seq` 装载,heavy deps 留在 factory 内部。`final_output_type="text"` 经 `from_pipeline(...)` 装进 `multimodal_output["text"]`,与 Mimir 一致。500M 参数、BF16 ≈1 GB,4 GB 卡可跑。**vllm-omni 没有对应 VLM 路线**(`VLM` 不在 `StageExecutionType` closed set 里),所以落 `LLM_GENERATION`(纯文本生成路径) + `OmniEngineArgs.extra["images"]` 走 image 旁路。
+- **SmolVLM-500M-Instruct** VLM(`smolvlm`,1-stage LLM_GENERATION,TK-011)。`HuggingFaceTB/SmolVLM-500M-Instruct`:纯视觉-语言融合模型,BF16 推理(image + text → text)。`transformers.AutoModelForImageTextToText` 装载,heavy deps 留在 factory 内部。`final_output_type="text"` 经 `from_pipeline(...)` 装进 `multimodal_output["text"]`。500M 参数、BF16 ≈1 GB,4 GB 卡可跑。**vllm-omni 没有对应 VLM 路线**(`VLM` 不在 `StageExecutionType` closed set 里),所以落 `LLM_GENERATION`(纯文本生成路径) + `OmniEngineArgs.extra["images"]` 走 image 旁路。
 - **SD-Turbo** 图片(`sd_turbo`,1-stage **DIFFUSION**,TK-009 rev2)。`stabilityai/sd-turbo`(SD 2.1 的对抗蒸馏版):**1 步推理**,`guidance_scale` 锁定 0.0(CFG 会毁图),fp16 常驻 ~2 GB、512×512 峰值 ~2.5 GB —— 4 GB 卡可跑。文本 → 512×512 `PIL.Image`,`Omni._one` 经 `from_pipeline(final_output_type="image")` 装进 `multimodal_output["image"]`,与 `from_diffusion` 形状一致。
-- **Mimir-1.6B-Instruct** 文本(`mimir_1_6b`,**3-stage CODEC+DIFFUSION+CODEC**,TK-021)。`mimir-lcm/Mimir-1.6B-Instruct`:SONAR 嵌入空间里的 two-tower 一致性 LCM,40 步推理,`guidance_scale=1.5`,fp16 峰值 ≈5 GB(Mimir 权重 3.29 GB + SONAR encoder/decoder + SaT) —— **必须在 ≥8 GB 卡上跑**(AGENTS.md 的 3050/4 GB 预算不够)。文本 → `str`,`Omni._one` 经 `from_pipeline(final_output_type="text")` 装进 `multimodal_output["text"]`。**这是第一个非 stdlib 的模型族**:`[mimir]` extra 拉 `sonar-space` / `wtpsplit` / `omegaconf` / `fairseq2`,upstream 的 `lcm` 包来自 GitHub clone(`./scripts/setup_mimir.sh` 引导)。`StageExecutionType` 仍 closed set(CODEC + DIFFUSION + CODEC,无新成员)。
 
 我们**有意省略** vllm-omni 的以下能力:
 

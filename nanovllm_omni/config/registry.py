@@ -279,7 +279,6 @@ def _load_builtin_pipelines() -> None:
     Kept at module bottom so ``register_pipeline`` is already defined when
     the imported modules call it. New families add one import here.
     """
-    from nanovllm_omni.models.mimir_1_6b import pipeline as _mimir_1_6b_pipeline  # noqa: F401
     from nanovllm_omni.models.minimind_omni import pipeline as _minimind_pipeline  # noqa: F401
     from nanovllm_omni.models.sd_turbo import pipeline as _sd_turbo_pipeline  # noqa: F401
     from nanovllm_omni.models.smolvla import pipeline as _smolvla_pipeline  # noqa: F401

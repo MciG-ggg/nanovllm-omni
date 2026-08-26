@@ -57,31 +57,6 @@ minimind = [
     "onnxruntime>=1.16",
     "funasr>=1.0",
 ]
-# Mimir-1.6B-Instruct (TK-021): two-tower diffusion LCM in SONAR embedding
-# space. NOT stdlib / NOT in main deps -- this is an opt-in family. The
-# `lcm` Python package itself lives in
-# https://github.com/facebookresearch/large_concept_model (not PyPI; the
-# PyPI `lcm` is the unrelated robotics comms library), and `fairseq2` is
-# hosted on a private Meta index. Install + setup:
-#
-#   pip install -e ".[mimir]"
-#   ./scripts/setup_mimir.sh          # clones lcm/, runs setup_fairseq2()
-#
-# `lcm.setup_fairseq2()` is called inside the stage factories at first
-# import; the bash helper pre-installs the torch CUDA wheel that matches
-# fairseq2's RC index so the binary wheel resolves cleanly.
-mimir = [
-    "torch>=2.5.1",
-    "omegaconf==2.3.0",
-    "sonar-space==0.3.2",
-    "wtpsplit==2.1.2",
-    "huggingface_hub>=0.20",
-]
-# fairseq2==v0.3.0rc1 lives on a private Meta index
-# (https://fair.pkg.atmeta.com/fairseq2/whl/rc/pt2.5.1/cu121); the
-# setup_mimir.sh helper adds the index + pins the version. We don't put
-# it here because pip refuses to resolve it from a missing index.
-
 # PEP 735 dependency groups. The `minimind` group mirrors the
 # `[minimind]` optional extra so `uv sync` picks it up via
 # `[tool.uv] default-groups` below. CI stays unaffected because it

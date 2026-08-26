@@ -32,7 +32,7 @@ _MODEL_ID = "HuggingFaceTB/SmolVLM-500M-Instruct"
 _REGISTERED_HANDLES = {"smolvlm"}
 # SmolVLM was released in BF16; the recipe is BF16. fp16 is acceptable
 # but loses numerical headroom on the SigLIP vision encoder.
-_TORCH_DTYPES = {"bfloat16", "float16", "float32"}
+_DTYPE_ALLOWED = ("bfloat16", "float16", "float32")
 
 
 def _vlm_stage(deploy: Any, args: Any) -> Any:
@@ -52,13 +52,13 @@ def _vlm_stage(deploy: Any, args: Any) -> Any:
     extra = dict(getattr(args, "extra", None) or {})
     allow_hf = bool(extra.get("allow_hf_download", False))
     device = getattr(args, "device", None)
-    dtype = getattr(args, "dtype", None)
-    if dtype is not None and dtype not in _TORCH_DTYPES:
+    dtype = getattr(args, "dtype", None) or "bfloat16"
+    if dtype not in _DTYPE_ALLOWED:
         raise ValueError(
             f"smolvlm stage: dtype {dtype!r} not in supported "
-            f"{sorted(_TORCH_DTYPES)}; SmolVLM-500M-Instruct ships BF16"
+            f"{list(_DTYPE_ALLOWED)}; SmolVLM-500M-Instruct ships BF16"
         )
-    torch_dtype = getattr(torch, dtype if dtype in _TORCH_DTYPES else "bfloat16", torch.bfloat16)
+    torch_dtype = getattr(torch, dtype)
     model = getattr(args, "model", None) or _MODEL_ID
     model_id = _MODEL_ID if model in _REGISTERED_HANDLES else model
 
@@ -67,21 +67,19 @@ def _vlm_stage(deploy: Any, args: Any) -> Any:
         kwargs["local_files_only"] = True
     processor = AutoProcessor.from_pretrained(model_id, **kwargs)
     model = _AutoModelCls.from_pretrained(model_id, **kwargs)
-    # Silence the SmolVLM pad_token_id warning (its tokenizer uses 128002
-    # which is outside the LM vocab range but doesn't break generation).
-    if getattr(model.config, "pad_token_id", None) == 128002:
-        model.config.pad_token_id = None
+    # SmolVLM's tokenizer pad id (128002) sits outside the LM vocab range
+    # and emits a warning on first generate; resetting to None is harmless.
+    model.config.pad_token_id = None
     if device:
         model = model.to(device)
 
     def vlm_forward(payload: Any, sampling: Any) -> Any:
         # prompt: str or {"prompt": ...} per the OmniPromptType contract
-        if isinstance(payload, str):
-            prompt_text = payload
-        elif isinstance(payload, dict):
-            prompt_text = str(payload.get("prompt", ""))
-        else:
-            prompt_text = str(payload)
+        prompt_text = (
+            payload.get("prompt", "")
+            if isinstance(payload, dict)
+            else (payload if isinstance(payload, str) else str(payload))
+        )
         extras = (
             dict(sampling.extra)
             if sampling is not None and getattr(sampling, "extra", None)

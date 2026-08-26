@@ -22,24 +22,13 @@ structure" for the contract.
 from __future__ import annotations
 
 import importlib
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-if sys.version_info >= (3, 11):
-    from enum import StrEnum  # type: ignore[attr-defined]
-else:
-    # Python <3.11 backport: ``enum.StrEnum`` was added in 3.11. The
-    # ``str, Enum`` mixin gives the same ``member == "value"`` semantics
-    # used by the rest of the codebase. ponytail: drop this branch when
-    # 3.10 is dropped from the supported matrix.
-    class StrEnum(str, Enum):  # type: ignore[no-redef]
-        """Backport of ``enum.StrEnum`` for Python <3.11."""
 
 
 class StageExecutionType(StrEnum):

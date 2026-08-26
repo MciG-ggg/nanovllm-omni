@@ -32,12 +32,10 @@ def _name_match_candidate(model: str) -> str:
 
     vllm-omni uses this same trick for the path-substring fallback (e.g.
     ``cosyvoice3`` beats ``cosyvoice`` by length). Mirrors their helper so
-    existing local-dir inference matches what vllm-omni would do. Dots
-    are stripped too so version-suffixed names like ``Mimir-1.6B-Instruct``
-    still match against the un-dotted handle ``mimir_1_6b_instruct``.
+    existing local-dir inference matches what vllm-omni would do.
     """
     name = Path(model.rstrip("/")).name or model
-    return name.lower().replace("-", "").replace("_", "").replace(".", "")
+    return name.lower().replace("-", "").replace("_", "")
 
 
 def _load_pretrained_config(model: str, trust_remote_code: bool) -> Any | None:
@@ -93,20 +91,16 @@ def try_infer_model_type(
         if mt and mt in OMNI_PIPELINES:
             return mt
 
-    # L2: config.json's ``model_type`` (gated by registry membership so the
-    # base HF ``idefics3`` / ``llama`` / etc. tags fall through to L5 / L6).
+    # L2 / L3: config.json's ``model_type`` (gated by registry membership
+    # so the base HF ``idefics3`` / ``llama`` / etc. tags fall through to
+    # L5 / L6), plus ``type`` / ``architecture`` (singular) for VoxCPM2-style
+    # raw tags -- kept as-is for callers that know how to handle them.
     if model_dir is not None:
         data = _read_json(model_dir / "config.json")
         if data is not None:
             mt = data.get("model_type")
             if isinstance(mt, str) and mt and mt in OMNI_PIPELINES:
                 return mt
-
-    # L3: ``type`` and ``architecture`` (singular) -- VoxCPM2-style raw
-    # tag, kept as-is for callers that know how to handle unregistered tags.
-    if model_dir is not None:
-        data = _read_json(model_dir / "config.json")
-        if data is not None:
             for key in ("type", "architecture"):
                 raw = data.get(key)
                 if isinstance(raw, str) and raw:

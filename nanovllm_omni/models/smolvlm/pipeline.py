@@ -47,6 +47,4 @@ SMOLVLM_PIPELINE = PipelineConfig(
     hf_architectures=("SmolVLMForConditionalGeneration",),
 )
 
-PIPELINE = SMOLVLM_PIPELINE
-
 register_pipeline(SMOLVLM_PIPELINE)

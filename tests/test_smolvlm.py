@@ -77,7 +77,7 @@ def test_vlm_stage_dtype_set_locked():
     instead of silently casting a quantization path into a vision encoder.
     No monkeypatching here — we just check the allowlist constant.
     """
-    assert "bfloat16" in smolvlm_stage._TORCH_DTYPES
-    assert "float16" in smolvlm_stage._TORCH_DTYPES
-    assert "int8" not in smolvlm_stage._TORCH_DTYPES
-    assert "int4" not in smolvlm_stage._TORCH_DTYPES
+    assert "bfloat16" in smolvlm_stage._DTYPE_ALLOWED
+    assert "float16" in smolvlm_stage._DTYPE_ALLOWED
+    assert "int8" not in smolvlm_stage._DTYPE_ALLOWED
+    assert "int4" not in smolvlm_stage._DTYPE_ALLOWED

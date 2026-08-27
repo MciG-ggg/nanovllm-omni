@@ -50,3 +50,20 @@
 ## Definition of aligned
 
 Alignment means consumer-visible compatibility, not identical internals. A difference is acceptable only when it is required by this project's explicit scope (for example, local single-process execution on small models and stdlib serving). Document such differences in `docs/aligned_interfaces.md` rather than claiming unsupported parity.
+
+## 命名约定
+
+函数/变量/字段名:全词优先、`num_*` 优先。同一语义只保留一个拼写:
+
+- 数量:一律 `num_*`(`num_heads`/`num_layers`/`num_requests`/`num_positions`/`num_steps`);不用 `n_*`(唯一例外是 `SamplingParams.n`,vLLM 锁名)。
+- 序列:一律 `sequence`/`sequence_len`/`max_sequence_len`;不用 `seq` 缩写。
+- 完整词优先:`token` 不用 `tok`、`config` 不用 `cfg`、`max_embeddings` 不用 `max_emb`。
+
+**边界(不纳入重命名,写新代码也不要改这些名字):**
+
+- 远端模型(`AutoModelForCausalLM.from_pretrained(...trust_remote_code=True)` 加载)的属性名是外部契约,如 `n_rep`/`n_local_heads`/`n_local_kv_heads`;只读引用,别改名。
+- 字符串/注释/docstring/张量形状记法(如 `[B, seq, kv, d]`)不是标识符,不动。
+- 序列化格式键(JSON key、markdown 表头)是外部 schema,不动。
+- 公开对齐符号(`Omni`/`SamplingParams` 字段/`OmniRequestOutput` 字段等)由 SPEC 锁定,走接口变更流程,不因内部统一而改。
+
+内部命名只要求自洽,不要求与 vllm-omni 内部一致——vllm-omni 内部自己就是 `n_*`/`num_*` 混用,没有可对齐的基准。重命名请按轴分 commit,并跑 pre-commit 钩子。

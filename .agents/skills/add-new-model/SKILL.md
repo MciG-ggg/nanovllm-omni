@@ -66,6 +66,8 @@ nanovllm-omni 是 registry 驱动:`模型`= 一个 **PipelineConfig**(注册在 
 
 ## Step 1 — 建族目录
 
+命名规则先看 `AGENTS.md` 的「命名约定」节(`num_*` 优先、全词优先;远端模型属性名不动)。
+
 `nanovllm_omni/models/<family>/`:
 
 1. **`__init__.py`** — 只 re-export 公共符号(仓库规则:`__init__` 只 re-export,实现在独立模块)。

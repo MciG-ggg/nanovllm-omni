@@ -1,16 +1,22 @@
 # nanovllm-omni
 
-A small, local reference implementation of the MiniMind-O audio pipeline. Alignment work with vllm-omni is tracked in `.scratch/aligned-interfaces/`; this project does not claim to implement vllm-omni's full feature set.
+- 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
+- ⚡ **Sub-340ms p50 on RTX 3050 laptop GPU** — stage-level CUDA graph capture, QKV fusion, talker-side optimizations (from `11c3c13`)
+- 🔁 **StagePool pattern demo** — `num_replicas ≥ 2`, RoundRobin LB, `(stage_id, replica_id)` per output
+- 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
-## Status
-
-Only the **MiniMind-O three-stage audio pipeline** is wired up and supported. Image generation, video generation, vision LLMs, VLA, and full-duplex S2S are aspirational and are not implemented.
+A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. Alignment work with vllm-omni is tracked in `.scratch/aligned-interfaces/`; this project does not claim to implement vllm-omni's full feature set. See `docs/compatibility.md` for the consumer-visible symbols that happen to align and `docs/aligned_interfaces.md` for the field-by-field truth.
 
 ## Supported models
 
 | Model | Stages | Output | Weights |
 |---|---:|---|---|
-| MiniMind-O (`minimind-3o`) | 3 (Thinker → Talker → Code2Wav) | audio | `jingyaogong/minimind-3o` |
+| MiniMind-O (`minimind-3o`) | 3 (Thinker → Talker → Code2Wav) | audio (24 kHz mono WAV) | `jingyaogong/minimind-3o` + `kyutai/mimi` |
+| SmolVLM-500M-Instruct | 1 (VLM) | text | `HuggingFaceTB/SmolVLM-500M-Instruct` |
+| SD-Turbo | 1 (DIFFUSION, 1-step) | image (512×512 PNG) | `stabilityai/sd-turbo` |
+| SmolVLA | 1 (LLM_GENERATION) | action chunks | `HuggingFaceTB/SmolVLA-256M` + LIBERO datasets |
+
+All four run on a single 4 GB consumer card (RTX 3050) in one process. Image generation, video generation, vision LLMs beyond SmolVLM, full VLA stacks, and full-duplex S2S are aspirational and are not implemented.
 
 ## Quickstart
 
@@ -20,7 +26,7 @@ Install the package and its existing dependencies:
 pip install -e ".[dev]"
 ```
 
-Pull the MiniMind-O + Mimi checkpoints once into local directories
+For MiniMind-O (audio), pull the weights once into local directories
 (the bundle loader is offline-first and never auto-fetches):
 
 ```bash
@@ -40,15 +46,34 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 at least 4 GB of VRAM is recommended; CPU inference works but is
 slow.
 
-The aligned API is available as it is implemented:
+For SD-Turbo (image), SmolVLM (text), and SmolVLA (action), see the
+per-family examples under `examples/offline_inference/<family>/`.
+
+The aligned API is available across all four families:
 
 ```python
 from nanovllm_omni import Omni, SamplingParams
 
+# Audio (MiniMind-O)
 engine = Omni("jingyaogong/minimind-3o")
 outputs = engine.generate(["hi"], SamplingParams(max_tokens=8))
 with open("audio.wav", "wb") as f:
     f.write(outputs[0].multimodal_output["audio"].wav_bytes())
+
+# Image (SD-Turbo)
+engine = Omni("stabilityai/sd-turbo")
+outputs = engine.generate(["a red apple"], SamplingParams(max_tokens=1))
+outputs[0].multimodal_output["image"].save("apple.png")
+
+# Text (SmolVLM)
+engine = Omni("HuggingFaceTB/SmolVLM-500M-Instruct")
+outputs = engine.generate(["What is in this image? <image>"], SamplingParams(max_tokens=64))
+
+# Action (SmolVLA)
+engine = Omni("HuggingFaceTB/SmolVLA-256M")
+outputs = engine.generate([{"prompt": "do the task", "image": rgb_obs}],
+                          SamplingParams(max_tokens=50))
+outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 ```
 
 ## Configuration
@@ -63,17 +88,19 @@ deploy/         # per-family sampling/resource defaults
 examples/
     offline_inference/
         minimind_o/   # Python-seam audio smoke (single + batched)
+        sd_turbo/     # SD-Turbo image generation
         smolvla/      # SmolVLA policy (synthetic L1 + LIBERO eval)
+        smolvlm/      # SmolVLM text/VLM
     online_serving/
         minimind_o/   # curl/stdlib client for /v1/chat/completions
 tests/          # automated tests
-docs/           # project notes
+docs/           # project notes (aligned_interfaces, compatibility, contracts/)
 .scratch/       # alignment specification and ticket checklists
 ```
 
 ## Scope
 
-This repository intentionally excludes diffusion, vision, VLA, multi-model pipelines, distributed execution, WebSockets, and FastAPI/uvicorn serving. The aligned HTTP seam, when available, uses the Python standard library HTTP server.
+This repository intentionally excludes video generation, multi-model pipelines beyond the four listed, distributed execution, WebSockets, and FastAPI/uvicorn serving. The aligned HTTP seam, when available, uses the Python standard library HTTP server.
 
 ### Single-card, single-process runtime
 
@@ -106,6 +133,12 @@ any are added later, the change must start by reworking
 `bundle.py` (one bundle per replica) and `engine/runtime.py`
 (per-replica inference path), not by retrofitting vllm-omni's
 `StageRuntime` into a runtime that has no use for it today.
+
+The four supported model families all run on the same single-process
+runtime: per-stage continuous batching (TK-004) and per-stage replica
++ RoundRobin LB (TK-007) are wired as in-process data structures
+(`engine/runtime_scheduler.py`, `engine/load_balancer.py`), not as
+subprocess pools.
 
 ## License
 

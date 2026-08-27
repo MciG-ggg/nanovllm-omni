@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nanovllm-omni"
 version = "0.1.0"
-description = "A minimal, readable reference implementation of vllm-omni's stage-based serving architecture"
+description = "Smallest vllm-omni-compatible pipeline runtime, performance-engineered for MiniMind-O with StagePool replica demo and unified omni-modal I/O contract demos."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [
     { name = "nanovllm-omni contributors" },
 ]
-keywords = ["vllm", "omni", "diffusion", "vla", "inference", "serving"]
+keywords = ["vllm-omni", "minimind", "stage-replica", "omni-i-o-contract", "mini-vla", "tts", "image-diffusion"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

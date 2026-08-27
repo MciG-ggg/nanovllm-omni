@@ -73,6 +73,13 @@ class BatchedThinkerState:
     # later (matches generation.py L130-137). ``None`` until detection.
     think_end_step: int | None = None
 
+    # Engine-native audio input (Q4): fbank + frame length for this request,
+    # passed to the model's ``forward(audio_inputs=..., audio_lens=...)``
+    # at prefill (``start_pos == 0``); the model injects the embeddings at
+    # ``<|audio_pad|>`` markers inside ``MiniMindOmni.forward``.
+    audio_inputs: Any = None
+    audio_lens: Any = None
+
 
 class BatchedThinkerRunner:
     """Execute scheduler groups as one rectangular forward per group.
@@ -135,7 +142,13 @@ class BatchedThinkerRunner:
 
     # -- submission / registration -----------------------------------------
 
-    def add_request(self, prompt_ids: list[int], request_id: str | None = None) -> str:
+    def add_request(
+        self,
+        prompt_ids: list[int],
+        request_id: str | None = None,
+        audio_inputs: Any = None,
+        audio_lens: Any = None,
+    ) -> str:
         # Build the per-stage Sequence first (TK-004 spec data structure),
         # then submit it to the scheduler. ``request_id`` defaults to a
         # scheduler-assigned id; we read it back via ``seq.request_id``
@@ -159,6 +172,8 @@ class BatchedThinkerRunner:
             prompt_len=len(prompt_ids),
             gen=gen,
             last_audio=[self.audio_pad] * 8,
+            audio_inputs=audio_inputs,
+            audio_lens=audio_lens,
         )
         return rid
 
@@ -249,6 +264,46 @@ class BatchedThinkerRunner:
 
     # -- group execution ----------------------------------------------------
 
+    def _audio_prefill_kwargs(self, req_ids: list[str]) -> dict[str, Any]:
+        """Gather per-request audio into one batched ``audio_inputs`` tensor.
+
+        Returns ``{}`` when no request in the group carries audio. Rows for
+        audio-free requests are zero-filled; the model's ``encode_audio_inputs``
+        batch-mask drops them (``audio_inputs.flatten(1).any(1)``), so mixed
+        groups stay supported.
+        """
+        import torch
+
+        here = [r for r in req_ids if self.states[r].audio_inputs is not None]
+        if not here:
+            return {}
+        t_max = max(int(self.states[r].audio_inputs.shape[1]) for r in here)
+        feat = self.states[here[0]].audio_inputs
+        dtype, device = feat.dtype, feat.device
+        n_freq = feat.shape[2]
+        frames: list[Any] = []
+        lens: list[int] = []
+        for r in req_ids:
+            st = self.states[r]
+            if st.audio_inputs is not None:
+                at = st.audio_inputs
+                if at.shape[1] < t_max:
+                    pad = torch.zeros(
+                        (at.shape[0], t_max - at.shape[1], at.shape[2]),
+                        dtype=dtype,
+                        device=device,
+                    )
+                    at = torch.cat([at, pad], dim=1)
+                frames.append(at)
+                lens.append(int(st.audio_lens.reshape(-1)[0]))
+            else:
+                frames.append(torch.zeros((1, t_max, n_freq), dtype=dtype, device=device))
+                lens.append(1)
+        return {
+            "audio_inputs": torch.cat(frames, dim=0),
+            "audio_lens": torch.tensor(lens, dtype=torch.long, device=device),
+        }
+
     def prefill_group(self, group: RuntimeGroup) -> None:
         """One rectangular [B, 9, P] forward over the group's prompt chunks."""
         import torch
@@ -270,7 +325,13 @@ class BatchedThinkerRunner:
         inp = torch.cat([audio, text.unsqueeze(1)], dim=1)  # [B, 9, P]
         for r in req_ids:
             self._register_kv(r)
-        out = self.model.forward(inp, past_key_values=None, use_cache=True, logits_to_keep=1)
+        out = self.model.forward(
+            inp,
+            past_key_values=None,
+            use_cache=True,
+            logits_to_keep=1,
+            **self._audio_prefill_kwargs(req_ids),
+        )
         for layer, (k, v) in enumerate(out.past_key_values):
             for r, rid in enumerate(req_ids):
                 self.kv_pool.write(rid, layer, key=k, value=v, row=r)

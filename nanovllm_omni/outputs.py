@@ -213,11 +213,19 @@ class OmniRequestOutput:
     def from_pipeline(cls, output: Any, request_id: str = "", final_output_type: str = "audio"):
         value = output.audio if hasattr(output, "audio") else output
         payload = MultimodalPayload.from_dict({final_output_type: value})
+        # Double-track ASR (Q2): a `transcript` attribute set by the thinker
+        # surfaces as `custom_output["transcript"]` without touching the
+        # ``multimodal_output["audio"]`` seam.
+        custom: dict[str, Any] = {}
+        transcript = getattr(output, "transcript", None)
+        if transcript:
+            custom["transcript"] = transcript
         return cls(
             request_id=request_id,
             outputs=output,
             multimodal_output=payload,
             final_output_type=final_output_type,
+            _custom_output=custom,
         )
 
     @classmethod

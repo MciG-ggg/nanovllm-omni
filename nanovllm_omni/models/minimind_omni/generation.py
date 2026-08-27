@@ -35,6 +35,8 @@ def stream_generate(
     use_cache: bool = True,  # accepted for API parity; runner always uses cache
     return_audio_codes: bool = False,  # accepted for API parity; runner always returns
     open_thinking: bool = False,
+    audio_inputs: Any = None,
+    audio_lens: Any = None,
     **_kwargs: Any,
 ) -> Iterator[tuple[Any, Any]]:
     """Stream MiniMind-O output one decode step at a time.
@@ -61,7 +63,9 @@ def stream_generate(
         eos_token_id=eos_token_id if eos_token_id is not None else 2,
         open_thinking=open_thinking,
     )
-    rid = runner.add_request(input_ids[0].tolist())
+    rid = runner.add_request(
+        input_ids[0].tolist(), audio_inputs=audio_inputs, audio_lens=audio_lens
+    )
 
     seen_frames = 0
     while sched.has_work():

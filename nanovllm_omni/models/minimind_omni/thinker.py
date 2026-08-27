@@ -17,6 +17,7 @@ from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
 
+from .audio import attach_audio_encoder, load_audio
 from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 
 
@@ -29,6 +30,9 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
+    audio_encoder_path = extra_args.pop("audio_encoder_path", None) or extra_args.pop(
+        "audio_encoder", None
+    )
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
         "dtype": getattr(args, "dtype", None),
@@ -42,14 +46,38 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
         extra = (
             (sampling.extra or {}) if sampling is not None and hasattr(sampling, "extra") else {}
         )
-        return generate_audio(
+        audio_inputs = audio_lens = None
+        transcript = None
+        n_markers = 0
+        audio = extra.get("audio")
+        if audio is not None:
+            # Q1/Q4: SenseVoice fbank -> engine-native prefill injection.
+            # Q2: same model transcribes the speech (double-track ASR).
+            sv = attach_audio_encoder(bundle, audio_encoder_path)
+            samples = load_audio(audio)
+            audio_inputs, audio_lens, n_markers = sv.fbank(samples)
+            audio_inputs = audio_inputs.to(getattr(bundle, "device", "cpu"))
+            audio_lens = audio_lens.to(getattr(bundle, "device", "cpu"))
+            transcript = sv.transcribe(samples)
+        out = generate_audio(
             bundle,
             prompt,
             max_tokens=int(sampling.max_tokens) if sampling is not None else 16,
             temperature=float(sampling.temperature) if sampling is not None else 0.7,
             top_p=float(sampling.top_p) if sampling is not None else 1.0,
             open_thinking=bool(extra.get("open_thinking", False)),
+            audio_inputs=audio_inputs,
+            audio_lens=audio_lens,
+            audio_markers=n_markers,
         )
+        if transcript:
+            # AudioPayload is frozen; carry the double-track ASR transcript
+            # on a thin wrapper so ``from_pipeline`` can surface it without
+            # mutating the modal payload.
+            from types import SimpleNamespace
+
+            out = SimpleNamespace(audio=out, transcript=transcript)
+        return out
 
     return thinker_forward
 
@@ -60,6 +88,8 @@ def tokenize_for_generate(
     open_thinking: bool,
     *,
     messages: list[dict[str, str]] | None = None,
+    audio_markers: int = 0,
+    audio_special_token: str = "<|audio_pad|>",
 ) -> Any:
     """Apply the chat template and produce a 1xT ``input_ids`` tensor.
 
@@ -69,12 +99,19 @@ def tokenize_for_generate(
     user, etc.). When omitted, the helper wraps ``prompt`` as a single
     user message -- the same path that ``generate_audio`` uses for the
     MiniMind-O single-prompt API.
+
+    ``audio_markers`` prepends that many ``<|audio_pad|>`` tokens to the user
+    content; the model's ``inject_audio_features`` replaces those positions
+    with audio embeddings at prefill (engine-native audio input).
     """
     import torch
 
     with torch.profiler.record_function("tokenize"):
         if messages is None:
-            messages = [{"role": "user", "content": prompt}]
+            content = audio_special_token * audio_markers if audio_markers else ""
+            if prompt:
+                content = (content + "\n" if content else "") + prompt
+            messages = [{"role": "user", "content": content}]
         try:
             text = tokenizer.apply_chat_template(
                 messages,
@@ -103,11 +140,15 @@ def run_generate(
     top_p: float,
     eos_token_id: Any | None,
     open_thinking: bool,
+    audio_inputs: Any = None,
+    audio_lens: Any = None,
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
     Returns a list of 8-token frames (one per yielded audio chunk) that the
     codec stage consumes. Labeled ``generate`` for the benchmark harness.
+    ``audio_inputs`` / ``audio_lens`` (when set) ride through to the batched
+    runner's prefill so the thinker sees user speech (engine-native audio in).
     """
     import torch
 
@@ -129,6 +170,8 @@ def run_generate(
                 use_cache=True,
                 return_audio_codes=True,
                 open_thinking=open_thinking,
+                audio_inputs=audio_inputs,
+                audio_lens=audio_lens,
             )
         else:
             # TODO: delete
@@ -160,6 +203,9 @@ def generate_audio(
     temperature: float = 0.7,
     top_p: float = 0.9,
     open_thinking: bool = False,
+    audio_inputs: Any = None,
+    audio_lens: Any = None,
+    audio_markers: int = 0,
 ) -> AudioPayload:
     """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``.
 
@@ -172,8 +218,17 @@ def generate_audio(
     from .code2wav import decode_audio, encode_wav
 
     eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+    audio_special_token = getattr(
+        getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
+    )
     with torch.no_grad():
-        input_ids = tokenize_for_generate(bundle.tokenizer, prompt, open_thinking).to(bundle.device)
+        input_ids = tokenize_for_generate(
+            bundle.tokenizer,
+            prompt,
+            open_thinking,
+            audio_markers=audio_markers,
+            audio_special_token=audio_special_token,
+        ).to(bundle.device)
         frames = run_generate(
             bundle.model,
             input_ids,
@@ -182,6 +237,8 @@ def generate_audio(
             top_p=top_p,
             eos_token_id=eos_token_id,
             open_thinking=open_thinking,
+            audio_inputs=audio_inputs,
+            audio_lens=audio_lens,
         )
         if not frames:
             return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)

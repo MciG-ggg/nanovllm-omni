@@ -1,36 +1,20 @@
-"""TK-013: per-replica throughput scaling for MiniMind-O (StagePool demo).
+"""TK-013: StagePool scaling demo for MiniMind-O (single-process).
 
-Compares 1, 2, 4 replicas of MiniMind-O on the same fixed scenario as
-``bench_minimind.py`` (TK-012). This is the headline validation of the
-StagePool pattern: increasing ``num_replicas`` should give ~Nx
-throughput (saturating near GPU limit) without changing per-request
-latency significantly, with VRAM staying roughly flat because all
-replicas share the same bundle (single-process scope).
+Sweeps ``num_replicas in (1, 2, 4)`` with a fixed 8-prompt workload per
+replica and reports throughput (req/s), per-request latency p50/p99, and
+VRAM peak per replica count. The README uses this as the StagePool-pattern
+evidence: throughput scales with replicas, VRAM stays roughly flat.
 
-What this script actually measures:
+Important caveat: in this codebase, "replicas" do **not** mean N copies
+of the model in N subprocesses. They mean N independent
+``RuntimeScheduler`` instances driving the same ``MinimindBundle``. So
+VRAM stays roughly flat; throughput scales because decode is
+single-token-per-forward and batching across N schedulers hides the
+per-request overhead. True N-model-replicas-across-N-subprocesses is the
+distributed runtime the project deliberately omits.
 
-- **Throughput (req/s)** for a fixed 8-request workload.
-- **Per-request latency p50 / p99** over the workload.
-- **VRAM peak** for the run.
-
-Important caveat (the README's "Single-card, single-process runtime"
-section): in this codebase, "replicas" do **not** mean N copies of
-the model in N subprocesses. They mean N independent
-``RuntimeScheduler`` instances driving the same ``MinimindBundle`` with
-different RNG seeds. So:
-
-- VRAM stays roughly flat as ``num_replicas`` grows (the model is
-  loaded once).
-- Throughput scales because the GPU was underutilized at replica=1
-  (decode is single-token-per-forward; batching N requests across
-  N replicas hides most of the per-request overhead).
-
-If you want true N-model-replicas-across-N-subprocesses, that's the
-distributed runtime the project deliberately omits; this bench only
-demonstrates the single-process StagePool pattern.
-
-CPU / no-CUDA: prints a no-op row per ``num_replicas`` (timings 0) so
-the CSV still has rows; the table stays well-formed.
+CPU / no-CUDA: still writes one zero-valued row per replica so the CSV
+stays well-formed.
 """
 
 from __future__ import annotations
@@ -38,64 +22,18 @@ from __future__ import annotations
 import argparse
 import platform
 import statistics
-import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from .bench_minimind import FIXED_PROMPT
+from .env import git_commit, gpu_label
 
-# Locked scenario: 8 prompts, all the fixed TK-012 prompt, varying
-# num_replicas. 8 is a power of 2 so the RoundRobinBalancer's per-replica
-# split (8/replicas requests per replica) is clean.
+# Locked scenario: 8 prompts per replica; power of 2 so the
+# RoundRobinBalancer's per-replica split is clean.
 DEFAULT_PROMPTS_PER_REPLICA = 8
 DEFAULT_REPLICAS: tuple[int, ...] = (1, 2, 4)
-
-
-def _percentile(values: list[float], pct: float) -> float:
-    if not values:
-        return 0.0
-    s = sorted(values)
-    if len(s) == 1:
-        return s[0]
-    k = (len(s) - 1) * pct / 100.0
-    f = int(k)
-    c = min(f + 1, len(s) - 1)
-    return s[f] + (s[c] - s[f]) * (k - f)
-
-
-def _git_commit() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path(__file__).resolve().parents[4]),
-        )
-        return out.decode("ascii").strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return "unknown"
-
-
-def _gpu_label() -> str:
-    try:
-        import torch
-    except ImportError:
-        return "cpu"
-    if not torch.cuda.is_available():
-        return "cpu"
-    name = torch.cuda.get_device_name(0)
-    try:
-        driver = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-            stderr=subprocess.DEVNULL,
-        )
-        driver_str = driver.decode("ascii").strip().splitlines()[0]
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError, IndexError):
-        driver_str = "?"
-    mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    return f"{name} ({mem_gb:.0f} GB, driver {driver_str})"
-
 
 CSV_COLUMNS: tuple[str, ...] = (
     "replicas",
@@ -109,53 +47,41 @@ CSV_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _as_csv_row(
+def _summarize_row(
     *,
     replicas: int,
     gpu: str,
     commit: str,
     batch: int,
+    latencies: Sequence[float],
     throughput: float,
-    latency_p50: float,
-    latency_p99: float,
     vram_peak_mb: float,
 ) -> dict[str, Any]:
+    if latencies:
+        cuts = statistics.quantiles(latencies, n=100, method="inclusive")
+        p50, p99 = cuts[49], cuts[98]
+    else:
+        p50 = p99 = 0.0
     return {
         "replicas": replicas,
         "gpu": gpu,
         "commit": commit,
         "batch": batch,
         "throughput_ops_per_sec": f"{throughput:.3f}",
-        "latency_p50_ms": f"{latency_p50:.3f}",
-        "latency_p99_ms": f"{latency_p99:.3f}",
+        "latency_p50_ms": f"{p50:.3f}",
+        "latency_p99_ms": f"{p99:.3f}",
         "vram_peak_mb": f"{vram_peak_mb:.3f}",
     }
 
 
-def _markdown_table(rows: list[dict[str, Any]]) -> str:
-    header = "| replicas | gpu | commit | batch | throughput_ops_per_sec | latency_p50_ms | latency_p99_ms | vram_peak_mb |"
-    sep = "|---:|---|---|---:|---:|---:|---:|---:|"
-    body: list[str] = []
-    for r in rows:
-        body.append(
-            "| {replicas} | {gpu} | {commit} | {batch} | {throughput} | {p50} | {p99} | {vram} |".format(
-                replicas=r["replicas"],
-                gpu=r["gpu"],
-                commit=r["commit"],
-                batch=r["batch"],
-                throughput=r["throughput_ops_per_sec"],
-                p50=r["latency_p50_ms"],
-                p99=r["latency_p99_ms"],
-                vram=r["vram_peak_mb"],
-            )
-        )
-    return "\n".join([header, sep, *body])
+def _csv_path(out_dir: Path, commit: str) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"bench_replica_{commit}.csv"
 
 
-def _write_csv(rows: Iterable[dict[str, Any]], path: Path) -> Path:
+def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     import csv
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(CSV_COLUMNS))
         writer.writeheader()
@@ -164,7 +90,21 @@ def _write_csv(rows: Iterable[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _per_request_latencies(
+def _markdown_table(rows: Sequence[dict[str, Any]]) -> str:
+    header = (
+        "| replicas | gpu | commit | batch | throughput_ops_per_sec | "
+        "latency_p50_ms | latency_p99_ms | vram_peak_mb |"
+    )
+    sep = "|---:|---|---|---:|---:|---:|---:|---:|"
+    body = "\n".join(
+        "| {replicas} | {gpu} | {commit} | {batch} | {throughput_ops_per_sec} | "
+        "{latency_p50_ms} | {latency_p99_ms} | {vram_peak_mb} |".format(**r)
+        for r in rows
+    )
+    return f"{header}\n{sep}\n{body}\n"
+
+
+def _run_replica_workload(
     bundle: Any,
     batched_fn: Any,
     prompts: list[str],
@@ -176,13 +116,7 @@ def _per_request_latencies(
     temperature: float,
     top_p: float,
 ) -> tuple[list[float], float, float]:
-    """Run one workload and return (per-request wall-clock in ms, throughput, vram_peak).
-
-    The bundle / model is loaded once outside the function in the main
-    CLI; this helper only calls ``batched_fn`` and measures time. The
-    batched_fn signature mirrors ``run_batched_generate`` so a test can
-    pass a mock.
-    """
+    """One replica-config workload; returns (latencies_ms, throughput_ops, vram_mb)."""
     import torch
 
     if torch.cuda.is_available():
@@ -204,33 +138,10 @@ def _per_request_latencies(
     )
     n = max(len(payloads), 1)
     throughput = n / elapsed_s if elapsed_s > 0 else 0.0
-    # Per-request latency: equally-distributed share of elapsed (the
-    # batched engine drives all replicas concurrently, so the wall-clock
-    # cost is the throughput floor, not a sum of per-request costs).
-    per_request = [elapsed_s * 1000.0] * n
-    return per_request, throughput, vram
-
-
-def _summarize_row(
-    *,
-    replicas: int,
-    gpu: str,
-    commit: str,
-    batch: int,
-    latencies: list[float],
-    throughput: float,
-    vram_peak_mb: float,
-) -> dict[str, Any]:
-    return _as_csv_row(
-        replicas=replicas,
-        gpu=gpu,
-        commit=commit,
-        batch=batch,
-        throughput=throughput,
-        latency_p50=_percentile(latencies, 50),
-        latency_p99=_percentile(latencies, 99),
-        vram_peak_mb=vram_peak_mb,
-    )
+    # Per-request latency: wall-clock divided across the batch (the
+    # batched engine drives all replicas concurrently, so wall-clock
+    # is the throughput floor, not a sum of per-request costs).
+    return [elapsed_s * 1000.0] * n, throughput, vram
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,13 +174,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    gpu = _gpu_label()
-    commit = _git_commit()
+    gpu = gpu_label()
+    commit = git_commit()
     out_dir = Path(__file__).resolve().parents[3] / "docs" / "perf"
-    out_path = Path(args.out) if args.out else out_dir / f"bench_replica_{commit}.csv"
+    out_path = Path(args.out) if args.out else _csv_path(out_dir, commit)
 
     rows: list[dict[str, Any]] = []
-
     if gpu == "cpu":
         for replicas in args.replicas:
             batch = args.prompts_per_replica * replicas
@@ -289,7 +199,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    # Real CUDA path.
     from nanovllm_omni.engine.batched_runner import run_batched_generate
     from nanovllm_omni.models.minimind_omni import create_bundle
 
@@ -301,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     for replicas in args.replicas:
         batch = args.prompts_per_replica * replicas
         prompts = [FIXED_PROMPT.text] * batch
-        latencies, throughput, vram = _per_request_latencies(
+        latencies, throughput, vram = _run_replica_workload(
             bundle,
             run_batched_generate,
             prompts,
@@ -332,18 +241,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-__all__ = [
-    "CSV_COLUMNS",
-    "DEFAULT_PROMPTS_PER_REPLICA",
-    "DEFAULT_REPLICAS",
-    "_markdown_table",
-    "_summarize_row",
-    "main",
-]
-
-
-# keep statistics import live even though the helpers don't use it --
-# future per-request instrumentation will likely want stdev / mean.
-_ = statistics

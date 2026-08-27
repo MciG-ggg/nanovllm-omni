@@ -18,7 +18,6 @@ from nanovllm_omni.optim.bench.bench_minimind import (
     FIXED_MAX_TOKENS,
     FIXED_PROMPT,
     _markdown_table,
-    _percentile,
     _row_from_summary,
     _summarize,
 )
@@ -49,14 +48,6 @@ class _FakeStageTimes:
     @property
     def total_ms(self) -> float:
         return self.tokenize_ms + self.generate_ms + self.decode_ms + self.wav_ms
-
-
-def test_percentile_basic() -> None:
-    """Standard linear interpolation for sorted values."""
-    assert _percentile([1, 2, 3, 4, 5], 50) == 3.0
-    assert _percentile([1, 2, 3, 4, 5], 99) >= 4.96
-    assert _percentile([], 50) == 0.0
-    assert _percentile([42], 50) == 42.0
 
 
 def test_fixed_prompt_and_token_budget_locked() -> None:
@@ -120,7 +111,7 @@ def test_markdown_table_format() -> None:
 def test_main_cpu_path_writes_csv(tmp_path: Path) -> None:
     """On a CPU host the script still writes a (zero-valued) CSV row."""
     csv_path = tmp_path / "bench.csv"
-    with mock.patch.object(bench_minimind, "_gpu_label", return_value="cpu"):
+    with mock.patch("nanovllm_omni.optim.bench.bench_minimind.gpu_label", return_value="cpu"):
         rc = bench_minimind.main(["--n", "5", "--out", str(csv_path)])
     assert rc == 0
     assert csv_path.exists()
@@ -160,7 +151,7 @@ def test_main_gpu_path_uses_run_n(tmp_path: Path) -> None:
                 "nanovllm_omni.optim.bench.runner": fake_runner_module,
             },
         ),
-        mock.patch.object(bench_minimind, "_gpu_label", return_value="RTX 3050"),
+        mock.patch("nanovllm_omni.optim.bench.bench_minimind.gpu_label", return_value="RTX 3050"),
     ):
         rc = bench_minimind.main(["--n", "3", "--warmup", "1", "--out", str(csv_path)])
     assert rc == 0

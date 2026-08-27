@@ -1,7 +1,7 @@
 # nanovllm-omni
 
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
-- ⚡ **Sub-340ms p50 on RTX 3050 laptop GPU** — stage-level CUDA graph capture, QKV fusion, talker-side optimizations (from `11c3c13`)
+- ⚡ **Sub-340ms p50 on RTX 3050 laptop GPU** — fused QKV/gate-up projections, fused RMSNorm, fused RoPE (in `nanovllm_omni/models/minimind_omni/attention.py`); pre-allocated KV buffer; SDPA decode with `is_causal=True`
 - 🔁 **StagePool pattern demo** — `num_replicas ≥ 2`, RoundRobin LB, `(stage_id, replica_id)` per output
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 

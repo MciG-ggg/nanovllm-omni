@@ -8,9 +8,6 @@ Subcommands:
   per-stage kernel breakdown (top kernels, kernel count, n_steps).
 * ``trace-nsys``      -- re-invoke ``_nsys-inner`` under ``nsys profile``.
 * ``_nsys-inner``     -- private inner command used by ``trace-nsys``.
-
-TK-015 adds ``--compile`` (torch.compile wrapper) and ``--int8``
-(bitsandbytes int8 quantisation of MLP linears) flags.
 """
 
 from __future__ import annotations
@@ -30,40 +27,6 @@ from .trace import (
     trace_profile_top_kernels,
 )
 
-INT8_SKIP_MSG = (
-    "int8 stretch skipped -- install bitsandbytes to enable " "(`uv pip install bitsandbytes`)"
-)
-
-
-def _maybe_apply_int8(bundle: object, enable: bool) -> None:
-    """Quantise ``bundle.model`` MLP linears to int8 (bnb); skip cleanly when missing."""
-    if not enable:
-        return
-    from nanovllm_omni.optim.compile import has_bnb, quantize_thinker_int8
-
-    if not has_bnb():
-        print(INT8_SKIP_MSG, file=sys.stderr)
-        return
-    quantize_thinker_int8(bundle.model)
-
-
-def _maybe_wrap_graph(bundle: object, enable: bool) -> None:
-    """Wrap ``bundle.mimi`` with the mimi-decode CUDA Graph capture.
-
-    Only ``mimi.decode`` is capture-safe on this model; the main
-    thinker forward has data-dependent control flow and fails with
-    ``cudaErrorStreamCaptureInvalidated`` (vllm-omni PR #3796 hits
-    the same wall and uses ``enforce_eager=True`` for the main
-    forward). The graph here collapses the ~1 000 per-call
-    ``cudaLaunchKernel`` launches inside mimi.decode into a single
-    graph launch.
-    """
-    if not enable:
-        return
-    from nanovllm_omni.optim.cuda_graph import graph_compile_mimi
-
-    bundle.mimi = graph_compile_mimi(bundle.mimi)
-
 
 def _load_bundle(args: argparse.Namespace):
     from nanovllm_omni.models.minimind_omni import create_bundle
@@ -72,15 +35,6 @@ def _load_bundle(args: argparse.Namespace):
     if args.mimi:
         kwargs["mimi_model_id"] = args.mimi
     bundle = create_bundle(model_id=args.model, device=args.device, **kwargs)
-    # int8 must come BEFORE compile: torch.compile would otherwise trace
-    # through the un-quantised linears and produce graphs that don't match
-    # the swapped-in bnb.Linear8bitLt modules.
-    _maybe_apply_int8(bundle, enable=getattr(args, "int8", False))
-    # Graph wrapping is a thin ``nn.Module`` shell around the model --
-    # actual graph capture happens lazily on the first incremental
-    # forward call. Order doesn't matter vs. compile; the wrapper
-    # itself is cheap.
-    _maybe_wrap_graph(bundle, enable=getattr(args, "graph", False))
     return bundle
 
 
@@ -103,7 +57,6 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
         "seed": args.seed,
-        "compile": getattr(args, "compile", False),
     }
 
 
@@ -234,12 +187,6 @@ def cmd_trace_nsys(args: argparse.Namespace) -> int:
     if args.max_tokens is not None:
         target.extend(["--max-tokens", str(args.max_tokens)])
     target.extend(["--seed", str(args.seed)])
-    if getattr(args, "compile", False):
-        target.append("--compile")
-    if getattr(args, "int8", False):
-        target.append("--int8")
-    if getattr(args, "graph", False):
-        target.append("--graph")
 
     cmd = [
         nsys,
@@ -282,21 +229,6 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--seed", type=int, default=42)
     common.add_argument(
         "--open-thinking", action="store_true", help="Pass open_thinking=True to model.generate"
-    )
-    common.add_argument(
-        "--compile",
-        action="store_true",
-        help="Wrap the thinker with torch.compile(mode='reduce-overhead' on CUDA).",
-    )
-    common.add_argument(
-        "--int8",
-        action="store_true",
-        help="Quantise MLP linears to bitsandbytes int8 (skipped silently if bnb absent).",
-    )
-    common.add_argument(
-        "--graph",
-        action="store_true",
-        help="Capture per-step CUDA Graphs for the incremental forward calls.",
     )
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")

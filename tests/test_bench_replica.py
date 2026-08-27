@@ -17,16 +17,8 @@ from nanovllm_omni.optim.bench.bench_replica import (
     DEFAULT_PROMPTS_PER_REPLICA,
     DEFAULT_REPLICAS,
     _markdown_table,
-    _percentile,
     _summarize_row,
 )
-
-
-def test_percentile_matches_bench_minimind_helper() -> None:
-    """``_percentile`` uses linear interpolation; single-value list returns itself."""
-    assert _percentile([1, 2, 3, 4, 5], 50) == 3.0
-    assert _percentile([], 50) == 0.0
-    assert _percentile([42], 50) == 42.0
 
 
 def test_default_replicas_and_prompts_locked() -> None:
@@ -85,7 +77,7 @@ def test_markdown_table_format() -> None:
 def test_main_cpu_path_writes_csv_per_replica(tmp_path: Path) -> None:
     """On a CPU host the script still writes one CSV row per replica (zero-valued)."""
     csv_path = tmp_path / "bench.csv"
-    with mock.patch.object(bench_replica, "_gpu_label", return_value="cpu"):
+    with mock.patch("nanovllm_omni.optim.bench.bench_replica.gpu_label", return_value="cpu"):
         rc = bench_replica.main(
             [
                 "--replicas",
@@ -133,7 +125,7 @@ def test_main_gpu_path_invokes_run_batched_per_replica(tmp_path: Path) -> None:
                 "nanovllm_omni.models.minimind_omni": fake_model_module,
             },
         ),
-        mock.patch.object(bench_replica, "_gpu_label", return_value="RTX 3050"),
+        mock.patch("nanovllm_omni.optim.bench.bench_replica.gpu_label", return_value="RTX 3050"),
     ):
         rc = bench_replica.main(
             [

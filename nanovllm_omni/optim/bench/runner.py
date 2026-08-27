@@ -119,23 +119,6 @@ def _measure_cuda_ms(start: Any, end: Any) -> float:
     return float(start.elapsed_time(end))
 
 
-def _maybe_compile(bundle: Any, compile: bool) -> None:
-    """Apply ``compile_thinker`` to ``bundle.model`` once (idempotent).
-
-    The marker is a plain attribute; we don't introspect the
-    ``OptimizedModule`` type because the exact class name varies across
-    torch versions. Warmup absorbs the first-call cost so the timed
-    runs see the compiled artifact.
-    """
-    if not compile:
-        return
-    if getattr(bundle.model, "_nano_vllm_compiled_v1", False):
-        return
-    from nanovllm_omni.optim.compile import compile_thinker
-
-    bundle.model = compile_thinker(bundle.model, device=bundle.device)
-
-
 def run_one(
     bundle: Any,
     prompt: BenchPrompt | str,
@@ -147,7 +130,6 @@ def run_one(
     open_thinking: bool = False,
     run_idx: int = 0,
     max_tokens_tolerance: int = 4,
-    compile: bool = False,
 ) -> RunResult:
     """Drive one prompt through the four helpers and record per-stage times.
 
@@ -171,7 +153,6 @@ def run_one(
     p = _normalize_prompt(prompt)
     torch.manual_seed(seed)
     _maybe_reset_cuda_peak()
-    _maybe_compile(bundle, compile)
 
     eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
 

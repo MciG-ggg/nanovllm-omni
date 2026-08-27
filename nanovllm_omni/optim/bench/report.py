@@ -86,7 +86,7 @@ def markdown_table(results: Sequence[RunResult]) -> str:
     ]
     for prompt_id in sorted(by_prompt):
         rs = by_prompt[prompt_id]
-        tok = [r.times.tokenize_ms for r in rs]
+        token = [r.times.tokenize_ms for r in rs]
         gen = [r.times.generate_ms for r in rs]
         dec = [r.times.decode_ms for r in rs]
         wav = [r.times.wav_ms for r in rs]
@@ -95,7 +95,7 @@ def markdown_table(results: Sequence[RunResult]) -> str:
         vram = [r.vram_peak_mb for r in rs]
         cells = (
             prompt_id,
-            f"{_median(tok):.2f}",
+            f"{_median(token):.2f}",
             f"{_median(gen):.2f}",
             f"{_median(dec):.2f}",
             f"{_median(wav):.2f}",

@@ -279,12 +279,12 @@ class BatchedThinkerRunner:
         text_logits = out.logits  # [B, 1, V]
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
-            tok = self._sample_text(st, text_logits[r, 0, :])
+            token = self._sample_text(st, text_logits[r, 0, :])
             if st.text_finished:  # unreachable on first token, kept for symmetry
-                tok = self._enter_or_pad(st)
-            st.text_tokens.append(tok)
+                token = self._enter_or_pad(st)
+            st.text_tokens.append(token)
             self._note_audio(st, [self.audio_pad] * 8)
-            if not st.text_finished and tok == self.sampling["eos"]:
+            if not st.text_finished and token == self.sampling["eos"]:
                 st.text_finished = True
 
     def decode_group(self, group: RuntimeGroup) -> None:
@@ -305,10 +305,10 @@ class BatchedThinkerRunner:
             st = self.states[rid]
             # generation.py order: sample, then override with enter/pad when
             # text already finished, then append, then flip finished on EOS.
-            tok = self._sample_text(st, text_logits[r, 0, :])
+            token = self._sample_text(st, text_logits[r, 0, :])
             if st.text_finished:
-                tok = self._enter_or_pad(st)
-            st.text_tokens.append(tok)
+                token = self._enter_or_pad(st)
+            st.text_tokens.append(token)
             # Detect think_end (open_thinking audio gating). Detection must
             # happen before ``st.step += 1`` so the +2 offset uses the current
             # pre-increment step value, matching generation.py L135.
@@ -323,13 +323,13 @@ class BatchedThinkerRunner:
             st.step += 1
             codes = self._sample_audio_row(st, [al[r, 0, :] for al in audio_logits])
             self._note_audio(st, codes)
-            if not st.text_finished and tok == self.sampling["eos"]:
+            if not st.text_finished and token == self.sampling["eos"]:
                 st.text_finished = True
 
     def _enter_or_pad(self, st: BatchedThinkerState) -> int:
-        tok = self.sampling["enter"] if st.first_finished else self.sampling["pad"]
+        token = self.sampling["enter"] if st.first_finished else self.sampling["pad"]
         st.first_finished = False
-        return tok
+        return token
 
     def _note_audio(self, st: BatchedThinkerState, codes: list[int]) -> None:
         """Append one step of audio codes, track stop positions, emit frames.

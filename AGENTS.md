@@ -34,10 +34,16 @@
    ```bash
    scripts/pre-commit
    ```
-   The hook runs the lint, format, and public-API-import checks on
-   the whole repo. Slow checks (pytest, torch-using unit tests) live
-   in the GitHub Actions workflow -- `.github/workflows/ci.yml` --
-   not in the hook.
+   The hook runs the fast lint, format, and public-API-import checks on
+   the whole repo. `scripts/pre-commit-full` runs the same command set as
+   the no-torch CI job (adds compileall + pytest -m "not smoke");
+   `install-hooks.sh` wires it as the git **pre-push** hook, so a full
+   CI-equivalent pass runs automatically before every push.
+
+   Caveat: the local env (macOS, Py 3.13, torch 2.11) differs from CI
+   (Py 3.11/3.12, fresh-pip torch), so a locally-green tree is not proof
+   of a green CI. Keep tests version-agnostic: don't bake statistical or
+   numeric assertions tight to a specific Python/torch release.
 6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
 6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
 7. Commit each ticket or coherent change separately with a descriptive message, then push only after the checks pass.

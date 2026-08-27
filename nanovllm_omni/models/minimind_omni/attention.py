@@ -22,6 +22,7 @@ un-fused, masking much of the stack's claimed wall-clock benefit.
 
 from __future__ import annotations
 
+import logging
 from contextlib import suppress
 from typing import Any
 
@@ -30,32 +31,58 @@ _SDPA_MARKER = "_nanovllm_sdpa_decode"
 _FUSED_RMS_MARKER = "_nanovllm_fused_rms"
 _FUSED_ROPE_MARKER = "_nanovllm_fused_rope"
 
+_log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# 1. SDPA decode
+# shared attention tail
 # ---------------------------------------------------------------------------
 
 
-def _sdpa_forward(
+def _import_upstream(module_name: str) -> Any:
+    """Resolve the vendored upstream module by dotted name.
+
+    Uses ``__import__`` (not a static import) so this module never couples
+    to the vendored model code at import time; we only touch it when a
+    monkey-patch is applied at model load.
+    """
+    return __import__(module_name, fromlist=["apply_rotary_pos_emb"])
+
+
+def _attention_forward(
     self: Any,
-    x: Any,
+    query: Any,
+    key: Any,
+    value: Any,
+    *,
     position_embeddings: tuple[Any, Any],
-    past_key_value: Any = None,
-    use_cache: bool = False,
-    attention_mask: Any = None,
+    past_key_value: Any,
+    use_cache: bool,
+    attention_mask: Any,
+    batch_size: int,
+    seq_len: int,
 ) -> tuple[Any, Any]:
+    """Shared post-projection tail of the two attention forwards.
+
+    ``query / key / value`` are already projected, normed and reshaped to
+    ``[batch, seq, n_heads, head_dim]`` by the caller (single-proj or
+    fused-qkv proj path).
+
+    The decode branch (Q length=1 plus the full K/V past) uses
+    ``is_causal=False``. PyTorch SDPA's ``is_causal=True`` is only valid
+    when Q, K, V share one sequence length; for Q length=1 it builds a
+    ``[1, N]`` lower-triangular mask that attends only to K[0] (the BOS
+    position). That collapses decode logits onto a single token and turns
+    the subsequent multinomial sampling into noise -- the "garbled
+    MiniMind-O audio" bug. With Q length=1 the current token genuinely
+    attends to all past positions, so ``is_causal=False`` is correct.
+    """
     import math
 
     import torch
     import torch.nn.functional as functional
 
-    batch_size, seq_len, _ = x.shape
-    query = self.q_proj(x).view(batch_size, seq_len, self.n_local_heads, self.head_dim)
-    key = self.k_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    value = self.v_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    query, key = self.q_norm(query), self.k_norm(key)
-
-    module = __import__(type(self).__module__, fromlist=["apply_rotary_pos_emb"])
+    module = _import_upstream(type(self).__module__)
     query, key = module.apply_rotary_pos_emb(query, key, *position_embeddings)
     if past_key_value is not None:
         key = torch.cat([past_key_value[0], key], dim=1)
@@ -67,15 +94,6 @@ def _sdpa_forward(
     value = module.repeat_kv(value, self.n_rep).transpose(1, 2)
 
     if seq_len == 1 and past_key_value is not None and attention_mask is None:
-        # Decode: Q has length 1 but K/V carry the full past+self. PyTorch
-        # SDPA's ``is_causal=True`` is documented as only valid when Q, K, V
-        # share the same length; for Q length=1 it builds a [1, N] lower-
-        # triangular mask that attends ONLY to K[0] (the BOS position),
-        # producing logits that see a single token and turn subsequent
-        # multinomial sampling into noise -- which is exactly the "garbled
-        # MiniMind-O audio" bug this fix addresses. With Q length=1, the
-        # current token genuinely attends to all past positions, so the
-        # causal mask is a no-op and ``is_causal=False`` is correct.
         output = functional.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False
         )
@@ -106,6 +124,68 @@ def _sdpa_forward(
 
     output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
     return self.resid_dropout(self.o_proj(output)), past
+
+
+def _sdpa_forward(
+    self: Any,
+    x: Any,
+    position_embeddings: tuple[Any, Any],
+    past_key_value: Any = None,
+    use_cache: bool = False,
+    attention_mask: Any = None,
+) -> tuple[Any, Any]:
+    """Attention forward with separate Q/K/V projections + SDPA decode."""
+    batch_size, seq_len, _ = x.shape
+    query = self.q_proj(x).view(batch_size, seq_len, self.n_local_heads, self.head_dim)
+    key = self.k_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    value = self.v_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    query, key = self.q_norm(query), self.k_norm(key)
+    return _attention_forward(
+        self,
+        query,
+        key,
+        value,
+        position_embeddings=position_embeddings,
+        past_key_value=past_key_value,
+        use_cache=use_cache,
+        attention_mask=attention_mask,
+        batch_size=batch_size,
+        seq_len=seq_len,
+    )
+
+
+def _fused_attention_forward(
+    self: Any,
+    x: Any,
+    position_embeddings: tuple[Any, Any],
+    past_key_value: Any = None,
+    use_cache: bool = False,
+    attention_mask: Any = None,
+) -> tuple[Any, Any]:
+    """Attention forward with fused QKV projection + SDPA decode."""
+    import torch
+
+    batch_size, seq_len, _ = x.shape
+    qkv = self.qkv_proj(x)
+    head_q = self.n_local_heads * self.head_dim
+    head_k = self.n_local_kv_heads * self.head_dim
+    query, key, value = torch.split(qkv, [head_q, head_k, head_k], dim=-1)
+    query = query.reshape(batch_size, seq_len, self.n_local_heads, self.head_dim)
+    key = key.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    value = value.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    query, key = self.q_norm(query), self.k_norm(key)
+    return _attention_forward(
+        self,
+        query,
+        key,
+        value,
+        position_embeddings=position_embeddings,
+        past_key_value=past_key_value,
+        use_cache=use_cache,
+        attention_mask=attention_mask,
+        batch_size=batch_size,
+        seq_len=seq_len,
+    )
 
 
 def enable_sdpa_decode(model: Any) -> None:
@@ -123,75 +203,6 @@ def enable_sdpa_decode(model: Any) -> None:
 # ---------------------------------------------------------------------------
 # 2. QKV / gate-up fusion
 # ---------------------------------------------------------------------------
-
-
-def _fused_attention_forward(
-    self: Any,
-    x: Any,
-    position_embeddings: tuple[Any, Any],
-    past_key_value: Any = None,
-    use_cache: bool = False,
-    attention_mask: Any = None,
-) -> tuple[Any, Any]:
-    """Same body as ``_sdpa_forward`` but reads a fused ``qkv_proj`` linear."""
-    import math
-
-    import torch
-    import torch.nn.functional as functional
-
-    batch_size, seq_len, _ = x.shape
-    qkv = self.qkv_proj(x)
-    head_q = self.n_local_heads * self.head_dim
-    head_k = self.n_local_kv_heads * self.head_dim
-    query, key, value = torch.split(qkv, [head_q, head_k, head_k], dim=-1)
-    query = query.reshape(batch_size, seq_len, self.n_local_heads, self.head_dim)
-    key = key.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    value = value.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    query, key = self.q_norm(query), self.k_norm(key)
-
-    module = __import__(type(self).__module__, fromlist=["apply_rotary_pos_emb"])
-    query, key = module.apply_rotary_pos_emb(query, key, *position_embeddings)
-    if past_key_value is not None:
-        key = torch.cat([past_key_value[0], key], dim=1)
-        value = torch.cat([past_key_value[1], value], dim=1)
-    past = (key, value) if use_cache else None
-
-    query = query.transpose(1, 2)
-    key = module.repeat_kv(key, self.n_rep).transpose(1, 2)
-    value = module.repeat_kv(value, self.n_rep).transpose(1, 2)
-
-    if seq_len == 1 and past_key_value is not None and attention_mask is None:
-        # Decode branch: see ``_sdpa_forward`` for the full explanation.
-        output = functional.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )
-    elif (
-        self.flash
-        and (seq_len > 1)
-        and (not self.is_causal or past_key_value is None)
-        and (attention_mask is None or torch.all(attention_mask == 1))
-    ):
-        output = functional.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=self.is_causal,
-        )
-    else:
-        scores = (query @ key.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if self.is_causal:
-            scores[:, :, :, -seq_len:] += torch.full(
-                (seq_len, seq_len), float("-inf"), device=scores.device
-            ).triu(1)
-        if attention_mask is not None:
-            scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
-        output = (
-            self.attn_dropout(functional.softmax(scores.float(), dim=-1).type_as(query)) @ value
-        )
-
-    output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
-    return self.resid_dropout(self.o_proj(output)), past
 
 
 def _fused_mlp_forward(self: Any, x: Any) -> Any:
@@ -324,11 +335,10 @@ def enable_fused_rope(model: Any) -> None:
     import torch
 
     try:
-        module = __import__(
-            type(model.thinker.layers[0].self_attn).__module__,
-            fromlist=["apply_rotary_pos_emb"],
-        )
-    except (ImportError, AttributeError):
+        attn = model.thinker.layers[0].self_attn
+        module = _import_upstream(type(attn).__module__)
+    except (AttributeError, IndexError, ImportError) as exc:
+        _log.warning("enable_fused_rope: could not resolve upstream RoPE module: %s", exc)
         return
     if getattr(module, _FUSED_ROPE_MARKER, False):
         return

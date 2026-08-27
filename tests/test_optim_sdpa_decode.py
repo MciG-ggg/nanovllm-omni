@@ -104,35 +104,22 @@ def test_sdpa_decode_is_causal_true_collapses_to_k_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_attention_sdpa_decode_uses_is_causal_false():
-    """Regression test on the source: decode SDPA call must say is_causal=False.
+def test_attention_decode_uses_is_causal_false():
+    """Regression guard on the shared attention tail: decode branch must say
+    ``is_causal=False``.
 
+    This single check covers both the ``_sdpa_forward`` (separate Q/K/V proj)
+    and ``_fused_attention_forward`` (fused QKV proj) entry points, since they
+    both delegate their decode/prefill logic to ``_attention_forward``.
     Catches any future "drive-by optimisation" that flips it back to True.
     """
     import inspect
 
     from nanovllm_omni.models.minimind_omni import attention as attn_mod
 
-    src = inspect.getsource(attn_mod._sdpa_forward)
+    src = inspect.getsource(attn_mod._attention_forward)
     # The decode branch is the only ``if seq_len == 1 ...`` block; its SDPA
     # call must say ``is_causal=False``.
-    decode_idx = src.index("seq_len == 1")
-    prefill_idx = src.index("seq_len > 1")
-    assert decode_idx < prefill_idx, "expected decode branch before prefill branch"
-    decode_block = src[decode_idx:prefill_idx]
-    assert "is_causal=False" in decode_block, (
-        f"decode branch fell back to {decode_block!r}; this collapses "
-        "attention to K[0] and produces garbled audio"
-    )
-
-
-def test_qkv_fusion_decode_uses_is_causal_false():
-    """Same regression guard for the qkv_fusion patch's decode branch."""
-    import inspect
-
-    from nanovllm_omni.models.minimind_omni import attention as attn_mod
-
-    src = inspect.getsource(attn_mod._fused_attention_forward)
     decode_idx = src.index("seq_len == 1")
     prefill_idx = src.index("seq_len > 1")
     assert decode_idx < prefill_idx, "expected decode branch before prefill branch"
@@ -262,8 +249,7 @@ def test_decode_sdpa_kwargs_drive_correct_attention_pattern():
 __all__ = [
     "test_sdpa_decode_matches_eager_full_attention",
     "test_sdpa_decode_is_causal_true_collapses_to_k_zero",
-    "test_attention_sdpa_decode_uses_is_causal_false",
-    "test_qkv_fusion_decode_uses_is_causal_false",
+    "test_attention_decode_uses_is_causal_false",
     "test_fused_rmsnorm_matches_upstream_within_fp16_ulp",
     "test_fused_rmsnorm_does_not_quantize_to_zero",
     "test_decode_sdpa_kwargs_drive_correct_attention_pattern",

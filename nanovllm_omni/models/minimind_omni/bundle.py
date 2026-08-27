@@ -61,16 +61,21 @@ def _resolve_snapshot(model_id: str) -> str:
         return str(path.resolve())
 
     from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import LocalEntryNotFoundError
 
     try:
         return snapshot_download(model_id, local_files_only=True)
-    except Exception as exc:
+    except (OSError, LocalEntryNotFoundError) as exc:
+        # LocalEntryNotFoundError == "no local cache entry for this id";
+        # OSError == broken local cache. Anything else (e.g. a metadata
+        # format change) should propagate so the caller sees the real cause.
         _logger.warning(
-            "[bundle] Could not resolve %s to a local snapshot (%s); "
+            "[bundle] Could not resolve %s to a local snapshot (%s: %s); "
             "passing through unchanged. Pass --model /path/to/local/dir "
             "for offline use.",
             model_id,
             type(exc).__name__,
+            exc,
         )
         return model_id
 
@@ -140,10 +145,13 @@ def load_minimind_omni_bundle(
         enable_sdpa_decode,
     )
 
-    enable_sdpa_decode(model)
-    enable_fused_rmsnorm(model)
-    enable_fused_projections(model)
-    enable_fused_rope(model)
+    for _patch in (
+        enable_sdpa_decode,
+        enable_fused_rmsnorm,
+        enable_fused_projections,
+        enable_fused_rope,
+    ):
+        _patch(model)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
     mimi = _cast_model_dtype(mimi, dtype, device)

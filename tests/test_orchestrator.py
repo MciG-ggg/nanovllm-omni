@@ -97,12 +97,12 @@ def _drive(replica: Replica) -> dict[str, Any]:
         finished: set[str] = set()
         for g in out.prefill_groups:
             runner.prefill_group(g)
-            prefilled.update(chunk.seq.request_id for chunk in g.items)
+            prefilled.update(chunk.sequence.request_id for chunk in g.items)
         for g in out.decode_groups:
             runner.decode_group(g)
-            for seq in g.items:
-                if runner.step_finished(seq.request_id):
-                    finished.add(seq.request_id)
+            for sequence in g.items:
+                if runner.step_finished(sequence.request_id):
+                    finished.add(sequence.request_id)
         sched.update_from_output(prefilled=prefilled, finished=finished)
         for rid in finished:
             done[rid] = len(runner.states[rid].frames)

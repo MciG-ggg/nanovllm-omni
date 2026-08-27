@@ -118,10 +118,10 @@ def test_attention_decode_uses_is_causal_false():
     from nanovllm_omni.models.minimind_omni import attention as attn_mod
 
     src = inspect.getsource(attn_mod._attention_forward)
-    # The decode branch is the only ``if seq_len == 1 ...`` block; its SDPA
-    # call must say ``is_causal=False``.
-    decode_idx = src.index("seq_len == 1")
-    prefill_idx = src.index("seq_len > 1")
+    # The decode branch is the only ``if sequence_len == 1 ...`` block; its
+    # SDPA call must say ``is_causal=False``.
+    decode_idx = src.index("sequence_len == 1")
+    prefill_idx = src.index("sequence_len > 1")
     assert decode_idx < prefill_idx, "expected decode branch before prefill branch"
     decode_block = src[decode_idx:prefill_idx]
     assert "is_causal=False" in decode_block, (

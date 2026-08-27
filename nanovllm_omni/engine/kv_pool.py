@@ -39,8 +39,8 @@ class FixedKvSlotPool:
     Tensor-free itself; all shapes are supplied by the runner at register time.
     """
 
-    def __init__(self, max_seq: int) -> None:
-        self.max_seq = max_seq
+    def __init__(self, max_sequence_len: int) -> None:
+        self.max_sequence_len = max_sequence_len
         self._slots: dict[str, dict[str, Any]] = {}
 
     def register(
@@ -59,7 +59,7 @@ class FixedKvSlotPool:
         if req_id in self._slots:
             return  # idempotent re-register
         buf = torch.empty(
-            (num_layers, 2, self.max_seq, num_heads, head_dim),
+            (num_layers, 2, self.max_sequence_len, num_heads, head_dim),
             device=device,
             dtype=dtype,
         )
@@ -75,8 +75,8 @@ class FixedKvSlotPool:
         k = key[row]
         v = value[row]
         length = k.shape[0]
-        if length > self.max_seq:
-            raise ValueError(f"seq length {length} exceeds pool max_seq={self.max_seq}")
+        if length > self.max_sequence_len:
+            raise ValueError(f"seq length {length} exceeds pool max_seq={self.max_sequence_len}")
         slot["buf"][layer, 0, :length, :, :] = k
         slot["buf"][layer, 1, :length, :, :] = v
         slot["ptr"] = length

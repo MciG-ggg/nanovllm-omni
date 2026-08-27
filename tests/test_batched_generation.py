@@ -119,12 +119,12 @@ def _drain(runner, sched):
         finished_now: set[str] = set()
         for g in out.prefill_groups:
             runner.prefill_group(g)
-            prefilled.update(chunk.seq.request_id for chunk in g.items)
+            prefilled.update(chunk.sequence.request_id for chunk in g.items)
         for g in out.decode_groups:
             runner.decode_group(g)
-            for seq in g.items:
-                if runner.step_finished(seq.request_id):
-                    finished_now.add(seq.request_id)
+            for sequence in g.items:
+                if runner.step_finished(sequence.request_id):
+                    finished_now.add(sequence.request_id)
         sched.update_from_output(prefilled=prefilled, finished=finished_now)
         finished.update(finished_now)
     return finished
@@ -139,7 +139,7 @@ def test_prefill_groups_by_prompt_length_and_decode_by_kv_length():
 
     out = sched.schedule()
     assert len(out.prefill_groups) == 1  # same length -> one batch
-    assert [chunk.seq.request_id for chunk in out.prefill_groups[0].items] == [a, b]
+    assert [chunk.sequence.request_id for chunk in out.prefill_groups[0].items] == [a, b]
     assert not out.decode_groups  # not ready yet
 
     # mark both prefilled -> they become a single decode group (same KV length)
@@ -147,7 +147,7 @@ def test_prefill_groups_by_prompt_length_and_decode_by_kv_length():
     out = sched.schedule()
     assert not out.prefill_groups
     assert len(out.decode_groups) == 1
-    assert [seq.request_id for seq in out.decode_groups[0].items] == [a, b]
+    assert [sequence.request_id for sequence in out.decode_groups[0].items] == [a, b]
 
 
 def test_mixed_prompt_lengths_never_mix_in_one_forward():
@@ -217,7 +217,7 @@ def test_batch_layout_does_not_change_per_request_sampling():
 
 
 def test_fixed_slot_pool_layout_and_gather():
-    pool = FixedKvSlotPool(max_seq=32)
+    pool = FixedKvSlotPool(max_sequence_len=32)
     pool.register("x", num_layers=3, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
 
     # write per-layer with seq at dim 0 of each row ([B, seq, kv, d])
@@ -233,7 +233,7 @@ def test_fixed_slot_pool_layout_and_gather():
     assert pairs[0][0].shape == (1, 5, 2, 4)  # [B, seq, kv, d]
 
     # unequal-length gather must refuse (the model's rectangular constraint)
-    pool2 = FixedKvSlotPool(max_seq=32)
+    pool2 = FixedKvSlotPool(max_sequence_len=32)
     pool2.register("a", num_layers=1, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
     pool2.register("b", num_layers=1, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
     pool2.write("a", layer=0, key=torch.randn(1, 3, 2, 4), value=torch.randn(1, 3, 2, 4), row=0)

@@ -25,13 +25,13 @@ from nanovllm_omni.engine.sequence import PrefillChunk, Sequence, SequenceStatus
 
 def test_sequence_defaults_to_waiting_with_empty_state() -> None:
     """Fresh Sequence is WAITING, no tokens, no KV."""
-    seq = Sequence(request_id="r0")
-    assert seq.request_id == "r0"
-    assert seq.token_ids == []
-    assert seq.num_tokens == 0
-    assert seq.status is SequenceStatus.WAITING
-    assert seq.kv_blocks == []
-    assert seq.finished_reason is None
+    sequence = Sequence(request_id="r0")
+    assert sequence.request_id == "r0"
+    assert sequence.token_ids == []
+    assert sequence.num_tokens == 0
+    assert sequence.status is SequenceStatus.WAITING
+    assert sequence.kv_blocks == []
+    assert sequence.finished_reason is None
 
 
 def test_sequence_status_enum_has_four_states() -> None:
@@ -47,9 +47,9 @@ def test_sequence_status_enum_has_four_states() -> None:
 
 def test_prefill_chunk_carries_subrange() -> None:
     """PrefillChunk records a [start, end) slice of a sequence's prompt."""
-    seq = Sequence(request_id="r0", token_ids=[1, 2, 3, 4, 5], num_tokens=5)
-    chunk = PrefillChunk(seq=seq, start=1, end=4)
-    assert chunk.seq is seq
+    sequence = Sequence(request_id="r0", token_ids=[1, 2, 3, 4, 5], num_tokens=5)
+    chunk = PrefillChunk(sequence=sequence, start=1, end=4)
+    assert chunk.sequence is sequence
     assert chunk.start == 1
     assert chunk.end == 4
 
@@ -125,8 +125,8 @@ def test_scheduler_decode_groups_partition_by_num_tokens() -> None:
     decode_groups = out.decode_groups
     assert len(decode_groups) == 2
     by_n = {len(g.items): g.items for g in decode_groups}
-    assert sorted(seq.request_id for seq in by_n[3]) == ["a", "b", "c"]
-    assert sorted(seq.request_id for seq in by_n[2]) == ["d", "e"]
+    assert sorted(sequence.request_id for sequence in by_n[3]) == ["a", "b", "c"]
+    assert sorted(sequence.request_id for sequence in by_n[2]) == ["d", "e"]
 
 
 def test_scheduler_rejects_duplicate_request_id() -> None:

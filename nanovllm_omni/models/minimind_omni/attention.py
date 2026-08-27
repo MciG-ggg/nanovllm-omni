@@ -60,7 +60,7 @@ def _attention_forward(
     use_cache: bool,
     attention_mask: Any,
     batch_size: int,
-    seq_len: int,
+    sequence_len: int,
 ) -> tuple[Any, Any]:
     """Shared post-projection tail of the two attention forwards.
 
@@ -93,13 +93,13 @@ def _attention_forward(
     key = module.repeat_kv(key, self.n_rep).transpose(1, 2)
     value = module.repeat_kv(value, self.n_rep).transpose(1, 2)
 
-    if seq_len == 1 and past_key_value is not None and attention_mask is None:
+    if sequence_len == 1 and past_key_value is not None and attention_mask is None:
         output = functional.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False
         )
     elif (
         self.flash
-        and (seq_len > 1)
+        and (sequence_len > 1)
         and (not self.is_causal or past_key_value is None)
         and (attention_mask is None or torch.all(attention_mask == 1))
     ):
@@ -113,8 +113,8 @@ def _attention_forward(
     else:
         scores = (query @ key.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if self.is_causal:
-            scores[:, :, :, -seq_len:] += torch.full(
-                (seq_len, seq_len), float("-inf"), device=scores.device
+            scores[:, :, :, -sequence_len:] += torch.full(
+                (sequence_len, sequence_len), float("-inf"), device=scores.device
             ).triu(1)
         if attention_mask is not None:
             scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
@@ -122,7 +122,7 @@ def _attention_forward(
             self.attn_dropout(functional.softmax(scores.float(), dim=-1).type_as(query)) @ value
         )
 
-    output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
+    output = output.transpose(1, 2).reshape(batch_size, sequence_len, -1)
     return self.resid_dropout(self.o_proj(output)), past
 
 
@@ -135,10 +135,10 @@ def _sdpa_forward(
     attention_mask: Any = None,
 ) -> tuple[Any, Any]:
     """Attention forward with separate Q/K/V projections + SDPA decode."""
-    batch_size, seq_len, _ = x.shape
-    query = self.q_proj(x).view(batch_size, seq_len, self.n_local_heads, self.head_dim)
-    key = self.k_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    value = self.v_proj(x).view(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    batch_size, sequence_len, _ = x.shape
+    query = self.q_proj(x).view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
+    key = self.k_proj(x).view(batch_size, sequence_len, self.n_local_kv_heads, self.head_dim)
+    value = self.v_proj(x).view(batch_size, sequence_len, self.n_local_kv_heads, self.head_dim)
     query, key = self.q_norm(query), self.k_norm(key)
     return _attention_forward(
         self,
@@ -150,7 +150,7 @@ def _sdpa_forward(
         use_cache=use_cache,
         attention_mask=attention_mask,
         batch_size=batch_size,
-        seq_len=seq_len,
+        sequence_len=sequence_len,
     )
 
 
@@ -165,14 +165,14 @@ def _fused_attention_forward(
     """Attention forward with fused QKV projection + SDPA decode."""
     import torch
 
-    batch_size, seq_len, _ = x.shape
+    batch_size, sequence_len, _ = x.shape
     qkv = self.qkv_proj(x)
     head_q = self.n_local_heads * self.head_dim
     head_k = self.n_local_kv_heads * self.head_dim
     query, key, value = torch.split(qkv, [head_q, head_k, head_k], dim=-1)
-    query = query.reshape(batch_size, seq_len, self.n_local_heads, self.head_dim)
-    key = key.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
-    value = value.reshape(batch_size, seq_len, self.n_local_kv_heads, self.head_dim)
+    query = query.reshape(batch_size, sequence_len, self.n_local_heads, self.head_dim)
+    key = key.reshape(batch_size, sequence_len, self.n_local_kv_heads, self.head_dim)
+    value = value.reshape(batch_size, sequence_len, self.n_local_kv_heads, self.head_dim)
     query, key = self.q_norm(query), self.k_norm(key)
     return _attention_forward(
         self,
@@ -184,7 +184,7 @@ def _fused_attention_forward(
         use_cache=use_cache,
         attention_mask=attention_mask,
         batch_size=batch_size,
-        seq_len=seq_len,
+        sequence_len=sequence_len,
     )
 
 

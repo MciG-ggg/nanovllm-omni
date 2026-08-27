@@ -76,15 +76,15 @@ class RuntimeScheduler:
 
     # -- submission ----------------------------------------------------------
 
-    def add_sequence(self, seq: Sequence) -> None:
+    def add_sequence(self, sequence: Sequence) -> None:
         """Admit a new sequence (typically a freshly-constructed request)."""
         if (
-            seq.request_id in self.running
-            or seq.request_id in self.finished
-            or any(s.request_id == seq.request_id for s in self.waiting)
+            sequence.request_id in self.running
+            or sequence.request_id in self.finished
+            or any(s.request_id == sequence.request_id for s in self.waiting)
         ):
-            raise ValueError(f"duplicate request_id {seq.request_id!r}")
-        self.waiting.append(seq)
+            raise ValueError(f"duplicate request_id {sequence.request_id!r}")
+        self.waiting.append(sequence)
 
     # -- queries -------------------------------------------------------------
 
@@ -107,9 +107,9 @@ class RuntimeScheduler:
 
         # Admission: fill running up to max_num_seqs with waiting sequences.
         while self.waiting and len(self.running) < self.max_num_seqs:
-            seq = self.waiting.popleft()
-            seq.status = SequenceStatus.PREFILL
-            self.running[seq.request_id] = seq
+            sequence = self.waiting.popleft()
+            sequence.status = SequenceStatus.PREFILL
+            self.running[sequence.request_id] = sequence
 
         # Prefill chunks: every PREFILL sequence becomes a single chunk covering
         # its full prompt. Partition by ``num_tokens`` so the model forward sees
@@ -119,19 +119,19 @@ class RuntimeScheduler:
         if self.running:
             decode_items: list[Sequence] = []
             prefill_by_len: dict[int, list[PrefillChunk]] = {}
-            for seq in self.running.values():
-                if seq.status is SequenceStatus.PREFILL:
-                    prefill_by_len.setdefault(seq.num_tokens, []).append(
-                        PrefillChunk(seq=seq, start=0, end=seq.num_tokens)
+            for sequence in self.running.values():
+                if sequence.status is SequenceStatus.PREFILL:
+                    prefill_by_len.setdefault(sequence.num_tokens, []).append(
+                        PrefillChunk(sequence=sequence, start=0, end=sequence.num_tokens)
                     )
-                elif seq.status is SequenceStatus.DECODE:
-                    decode_items.append(seq)
+                elif sequence.status is SequenceStatus.DECODE:
+                    decode_items.append(sequence)
             for _n_pos, chunks in sorted(prefill_by_len.items()):
                 out.prefill_groups.append(RuntimeGroup(items=chunks))
             # Decode groups: identical num_tokens -> one rectangular forward.
             by_len: dict[int, list[Sequence]] = {}
-            for seq in decode_items:
-                by_len.setdefault(seq.num_tokens, []).append(seq)
+            for sequence in decode_items:
+                by_len.setdefault(sequence.num_tokens, []).append(sequence)
             for _num_tokens, group in sorted(by_len.items()):
                 out.decode_groups.append(RuntimeGroup(items=group))
 
@@ -151,16 +151,16 @@ class RuntimeScheduler:
         caller can iterate them in submission order for codec hand-off.
         """
         for rid in prefilled or ():
-            seq = self.running.get(rid)
-            if seq is not None and seq.status is SequenceStatus.PREFILL:
-                seq.status = SequenceStatus.DECODE
+            sequence = self.running.get(rid)
+            if sequence is not None and sequence.status is SequenceStatus.PREFILL:
+                sequence.status = SequenceStatus.DECODE
         just_finished: dict[str, int] = {}
         for rid in finished or ():
-            seq = self.running.pop(rid, None)
-            if seq is not None:
-                seq.status = SequenceStatus.FINISHED
-                self.finished[rid] = seq
-                just_finished[rid] = seq.num_tokens
+            sequence = self.running.pop(rid, None)
+            if sequence is not None:
+                sequence.status = SequenceStatus.FINISHED
+                self.finished[rid] = sequence
+                just_finished[rid] = sequence.num_tokens
         return just_finished
 
 

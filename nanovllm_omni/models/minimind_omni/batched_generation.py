@@ -93,7 +93,7 @@ class BatchedThinkerRunner:
         eos_token_id: int = 2,
         open_thinking: bool = False,
         base_seed: int = 42,
-        kv_max_seq: int | None = None,
+        kv_max_sequence_len: int | None = None,
     ) -> None:
         self.bundle = bundle
         self.sched = sched
@@ -127,8 +127,8 @@ class BatchedThinkerRunner:
         # 4 GB card at max_batch>=2 (ponytail: fixed-slot teaching shape; paged
         # KV is the deferred upgrade this knob approximates).
         max_emb = int(getattr(cfg, "max_position_embeddings", 4096))
-        self.kv_max_seq = kv_max_seq or min(max_emb, 1024 + max_new_tokens)
-        self.kv_pool = FixedKvSlotPool(max_seq=self.kv_max_seq)
+        self.kv_max_sequence_len = kv_max_sequence_len or min(max_emb, 1024 + max_new_tokens)
+        self.kv_pool = FixedKvSlotPool(max_sequence_len=self.kv_max_sequence_len)
         params = list(self.model.parameters())
         self._device = params[0].device
         self._dtype = params[0].dtype
@@ -141,12 +141,12 @@ class BatchedThinkerRunner:
         # scheduler-assigned id; we read it back via ``seq.request_id``
         # so callers can index ``self.states`` by the same key.
         rid = request_id or f"req-{len(self.sched.running) + len(self.sched.waiting)}"
-        seq = Sequence(
+        sequence = Sequence(
             request_id=rid,
             token_ids=list(prompt_ids),
             num_tokens=len(prompt_ids),
         )
-        self.sched.add_sequence(seq)
+        self.sched.add_sequence(sequence)
         # stable seed from the name so admission order never changes draws
         seed = self.base_seed + int(hashlib.sha1(rid.encode()).hexdigest()[:8], 16) % 1_000_000
         import torch
@@ -256,7 +256,7 @@ class BatchedThinkerRunner:
         # RuntimeGroup.items is list[PrefillChunk] for a prefill group; the
         # rid is on each chunk's ``seq.request_id`` (Sequence per TK-004).
         chunks: list[PrefillChunk] = group.items
-        req_ids = [chunk.seq.request_id for chunk in chunks]
+        req_ids = [chunk.sequence.request_id for chunk in chunks]
         num_requests = len(req_ids)
         num_positions = chunks[0].end  # all chunks share end == seq.num_tokens
         text = torch.tensor(
@@ -291,7 +291,7 @@ class BatchedThinkerRunner:
         """One rectangular [B, 9, 1] forward for a same-KV-length decode group."""
         # RuntimeGroup.items is list[Sequence] for a decode group; rid is on
         # each Sequence.request_id.
-        req_ids = [seq.request_id for seq in group.items]
+        req_ids = [sequence.request_id for sequence in group.items]
         inp = self._decode_col(req_ids)
         past = self.kv_pool.gather(req_ids)
         out = self.model.forward(inp, past_key_values=past, use_cache=True, logits_to_keep=1)

@@ -71,12 +71,12 @@ def stream_generate(
         prefilled: set[str] = set()
         finished: set[str] = set()
         for group in out.prefill_groups:
-            group_rids = [chunk.seq.request_id for chunk in group.items]
+            group_rids = [chunk.sequence.request_id for chunk in group.items]
             if rid in group_rids:
                 runner.prefill_group(group)
                 prefilled.add(rid)
         for group in out.decode_groups:
-            group_rids = [seq.request_id for seq in group.items]
+            group_rids = [sequence.request_id for sequence in group.items]
             if rid not in group_rids:
                 continue
             runner.decode_group(group)

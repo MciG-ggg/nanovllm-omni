@@ -46,7 +46,7 @@ def run_batched_generate(
     max_batch: int | None = None,
     base_seed: int = 42,
     deploy: Any = None,
-    kv_max_seq: int | None = None,
+    kv_max_sequence_len: int | None = None,
     num_replicas: int = 1,
     balancer: Any | None = None,
 ) -> list[Any]:
@@ -86,7 +86,7 @@ def run_batched_generate(
             max_new_tokens=max_new_tokens,
             open_thinking=open_thinking,
             base_seed=base_seed + replica_id,
-            kv_max_seq=kv_max_seq,
+            kv_max_sequence_len=kv_max_sequence_len,
         )
         pool.add_replica(sched, runner)
 
@@ -108,12 +108,12 @@ def run_batched_generate(
             finished: set[str] = set()
             for group in out.prefill_groups:
                 runner.prefill_group(group)
-                prefilled.update(chunk.seq.request_id for chunk in group.items)
+                prefilled.update(chunk.sequence.request_id for chunk in group.items)
             for group in out.decode_groups:
                 runner.decode_group(group)
-                for seq in group.items:
-                    if runner.step_finished(seq.request_id):
-                        finished.add(seq.request_id)
+                for sequence in group.items:
+                    if runner.step_finished(sequence.request_id):
+                        finished.add(sequence.request_id)
             sched.update_from_output(prefilled=prefilled, finished=finished)
             for rid in finished:
                 st = runner.states[rid]

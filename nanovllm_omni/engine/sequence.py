@@ -58,7 +58,7 @@ class PrefillChunk:
     long-prompt workloads (Q8a + Q12).
     """
 
-    seq: Sequence
+    sequence: Sequence
     start: int
     end: int
 

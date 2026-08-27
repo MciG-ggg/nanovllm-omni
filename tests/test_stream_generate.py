@@ -76,8 +76,8 @@ def test_stream_generate_text_chunk_is_none_after_eos() -> None:
         original_decode(self, group)
         # After 3rd decode, force text_finished so the wrapper yields None.
         if counter["calls"] >= 3:
-            for seq in group.items:
-                self.states[seq.request_id].text_finished = True
+            for sequence in group.items:
+                self.states[sequence.request_id].text_finished = True
 
     bg.BatchedThinkerRunner.decode_group = fake_decode
     try:

@@ -211,7 +211,7 @@ TICKET-02 之后的最小字段集(设计记录见 `.scratch/aligned-interfaces/
 `OMNI_PIPELINES` 的值类型从纯 `PipelineConfig` 扩展为 `PipelineConfig | PipelineResolverFunc`(vllm-omni `pipeline_registry.py` 同款):
 
 - `register_pipeline(pipeline, model_type=None, *, registration_handles=...)` 接受 `PipelineConfig` **或** callable resolver。传 callable 时必须显式给 `model_type`(它随 `hf_config` 可能解析到不同 pipeline);`registration_handles` 可选别名。
-- `resolve_pipeline_config(name, hf_config=None)` 命中 callable 时调用它并返回其结果;结果为 `None` 表示"该 config 无匹配 pipeline"。
+- `resolve_pipeline_config(model_type, hf_config=None)` 命中 callable 时调用它并返回其结果;结果为 `None` 表示"该 config 无匹配 pipeline"。第一参数名 `model_type` 对齐 vllm-omni 的关键字调用面。
 - 可搭配 `hf_config_predicate` / `hf_architectures` 实现"一个 HF repo 名 → 依 config 选 variant"(vllm-omni 的 `pipeline_cfg_resolver` 形态)。
 
 ---

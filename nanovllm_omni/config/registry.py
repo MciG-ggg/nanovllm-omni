@@ -217,14 +217,17 @@ def register_pipeline(
         OMNI_PIPELINES[handle] = pipeline
 
 
-def resolve_pipeline_config(name: str, hf_config: Any | None = None) -> PipelineConfig | None:
-    """Look up a registered pipeline by name or alias handle.
+def resolve_pipeline_config(model_type: str, hf_config: Any | None = None) -> PipelineConfig | None:
+    """Look up a registered pipeline by model type or alias handle.
 
     ``OMNI_PIPELINES`` may hold either a ``PipelineConfig`` (returned as-is)
     or a callable resolver ``(hf_config) -> PipelineConfig | None`` (invoked
-    with ``hf_config``). This mirrors vllm-omni's pipeline registry.
+    with ``hf_config``). This mirrors vllm-omni's pipeline registry; the
+    first parameter is named ``model_type`` to match
+    ``vllm_omni.config.pipeline_registry.resolve_pipeline_config`` for
+    keyword callers.
     """
-    return _resolve_value(OMNI_PIPELINES.get(name), hf_config)
+    return _resolve_value(OMNI_PIPELINES.get(model_type), hf_config)
 
 
 def load_deploy_config(path: str | Path) -> DeployConfig:

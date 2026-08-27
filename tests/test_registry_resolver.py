@@ -4,12 +4,15 @@ Covers the two vllm-omni registry shapes we now mirror:
 
   - ``OMNI_PIPELINES`` values may be a ``PipelineConfig`` (unchanged) OR a
     callable resolver ``(hf_config) -> PipelineConfig | None``.
-  - ``resolve_pipeline_config(name, hf_config=None)``: when the mapping holds
-    a callable it is invoked with ``hf_config``; a ``None`` result means "no
-    pipeline for that config", which lets one key select among variants.
+  - ``resolve_pipeline_config(model_type, hf_config=None)``: when the mapping
+    holds a callable it is invoked with ``hf_config``; a ``None`` result
+    means "no pipeline for that config", which lets one key select among
+    variants.
 """
 
 from __future__ import annotations
+
+import inspect
 
 import pytest
 
@@ -95,3 +98,13 @@ def test_single_variants_keep_existing_behavior() -> None:
 
 def test_unknown_key_returns_none() -> None:
     assert resolve_pipeline_config("not_a_pipeline") is None
+
+
+def test_kwarg_param_name_is_model_type() -> None:
+    """Aligned-surface contract: the first parameter is named ``model_type``
+    (matches vllm-omni's keyword call surface), not ``name``."""
+    # Behavioural proof: keyword name both works and resolves.
+    assert isinstance(resolve_pipeline_config(model_type="minimind_o"), PipelineConfig)
+    # Structural proof: the parameter is literally called model_type.
+    params = inspect.signature(resolve_pipeline_config).parameters
+    assert list(params)[0] == "model_type"

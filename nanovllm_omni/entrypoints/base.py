@@ -85,9 +85,9 @@ def try_infer_model_type(
     # registered pipeline name; if it's a base HF class like ``idefics3``
     # (SmolVLM is built on Idefics3) fall through to L5 / L6 so the
     # architecture-list / path-substring layers can still resolve it.
-    cfg = _load_pretrained_config(model, trust_remote_code)
-    if cfg is not None:
-        mt = getattr(cfg, "model_type", None)
+    config = _load_pretrained_config(model, trust_remote_code)
+    if config is not None:
+        mt = getattr(config, "model_type", None)
         if mt and mt in OMNI_PIPELINES:
             return mt
 
@@ -119,8 +119,8 @@ def try_infer_model_type(
         return best
 
     # L6: hf_architectures match (needs transformers)
-    if cfg is not None:
-        archs = set(getattr(cfg, "architectures", []) or [])
+    if config is not None:
+        archs = set(getattr(config, "architectures", []) or [])
         if archs:
             for _key, registered in OMNI_PIPELINES.items():
                 if isinstance(registered, PipelineConfig):
@@ -130,7 +130,7 @@ def try_infer_model_type(
                         predicate = registered.hf_config_predicate
                         if predicate is not None:
                             try:
-                                if not predicate(cfg):
+                                if not predicate(config):
                                     continue
                             except Exception:
                                 continue

@@ -117,7 +117,7 @@ class BatchedThinkerRunner:
         self.base_seed = base_seed
         self.states: dict[str, BatchedThinkerState] = {}
 
-        cfg = getattr(self.model, "config", None)
+        config = getattr(self.model, "config", None)
         num_thinker_layers = len(getattr(getattr(self.model, "thinker", None), "layers", []) or [])
         num_talker_layers = len(getattr(getattr(self.model, "talker", None), "layers", []) or [])
         self.num_layers = num_thinker_layers + num_talker_layers
@@ -126,8 +126,8 @@ class BatchedThinkerRunner:
         # practical single generation, and a full-size slot per request OOMs a
         # 4 GB card at max_batch>=2 (ponytail: fixed-slot teaching shape; paged
         # KV is the deferred upgrade this knob approximates).
-        max_emb = int(getattr(cfg, "max_position_embeddings", 4096))
-        self.kv_max_sequence_len = kv_max_sequence_len or min(max_emb, 1024 + max_new_tokens)
+        max_embeddings = int(getattr(config, "max_position_embeddings", 4096))
+        self.kv_max_sequence_len = kv_max_sequence_len or min(max_embeddings, 1024 + max_new_tokens)
         self.kv_pool = FixedKvSlotPool(max_sequence_len=self.kv_max_sequence_len)
         params = list(self.model.parameters())
         self._device = params[0].device
@@ -173,15 +173,15 @@ class BatchedThinkerRunner:
         )
 
     def _kv_heads(self) -> int:
-        cfg = getattr(self.model, "config", None)
-        val = getattr(cfg, "num_key_value_heads", None)
+        config = getattr(self.model, "config", None)
+        val = getattr(config, "num_key_value_heads", None)
         if val is None:
-            val = getattr(cfg, "num_attention_heads", None)
+            val = getattr(config, "num_attention_heads", None)
         return val or 8
 
     def _head_dim(self) -> int:
-        cfg = getattr(self.model, "config", None)
-        return getattr(cfg, "head_dim", None) or 64
+        config = getattr(self.model, "config", None)
+        return getattr(config, "head_dim", None) or 64
 
     # -- input assembly -----------------------------------------------------
 

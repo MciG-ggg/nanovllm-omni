@@ -175,6 +175,14 @@ def test_bundle_from_pretrained_receives_trust_remote_code_false(monkeypatch):
     ``load_minimind_omni_bundle`` into the tokenizer and model
     ``from_pretrained`` calls."""
     transformers = pytest.importorskip("transformers")
+    try:
+        # The loader does `from transformers import ... MimiModel` at load
+        # time; some transformers builds ship MimiModel only behind a scoped
+        # audio dep. Probe it so the trust_remote_code plumbing test skips
+        # cleanly instead of dying on the missing codec class.
+        from transformers import MimiModel  # noqa: F401
+    except ImportError:
+        pytest.skip("this transformers build has no MimiModel (audio dep missing)")
     from nanovllm_omni.models.minimind_omni import bundle as bundle_mod
 
     captured: list[dict[str, object]] = []

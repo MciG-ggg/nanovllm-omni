@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# nanovllm-omni full pre-commit check (local CI mirror).
+#
+# Runs the SAME commands as `.github/workflows/ci.yml` so we can
+# verify a tree locally instead of pushing and waiting. The lightweight
+# `scripts/pre-commit` hook (installed by scripts/install-hooks.sh)
+# only runs lint + format + public-API import -- the checks below
+# also run compileall + the non-smoke test suite, which are too
+# slow for the commit-time hook.
+#
+# Run this manually before committing:
+#   scripts/pre-commit-full
+#
+# This script is NOT wired into git -- skipping it has no effect on
+# `git commit`. The lightweight hook (scripts/pre-commit) still runs
+# on every commit and will catch the fast checks independently.
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# Prefer project-local venv tools so versions match the CI env. The
+# CI workflow installs `[dev]` into a fresh venv; do the same locally
+# (`pip install -e ".[dev]"`) so the fallback below finds them.
+RUFF=".venv/bin/ruff"
+BLACK=".venv/bin/black"
+PYTEST=".venv/bin/pytest"
+PYTHON=".venv/bin/python"
+[[ -x "$RUFF"   ]] || RUFF="ruff"
+[[ -x "$BLACK"  ]] || BLACK="black"
+[[ -x "$PYTEST" ]] || PYTEST="pytest"
+[[ -x "$PYTHON" ]] || PYTHON="python"
+
+# 1. Lint + format.
+echo "[pre-commit-full] ruff"
+"$RUFF" check nanovllm_omni/ tests/
+
+echo "[pre-commit-full] black"
+"$BLACK" --check nanovllm_omni/ tests/
+
+# 2. Public-API import smoke. Catches the most common regression
+# class: a renamed or removed public symbol silently breaking
+# Omni / AsyncOmni / SamplingParams / OmniRequestOutput users.
+echo "[pre-commit-full] public API import"
+"$PYTHON" -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
+
+# 3. compileall -- catches stale imports after deletions or API
+# migrations that ruff/pytest can miss on partial runs.
+echo "[pre-commit-full] compileall"
+"$PYTHON" -m compileall -q nanovllm_omni
+
+# 4. Non-smoke test suite. Smoke tests need real model weights + GPU
+# and are excluded by `-m "not smoke"` (matches the CI workflow).
+echo "[pre-commit-full] pytest (not smoke)"
+"$PYTEST" -m "not smoke" -v
+
+echo "[pre-commit-full] OK -- safe to commit"

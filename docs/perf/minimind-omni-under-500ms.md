@@ -2,9 +2,9 @@
 
 > 项目目标：把一次 `Omni.generate`（prompt → 16 token 逐 token 生成 → mimi.decode → WAV 编码）的端到端 wall-clock 时长从 ≈928 ms 优化到 ≤ 500 ms，且不引入新依赖、不复制上游模型代码、保持公开 API。
 >
-> 当前基线：`11c3c13`（branch `autoresearch/under500ms`），bench median **320 ms**，stdev 11.6 ms，max 343 ms。
+> 测量基线：`11c3c13`（branch `autoresearch/under500ms`），bench median **320 ms**，stdev 11.6 ms，max 343 ms。
 >
-> 此文档与 `docs/minimind_omni_优化修复全流程.md` 互为补充：后者记录到 E12 之前的状态与中文叙述，本文档是 autoresearch 25 次实验的完整索引和最终结论。
+> 优化栈已合并进 `main`（`d2ebe56 perf(stack): consolidate qkv_fusion + rms_norm + rope into attention.py`，含 per-instance 修复），落地在 `nanovllm_omni/models/minimind_omni/attention.py` + `bundle.py`。在本地 GPU 上运行 `python -m nanovllm_omni.optim.bench time` 即可复现当前数字。历史 session 记录已归档到 `docs/perf/archive/`（gitignored，仅本地）。
 
 ## 1. 总览：25 次实验一览
 
@@ -37,7 +37,7 @@
 
 \* E6 的 −44.7% 实际由 RMSNorm + RoPE 等其他改动合并贡献，**真正的 QKV/gate-up 融合收益在 E24 才显现**（−62 ms）。
 
-## 2. 当前最终状态（`11c3c13`）
+## 2. 当前最终状态（栈已入 main，测量于 `11c3c13`）
 
 ```text
 benchmark (6 prompt × 5 runs × max_tokens=16):
@@ -68,14 +68,14 @@ vs 原始 baseline `846.38 ms` → **−62.2% wall-clock**。
 | Patch | 位置 | 收益机理 |
 |---|---|---|
 | 预分配 `text_buffer` / `audio_buffer` | `generation.py` | 消除生成循环内 `torch.cat` 增长 |
-| SDPA decode `is_causal=True` | `attention.py` | PyTorch 2.0+ SDPA 在 `Q_len < K_len` 时右对齐 query |
-| Fused RMSNorm (`aten._fused_rms_norm`) | `rms_norm.py` | C++ 把 `pow+mean+rsqrt+mul×2+float+type_as` 合并成一个 kernel |
-| Fused QKV / gate-up 投影 | `qkv_fusion.py` | 3 个独立 matmul → 1 个 batched matmul |
-| Fused RoPE（去 cat） | `rope.py` | 利用 `cos/sin` 在 dim 上重复的性质，避开 `rotate_half` 的 cat |
+| SDPA decode `is_causal=False` | `attention.py`（`enable_sdpa_decode`） | decode 时 Q 长 1 + 全量 KV past，`is_causal=True` 会让 mask 只 attend K[0] 产生噪音音频（E4 曾误设 True，后修复）|
+| Fused RMSNorm (`aten._fused_rms_norm`) | `attention.py`（`enable_fused_rmsnorm`） | C++ 把 `pow+mean+rsqrt+mul×2+float+type_as` 合并成一个 kernel |
+| Fused QKV / gate-up 投影 | `attention.py`（`enable_fused_projections`） | 3 个独立 matmul → 1 个 `qkv_proj`（gate-up 同理）|
+| Fused RoPE（去 cat） | `attention.py`（`enable_fused_rope`） | 利用 `cos/sin` 在 dim 上重复的性质，避开 `rotate_half` 的 cat |
 | skip `rp==1.0` repetition penalty | `generation.py` | 默认 `rp=1.0` 时整个 unique+divide 是 no-op |
 | model_input 单次 contiguous `copy_` | `generation.py` | 9 个 strided write → 1 个 view+`copy_` |
-| `torch.compile(dynamic=True)` on RoPE | `rope.py` | Inductor 把 RoPE 的 6 个 elementwise kernel 融到 ~2 |
-| 修 `qkv_fusion` dedupe bug | `qkv_fusion.py` | **真正把 12 个 layer 都融合 QKV**（之前只有 1 个） |
+| `torch.compile(dynamic=True)` on RoPE | `attention.py`（`enable_fused_rope`） | Inductor 把 RoPE 的 6 个 elementwise kernel 融到 ~2 |
+| 修 `qkv_fusion` dedupe bug | `attention.py`（`enable_fused_projections`） | **真正把 12 个 layer 都融合 QKV**（之前只有 1 个） |
 
 所有 monkey-patch 都通过类 / 实例级别 `forward = bound_method.__get__(self, cls)` 完成，不修改远程模型代码。
 
@@ -140,7 +140,7 @@ ssh mcigs-wsl "cd ~/nanovllm-omni && .venv/bin/python -m nanovllm_omni.optim.ben
 
 ## 7. 关联文档
 
-- `docs/minimind_omni_优化修复全流程.md` — 早期中文叙述（到 E12 之前）
 - `docs/perf/vllm_omni_thinker_talker_code2wav_performance.md` — 优化灵感的来源（vLLM-Omni 调研）
-- `docs/perf/session-{1..12}.*` — 早期 TK-011/TK-015 的 Kineto / profile 数据
+- `docs/perf/session-1.md` — 当前 MiniMind-O baseline（RTX 3050 4 GB）
+- `docs/perf/archive/` — 早期 session-5..12 的 Kineto / profile 数据（gitignored，仅本地）
 - `.auto/prompt.md` + `.auto/log.jsonl` — autoresearch 会话的全部 hypothesis 与实验记录

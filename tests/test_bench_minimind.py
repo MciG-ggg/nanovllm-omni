@@ -138,17 +138,17 @@ def test_main_gpu_path_uses_run_n(tmp_path: Path) -> None:
 
     fake_model_module = mock.MagicMock()
     fake_model_module.create_bundle = fake_create_bundle
-    fake_runner_module = mock.MagicMock()
-    fake_runner_module.run_n = fake_run_n
 
-    # Inject the fake model module into sys.modules so the lazy import
-    # inside bench_minimind.main picks it up.
-    sys.modules["nanovllm_omni.models.minimind_omni"] = fake_model_module
+    # run_n is imported at module top (`from .runner import run_n`), so we
+    # patch the name on bench_minimind directly; the fake model module goes
+    # into sys.modules (scoped so it is restored on exit -- it leaked before
+    # and poisoned every later lazy `minimind_omni` import in the suite).
     with (
+        mock.patch.object(bench_minimind, "run_n", new=fake_run_n),
         mock.patch.dict(
             sys.modules,
             {
-                "nanovllm_omni.optim.bench.runner": fake_runner_module,
+                "nanovllm_omni.models.minimind_omni": fake_model_module,
             },
         ),
         mock.patch("nanovllm_omni.optim.bench.bench_minimind.gpu_label", return_value="RTX 3050"),

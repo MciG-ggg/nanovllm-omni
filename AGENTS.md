@@ -35,8 +35,8 @@
    scripts/pre-commit
    ```
    The hook runs the fast lint, format, and public-API-import checks on
-   the whole repo. `scripts/pre-commit-full` runs the same command set as
-   the no-torch CI job (adds compileall + pytest -m "not smoke");
+   the whole repo. `scripts/pre-push` runs the same command set as the
+   no-torch CI job (adds compileall + pytest -m "not smoke");
    `install-hooks.sh` wires it as the git **pre-push** hook, so a full
    CI-equivalent pass runs automatically before every push.
 

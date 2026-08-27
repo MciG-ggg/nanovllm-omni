@@ -65,6 +65,10 @@ def test_vlm_stage_import_guards(monkeypatch):
     import nanovllm_omni.models.smolvlm.stage as mod
 
     # Building the factory requires transformers -> ImportError propagates.
+    # Skip on no-torch hosts: `_vlm_stage` hits `import torch` first and
+    # fails with "No module named 'torch'" (also an ImportError, but one that
+    # does not match the "transformers" guard). The torch CI job covers this.
+    pytest.importorskip("torch")
     args = OmniEngineArgs(model="HuggingFaceTB/SmolVLM-500M-Instruct")
     with pytest.raises(ImportError, match="transformers"):
         mod._vlm_stage(deploy=None, args=args)

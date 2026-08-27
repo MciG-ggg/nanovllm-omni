@@ -125,11 +125,20 @@ def test_main_gpu_path_uses_run_n(tmp_path: Path) -> None:
     """On a GPU host, ``run_n`` is called once with the locked scenario."""
     csv_path = tmp_path / "bench.csv"
     fake_bundle = object()
+    # >= 2 results: `_summarize` feeds statistics.quantiles(n=100), which on
+    # Python <= 3.12 raises "must have at least two data points" on a single
+    # sample (3.13 loosened method="inclusive"). Two rows keep the test
+    # green across the CI matrix (3.11/3.12).
     fake_results = [
         _FakeRunResult(
             times=_FakeStageTimes(tokenize_ms=10.0, generate_ms=240.0),
             frames=120,
             vram_peak_mb=1800.0,
+        ),
+        _FakeRunResult(
+            times=_FakeStageTimes(tokenize_ms=12.0, generate_ms=300.0),
+            frames=120,
+            vram_peak_mb=1820.0,
         ),
     ]
     fake_create_bundle = mock.MagicMock(return_value=fake_bundle)

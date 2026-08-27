@@ -118,8 +118,11 @@ def test_sample_one_audio_layer_penalty_only_affects_history_window() -> None:
     baseline; the first-2 ids should be unchanged.
     """
     torch.manual_seed(0)
-    # Vocab must be >= the helper's default top_k=50; MiniMind's audio vocab is
-    # ~2048, so 64 fits comfortably without bumping the kwarg.
+    # Keep the WHOLE vocab in the candidate set (top_k=vocab=64) instead of
+    # relying on the default top_k=50: with equal logits, torch.topk's
+    # tie-break is version-arbitrary, so ids 20/21 may or may not survive the
+    # 50/64 cut -- that decision changed between torch releases and ZeroDiv'd
+    # on CI. top_k=vocab makes the statistical assertion version-stable.
     vocab = 64
     logits = torch.ones(vocab)
     last3 = [10, 11, 12]
@@ -129,11 +132,14 @@ def test_sample_one_audio_layer_penalty_only_affects_history_window() -> None:
 
     g_empty = torch.Generator().manual_seed(99)
     draws_empty = [
-        sample_one_audio_layer(logits, [], temperature=1.0, gen=g_empty) for _ in range(n)
+        sample_one_audio_layer(logits, [], temperature=1.0, top_k=vocab, gen=g_empty)
+        for _ in range(n)
     ]
     g_full = torch.Generator().manual_seed(99)
     draws_full = [
-        sample_one_audio_layer(logits, full_history, temperature=1.0, penalty=2.0, gen=g_full)
+        sample_one_audio_layer(
+            logits, full_history, temperature=1.0, penalty=2.0, top_k=vocab, gen=g_full
+        )
         for _ in range(n)
     ]
 

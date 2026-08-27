@@ -314,7 +314,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     gen = profile.by_stage("generate")
     assert gen is not None
     assert gen.wall_us == 1000
-    assert gen.n_steps == 3
+    assert gen.num_steps == 3
     assert gen.kernel_count == 3
     assert gen.total_kernel_us == 350
     top = gen.top_kernels[0]
@@ -326,7 +326,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     assert dec is not None
     assert dec.wall_us == 200
     assert dec.kernel_count == 1
-    assert dec.n_steps == 0
+    assert dec.num_steps == 0
 
 
 def test_trace_profile_markdown_renders_table():
@@ -348,7 +348,7 @@ def test_trace_profile_markdown_renders_table():
                     KernelStat(name="aten::addmm", total_us=300.0, count=2),
                     KernelStat(name="aten::softmax", total_us=50.0, count=1),
                 ),
-                n_steps=3,
+                num_steps=3,
             ),
             StageProfile(
                 name="decode",

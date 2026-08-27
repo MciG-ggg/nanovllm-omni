@@ -118,9 +118,9 @@ class BatchedThinkerRunner:
         self.states: dict[str, BatchedThinkerState] = {}
 
         cfg = getattr(self.model, "config", None)
-        n_thinker = len(getattr(getattr(self.model, "thinker", None), "layers", []) or [])
-        n_talker = len(getattr(getattr(self.model, "talker", None), "layers", []) or [])
-        self.n_layers = n_thinker + n_talker
+        num_thinker_layers = len(getattr(getattr(self.model, "thinker", None), "layers", []) or [])
+        num_talker_layers = len(getattr(getattr(self.model, "talker", None), "layers", []) or [])
+        self.num_layers = num_thinker_layers + num_talker_layers
         # Fixed-slot KV pool. Budget the slot length explicitly: the model's
         # ``max_position_embeddings`` (MiniMind-O: 32768) is far larger than any
         # practical single generation, and a full-size slot per request OOMs a
@@ -165,8 +165,8 @@ class BatchedThinkerRunner:
     def _register_kv(self, rid: str) -> None:
         self.kv_pool.register(
             rid,
-            n_layers=self.n_layers,
-            n_heads=int(self._kv_heads()),
+            num_layers=self.num_layers,
+            num_heads=int(self._kv_heads()),
             head_dim=int(self._head_dim()),
             device=self._device,
             dtype=self._dtype,
@@ -257,14 +257,16 @@ class BatchedThinkerRunner:
         # rid is on each chunk's ``seq.request_id`` (Sequence per TK-004).
         chunks: list[PrefillChunk] = group.items
         req_ids = [chunk.seq.request_id for chunk in chunks]
-        n_req = len(req_ids)
-        n_pos = chunks[0].end  # all chunks share end == seq.num_tokens
+        num_requests = len(req_ids)
+        num_positions = chunks[0].end  # all chunks share end == seq.num_tokens
         text = torch.tensor(
             [self.states[r].prompt_ids for r in req_ids],
             dtype=torch.long,
             device=self._device,
         )
-        audio = torch.full((n_req, 8, n_pos), self.audio_pad, dtype=torch.long, device=self._device)
+        audio = torch.full(
+            (num_requests, 8, num_positions), self.audio_pad, dtype=torch.long, device=self._device
+        )
         inp = torch.cat([audio, text.unsqueeze(1)], dim=1)  # [B, 9, P]
         for r in req_ids:
             self._register_kv(r)

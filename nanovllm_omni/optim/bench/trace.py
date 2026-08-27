@@ -33,7 +33,7 @@ class StageProfile:
     top_kernels: tuple[KernelStat, ...] = field(default_factory=tuple)
     # n_steps shows how many AR iterations ran inside generate (informational
     # when the trace is from a single generate call).
-    n_steps: int = 0
+    num_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
         kernel_count: dict[str, int] = defaultdict(int)
         total_kernel_us = 0
         kernel_n = 0
-        n_steps = 0
+        num_steps = 0
         for ev in events:
             if ev.get("ph") != "X":
                 continue
@@ -87,7 +87,7 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
             # Count generate.step sub-events so the trace tells us how many
             # AR iterations the model ran inside this generate stage.
             if name == "generate.step" and stage["name"] == "generate":
-                n_steps += 1
+                num_steps += 1
                 continue
             if name in STAGE_NAMES:
                 continue
@@ -106,7 +106,7 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
                 kernel_count=kernel_n,
                 total_kernel_us=total_kernel_us,
                 top_kernels=top_kernels,
-                n_steps=n_steps,
+                num_steps=num_steps,
             )
         )
     return TraceProfile(stages=tuple(profiles))
@@ -135,7 +135,7 @@ def trace_profile_markdown(profile: TraceProfile) -> str:
                 (
                     s.name,
                     f"{s.wall_us:.1f}",
-                    str(s.n_steps),
+                    str(s.num_steps),
                     str(s.kernel_count),
                     f"{s.total_kernel_us:.1f}",
                     top.name if top else "(none)",

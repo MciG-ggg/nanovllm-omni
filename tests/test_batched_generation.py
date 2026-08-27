@@ -38,23 +38,25 @@ class FakeMiniMindOmni:
     sampling consumes each request's RNG and needs a seeded generator.
     """
 
-    def __init__(self, n_thinker=2, n_talker=2, kv_heads=2, head_dim=4, vocab=4096):
+    def __init__(
+        self, num_thinker_layers=2, num_talker_layers=2, kv_heads=2, head_dim=4, vocab=4096
+    ):
         self.config = SimpleNamespace(
             num_key_value_heads=kv_heads,
             head_dim=head_dim,
             max_position_embeddings=256,
             think_end_ids=[],
         )
-        self.thinker = SimpleNamespace(layers=[None] * n_thinker)
-        self.talker = SimpleNamespace(layers=[None] * n_talker)
+        self.thinker = SimpleNamespace(layers=[None] * num_thinker_layers)
+        self.talker = SimpleNamespace(layers=[None] * num_talker_layers)
         self.audio_pad_token = 2049  # real MiniMind-O: >= AUDIO_VOCAB_BOUNDARY (2048)
         self.audio_stop_token = vocab - 1
         self.enter_token_id = vocab - 2
         self.pad_token_id = 1
         self._params = [torch.zeros(1, dtype=torch.float32)]  # device/dtype anchor
-        self.n_thinker = n_thinker
-        self.n_talker = n_talker
-        self.n_layers = n_thinker + n_talker
+        self.num_thinker_layers = num_thinker_layers
+        self.num_talker_layers = num_talker_layers
+        self.num_layers = num_thinker_layers + num_talker_layers
         self.vocab = vocab
         self.calls: list[tuple[int, int]] = []  # (batch, seq_len) per forward
 
@@ -76,7 +78,7 @@ class FakeMiniMindOmni:
         past_len = past_key_values[0][0].shape[1] if is_decode else 0
         seq_out = tlen if not is_decode else past_len + tlen
         presents = []
-        for _ in range(self.n_layers):
+        for _ in range(self.num_layers):
             k = torch.zeros(bs, seq_out, self.config.num_key_value_heads, self.config.head_dim)
             v = torch.zeros(bs, seq_out, self.config.num_key_value_heads, self.config.head_dim)
             presents.append((k, v))
@@ -216,7 +218,7 @@ def test_batch_layout_does_not_change_per_request_sampling():
 
 def test_fixed_slot_pool_layout_and_gather():
     pool = FixedKvSlotPool(max_seq=32)
-    pool.register("x", n_layers=3, n_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
+    pool.register("x", num_layers=3, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
 
     # write per-layer with seq at dim 0 of each row ([B, seq, kv, d])
     k = torch.randn(1, 5, 2, 4)
@@ -232,8 +234,8 @@ def test_fixed_slot_pool_layout_and_gather():
 
     # unequal-length gather must refuse (the model's rectangular constraint)
     pool2 = FixedKvSlotPool(max_seq=32)
-    pool2.register("a", n_layers=1, n_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
-    pool2.register("b", n_layers=1, n_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
+    pool2.register("a", num_layers=1, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
+    pool2.register("b", num_layers=1, num_heads=2, head_dim=4, device="cpu", dtype=torch.float32)
     pool2.write("a", layer=0, key=torch.randn(1, 3, 2, 4), value=torch.randn(1, 3, 2, 4), row=0)
     pool2.write("b", layer=0, key=torch.randn(1, 4, 2, 4), value=torch.randn(1, 4, 2, 4), row=0)
     try:

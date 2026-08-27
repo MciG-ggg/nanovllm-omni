@@ -47,8 +47,8 @@ class FixedKvSlotPool:
         self,
         req_id: str,
         *,
-        n_layers: int,
-        n_heads: int,
+        num_layers: int,
+        num_heads: int,
         head_dim: int,
         device: Any,
         dtype: Any,
@@ -59,7 +59,7 @@ class FixedKvSlotPool:
         if req_id in self._slots:
             return  # idempotent re-register
         buf = torch.empty(
-            (n_layers, 2, self.max_seq, n_heads, head_dim),
+            (num_layers, 2, self.max_seq, num_heads, head_dim),
             device=device,
             dtype=dtype,
         )
@@ -101,9 +101,9 @@ class FixedKvSlotPool:
         length = next(iter(ptrs))
         if length == 0:
             raise ValueError(f"{[s['ptr'] for s in slots]} -- run prefill first")
-        n_layers = slots[0]["buf"].shape[0]
+        num_layers = slots[0]["buf"].shape[0]
         pairs: list[tuple[Any, Any]] = []
-        for layer in range(n_layers):
+        for layer in range(num_layers):
             keys = torch.stack([s["buf"][layer, 0, :length, :, :] for s in slots])
             vals = torch.stack([s["buf"][layer, 1, :length, :, :] for s in slots])
             pairs.append((keys, vals))

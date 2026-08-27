@@ -1,23 +1,15 @@
-"""Batched engine entry: Orchestrator-driven MiniMind-O continuous batching.
+"""Minimal batched (continuous-batching) MiniMind-O thinker entry.
 
-Engine-level entry for the MiniMind-O single-stage (thinker) batched path.
-The engine loop itself (schedule -> execute groups -> update) lives in the
-model-agnostic ``engine/orchestrator.py`` (single-device vllm-omni shape);
-this module owns the MiniMind-O seams:
+Single-scheduler drive loop — no StagePool / Orchestrator / LoadBalancer /
+multi-replica: those measured zero contribution on the single-GPU scope
+(docs/perf/model-family-bottlenecks-2026-08-27.md appendix, nr=1 == nr=2).
+One ``RuntimeScheduler`` + one ``BatchedThinkerRunner`` already delivers the
+measured ~+87% throughput for batch=2 vs serial (group forwarding of equal
+KV-length requests); the ceremony above them was deleted.
 
-  - tokenize each prompt into ids (thinker stage)
-  - build the thinker ``StagePool``: one ``RuntimeScheduler`` +
-    ``BatchedThinkerRunner`` per replica
-  - ``drive`` one replica's scheduler to completion, collecting finished
-    rids -> Mimi frames
-  - ``finalize`` a finished rid through the serial codec chain (talker /
-    mimi decode -> WAV), matching Q9a
-
-Layering:
-- ``engine/runtime_scheduler.py`` -> per-replica scheduler + Sequence
-- ``engine/orchestrator.py``     -> StagePool + request dispatch
-- ``engine/batched_runner.py``   -> this file (MiniMind-O seams)
-- ``models/minimind_omni/batched_generation.py`` -> per-request runner
+Loop mirrors vllm-omni's ``schedule() -> execute(prefill+decode) ->
+update_from_output``; finished thinkers drop OUT to the serial
+talker/mimi->wav chain (Q9a) via ``code2wav.decode_audio``.
 """
 
 from __future__ import annotations
@@ -25,12 +17,14 @@ from __future__ import annotations
 from itertools import count
 from typing import Any
 
-from nanovllm_omni.engine.orchestrator import Orchestrator, Replica, StagePool
+from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
+from nanovllm_omni.models.minimind_omni.batched_generation import BatchedThinkerRunner
+from nanovllm_omni.models.minimind_omni.code2wav import decode_audio, encode_wav
+from nanovllm_omni.models.minimind_omni.thinker import tokenize_for_generate
+from nanovllm_omni.outputs import AudioPayload
 
-# Globally-unique request id across replicas. Each replica's
-# ``BatchedThinkerRunner.add_request`` would otherwise default to
-# ``req-<local count>`` and collide across replicas (two ``req-0``). The
-# leading ``seq-`` prefix keeps ids distinct from replica-internal naming.
+# Globally-unique request id (leading ``seq-`` keeps ids distinct from
+# replica-internal naming conventions).
 _rids = count()
 
 
@@ -47,85 +41,69 @@ def run_batched_generate(
     base_seed: int = 42,
     deploy: Any = None,
     kv_max_sequence_len: int | None = None,
-    num_replicas: int = 1,
-    balancer: Any | None = None,
 ) -> list[Any]:
-    """Continuous-batching entry: tokenize -> Orchestrator -> serial WAV.
+    """Continuous-batching entry: tokenize -> drain one scheduler -> serial WAV.
 
-    Builds a single-stage (thinker) ``StagePool`` with ``num_replicas``
-    replicas (each a ``RuntimeScheduler`` + ``BatchedThinkerRunner``), fans
-    the prompts out via the ``LoadBalancer``, drives every replica to
-    completion, then runs each finished rid through the serial codec chain
-    (mimi decode -> WAV). Returns one :class:`AudioPayload` per prompt in
-    submission order.
+    Submits every prompt to the single ``RuntimeScheduler`` +
+    ``BatchedThinkerRunner``, then drives ``schedule -> prefill/decode ->
+    update_from_output`` until all requests finish, finalizing each finished
+    rid through the serial codec chain (mimi decode -> WAV). Returns one
+    :class:`AudioPayload` per prompt in submission order.
+
+    ``max_batch`` defaults to ``deploy.max_batch`` (or 2); the scheduler
+    groups equal-KV-length requests so each batched forward is a single
+    rectangular ``[B, 9, T]`` call.
     """
-    from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
-    from nanovllm_omni.models.minimind_omni.batched_generation import BatchedThinkerRunner
-    from nanovllm_omni.models.minimind_omni.code2wav import decode_audio, encode_wav
-    from nanovllm_omni.models.minimind_omni.thinker import tokenize_for_generate
-    from nanovllm_omni.outputs import AudioPayload
-
     if max_batch is None:
         max_batch = getattr(deploy, "max_batch", 2) if deploy is not None else 2
-    if balancer is None:
-        from nanovllm_omni.engine.load_balancer import RoundRobinBalancer
 
-        balancer = RoundRobinBalancer()
+    sched = RuntimeScheduler(max_num_seqs=max_batch)
+    runner = BatchedThinkerRunner(
+        bundle,
+        sched,
+        temperature=temperature,
+        top_p=top_p,
+        rp=rp,
+        max_new_tokens=max_new_tokens,
+        open_thinking=open_thinking,
+        base_seed=base_seed,
+        kv_max_sequence_len=kv_max_sequence_len,
+    )
 
-    # Per-replica isolation: each replica owns an independent scheduler +
-    # runner (TK-007). Distinct base_seed per replica for independent RNG.
-    pool = StagePool(stage_id=0, num_replicas=num_replicas, balancer=balancer)
-    for replica_id in range(num_replicas):
-        sched = RuntimeScheduler(max_num_seqs=max_batch)
-        runner = BatchedThinkerRunner(
-            bundle,
-            sched,
-            temperature=temperature,
-            top_p=top_p,
-            rp=rp,
-            max_new_tokens=max_new_tokens,
-            open_thinking=open_thinking,
-            base_seed=base_seed + replica_id,
-            kv_max_sequence_len=kv_max_sequence_len,
-        )
-        pool.add_replica(sched, runner)
-
-    orch = Orchestrator(pool)
-
-    def add_request(replica: Replica, prompt: str) -> str:
+    # Submit everything up-front; the scheduler admits <= max_batch as it
+    # drains. Submission order is preserved by the deterministic drain.
+    rids: list[str] = []
+    for prompt in prompts:
         ids = tokenize_for_generate(bundle.tokenizer, prompt, open_thinking)
-        return replica.runner.add_request(ids[0].tolist(), request_id=f"seq-{next(_rids)}")
+        rid = runner.add_request(ids[0].tolist(), request_id=f"seq-{next(_rids)}")
+        rids.append(rid)
 
-    def drive(replica: Replica) -> dict[str, Any]:
-        sched = replica.sched
-        runner = replica.runner
-        done: dict[str, Any] = {}
-        while sched.has_work():
-            out = sched.schedule()
-            if out.is_empty:
-                break
-            prefilled: set[str] = set()
-            finished: set[str] = set()
-            for group in out.prefill_groups:
-                runner.prefill_group(group)
-                prefilled.update(chunk.sequence.request_id for chunk in group.items)
-            for group in out.decode_groups:
-                runner.decode_group(group)
-                for sequence in group.items:
-                    if runner.step_finished(sequence.request_id):
-                        finished.add(sequence.request_id)
-            sched.update_from_output(prefilled=prefilled, finished=finished)
-            for rid in finished:
-                st = runner.states[rid]
-                if not st.frames:
-                    done[rid] = AudioPayload(data=b"", sample_rate=24_000)
-                else:
-                    samples = decode_audio(bundle.mimi, st.frames, bundle.device)
-                    wav = encode_wav(samples, sample_rate=24_000)
-                    done[rid] = AudioPayload(data=wav, sample_rate=24_000)
-        return done
+    results: dict[str, Any] = {}
+    while sched.has_work():
+        out = sched.schedule()
+        if out.is_empty:
+            break
+        prefilled: set[str] = set()
+        finished: set[str] = set()
+        for group in out.prefill_groups:
+            runner.prefill_group(group)
+            prefilled.update(chunk.sequence.request_id for chunk in group.items)
+        for group in out.decode_groups:
+            runner.decode_group(group)
+            for sequence in group.items:
+                if runner.step_finished(sequence.request_id):
+                    finished.add(sequence.request_id)
+        sched.update_from_output(prefilled=prefilled, finished=finished)
+        for rid in finished:
+            st = runner.states[rid]
+            if not st.frames:
+                results[rid] = AudioPayload(data=b"", sample_rate=24_000)
+            else:
+                samples = decode_audio(bundle.mimi, st.frames, bundle.device)
+                wav = encode_wav(samples, sample_rate=24_000)
+                results[rid] = AudioPayload(data=wav, sample_rate=24_000)
 
-    return orch.submit(prompts, add_request=add_request, drive=drive)
+    return [results[rid] for rid in rids]
 
 
 __all__ = ["run_batched_generate"]

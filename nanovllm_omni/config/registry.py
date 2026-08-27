@@ -98,9 +98,6 @@ class StageConfig:
     is_terminal: bool = False
     final_output_type: str | None = None
     diffusers_class_name: str | None = None
-    # Per-stage replica count (TK-007). Default 1 -> single-replica behaviour
-    # is unchanged; the LoadBalancer picks among ``range(num_replicas)``.
-    num_replicas: int = 1
 
     def __post_init__(self) -> None:
         # Eagerly validate kind + factory / process_input paths so
@@ -120,8 +117,6 @@ class StageConfig:
                 f"('package.module:attr'), got {type(self.factory).__name__}"
             )
         resolve_stage_factory(self.factory)
-        if self.num_replicas < 1:
-            raise ValueError(f"StageConfig.num_replicas must be >= 1, got {self.num_replicas}")
         if self.process_input is not None:
             if not isinstance(self.process_input, str):
                 raise TypeError(

@@ -314,6 +314,27 @@ class OmniRequestOutput:
                         "format": "wav",
                         "sample_rate": value.sample_rate,
                     }
+                elif isinstance(value, ImageArtifact):
+                    # TK-015: ImageArtifact.pkg_bytes survives json.dumps via
+                    # base64; width/height ride along in <key>_metadata so the
+                    # HTTP adapter does not have to decode the PNG to recover
+                    # them (mirrors AudioArtifact's sample_rate treatment).
+                    result["multimodal_output"][key] = base64.b64encode(
+                        bytes(value.png_bytes)
+                    ).decode("ascii")
+                    result["multimodal_output"][f"{key}_metadata"] = {
+                        "format": "png",
+                        "width": value.width,
+                        "height": value.height,
+                    }
+                elif isinstance(value, TextArtifact):
+                    # TK-015: TextArtifact round-trips losslessly; ``token_ids``
+                    # is optional and serialized only when set.
+                    result["multimodal_output"][key] = value.text
+                    if value.token_ids is not None:
+                        result["multimodal_output"][f"{key}_metadata"] = {
+                            "token_ids": list(value.token_ids),
+                        }
                 elif isinstance(value, (bytes, bytearray)):
                     result["multimodal_output"][key] = base64.b64encode(bytes(value)).decode(
                         "ascii"
@@ -377,3 +398,55 @@ class ActionArtifact:
             raise ValueError(
                 f"chunk_size={self.chunk_size} does not match array.shape[0]={shape[0]}"
             )
+
+
+@dataclass(frozen=True)
+class TextArtifact:
+    """Text output artifact (TK-015 contract, locked schema).
+
+    ``text`` is the decoded string the stage produced; ``token_ids`` is the
+    optional raw token sequence (e.g. for downstream re-scoring or
+    logprob inspection). ``token_ids=None`` means "not exposed by this stage";
+    an empty list means "exposed but empty". Mirrors vllm-omni's text
+    artifact shape.
+    """
+
+    text: str
+    token_ids: list[int] | None = None
+
+
+@dataclass(frozen=True)
+class ImageArtifact:
+    """Image output artifact (TK-015 contract, locked schema).
+
+    ``png_bytes`` is the serialized PNG; ``width`` / ``height`` are pixel
+    dimensions of the rendered image. The class does not require PIL at
+    import time -- callers that produce images (e.g. SD-Turbo's
+    ``diffusers.StableDiffusionPipeline``) wrap the result here. Storing
+    PNG bytes (not the raw ``PIL.Image``) keeps ``to_dict`` JSON-friendly
+    without requiring the consumer to have Pillow installed.
+    """
+
+    png_bytes: bytes
+    width: int
+    height: int
+
+    @classmethod
+    def from_pil(cls, image: Any) -> "ImageArtifact":
+        """Wrap a PIL.Image (or duck-typed equivalent with ``.size`` /
+        ``.save`` / ``save`` kwargs) into the artifact. Imports Pillow
+        lazily so the rest of the outputs module stays Pillow-free."""
+        import io
+
+        width, height = int(image.size[0]), int(image.size[1])
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return cls(png_bytes=buf.getvalue(), width=width, height=height)
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError(
+                f"ImageArtifact requires positive width/height, got " f"{self.width}x{self.height}"
+            )
+        if not self.png_bytes:
+            raise ValueError("ImageArtifact.png_bytes must be a non-empty bytes object")

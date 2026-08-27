@@ -10,6 +10,8 @@ Covers the four methods added to mirror vllm-omni's ``OmniRequestOutput``:
 
 from __future__ import annotations
 
+import pytest
+
 import tests.test_smolvla as _smolvla  # noqa: F401  (smolvla stage import guard)
 from nanovllm_omni.outputs import (  # noqa: E402
     AudioPayload,
@@ -132,3 +134,92 @@ def test_from_stage_output_plain_object() -> None:
     out = OmniRequestOutput.from_stage_output(source, final_output_type="audio")
     assert out.request_id == ""
     assert out.final_output_type == "audio"
+
+
+# ---------------------------------------------------------------------------
+# TK-015: ImageArtifact / TextArtifact round-trips through to_dict()
+# ---------------------------------------------------------------------------
+
+
+def test_text_artifact_roundtrip_with_token_ids() -> None:
+    """TextArtifact.text survives to_dict as a plain string;
+    ``token_ids`` rides along in the metadata sidecar (TK-015)."""
+    from nanovllm_omni.outputs import TextArtifact
+
+    out = OmniRequestOutput(
+        multimodal_output=MultimodalPayload.from_dict(
+            {"text": TextArtifact(text="hello world", token_ids=[101, 202, 303])}
+        )
+    )
+    d = out.to_dict()
+    assert d["multimodal_output"]["text"] == "hello world"
+    assert d["multimodal_output"]["text_metadata"] == {"token_ids": [101, 202, 303]}
+    import json
+
+    json.dumps(d)  # must not raise
+
+
+def test_text_artifact_without_token_ids_omits_metadata() -> None:
+    """``TextArtifact.token_ids is None`` -> no ``text_metadata`` sidecar."""
+    from nanovllm_omni.outputs import TextArtifact
+
+    out = OmniRequestOutput(
+        multimodal_output=MultimodalPayload.from_dict({"text": TextArtifact(text="hi")})
+    )
+    d = out.to_dict()
+    assert d["multimodal_output"]["text"] == "hi"
+    assert "text_metadata" not in d["multimodal_output"]
+
+
+def test_image_artifact_roundtrip_emits_png_metadata() -> None:
+    """ImageArtifact serializes as base64 PNG + width/height metadata."""
+
+    from nanovllm_omni.outputs import ImageArtifact
+
+    payload = ImageArtifact(png_bytes=b"\x89PNG\r\n\x1a\nfake-bytes", width=64, height=48)
+    out = OmniRequestOutput(multimodal_output=MultimodalPayload.from_dict({"image": payload}))
+    d = out.to_dict()
+    import base64
+    import json
+
+    decoded = base64.b64decode(d["multimodal_output"]["image"])
+    assert decoded == b"\x89PNG\r\n\x1a\nfake-bytes"
+    assert d["multimodal_output"]["image_metadata"] == {
+        "format": "png",
+        "width": 64,
+        "height": 48,
+    }
+    json.dumps(d)
+
+
+def test_image_artifact_from_pil_roundtrip() -> None:
+    """``ImageArtifact.from_pil`` encodes a PIL image and round-trips dims."""
+    pytest.importorskip("PIL")
+    from PIL import Image  # noqa: F401
+
+    from nanovllm_omni.outputs import ImageArtifact
+
+    img = Image.new("RGB", (8, 4), color="red")
+    artifact = ImageArtifact.from_pil(img)
+    assert artifact.width == 8
+    assert artifact.height == 4
+    assert artifact.png_bytes.startswith(b"\x89PNG")
+    out = OmniRequestOutput(multimodal_output=MultimodalPayload.from_dict({"image": artifact}))
+    d = out.to_dict()
+    assert d["multimodal_output"]["image_metadata"] == {
+        "format": "png",
+        "width": 8,
+        "height": 4,
+    }
+
+
+def test_image_artifact_post_init_validation() -> None:
+    """Width/height must be positive; png_bytes must be non-empty."""
+    from nanovllm_omni.outputs import ImageArtifact
+
+    with pytest.raises(ValueError, match="positive"):
+        ImageArtifact(png_bytes=b"x", width=0, height=1)
+    with pytest.raises(ValueError, match="positive"):
+        ImageArtifact(png_bytes=b"x", width=1, height=-2)
+    with pytest.raises(ValueError, match="non-empty"):
+        ImageArtifact(png_bytes=b"", width=1, height=1)

@@ -2,8 +2,7 @@
 
 Stage 1 of the 3-stage pipeline. For TICKET-02 this is an identity
 pass-through because the thinker's end-to-end ``generate_audio`` already
-emits the audio payload. TICKET-05 (``.scratch/aligned-interfaces/issues/
-05-minimind-stage-split``) will replace the body with real talker
+emits the audio payload. TICKET-05 will replace the body with real talker
 forwarding + post-EOS state machine + watchdog.
 """
 

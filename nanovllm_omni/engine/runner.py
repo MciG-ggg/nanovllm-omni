@@ -8,7 +8,7 @@ this runner for async and multi-request use.
 Design basis: 10-round grill session. vllm-omni's StagePool and
 Orchestrator are designed for multi-replica routing and cross-stage
 request lifecycle management; neither is needed for nanovllm-omni's
-single-process, single-GPU scope. See /docs/aligned_interfaces.md.
+single-process, single-GPU scope.
 
 Phase 2 (TK-016): stage factories and ``process_input`` hooks are
 dotted-path strings on ``StageConfig``; this runner resolves them via

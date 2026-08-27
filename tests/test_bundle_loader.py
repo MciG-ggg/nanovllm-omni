@@ -1,7 +1,6 @@
 """Contract tests for the bundle kwargs plumbed from ``OmniEngineArgs``.
 
-Pins the contract documented in /docs/aligned_interfaces.md
-"OmniEngineArgs effective-field matrix": ``trust_remote_code`` and
+Pins the OmniEngineArgs effective-field matrix: ``trust_remote_code`` and
 ``dtype`` flow from ``OmniEngineArgs`` through the per-stage factory into
 ``load_minimind_omni_bundle`` and the resulting ``from_pretrained`` calls /
 dtype cast.

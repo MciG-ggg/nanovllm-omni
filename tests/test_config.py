@@ -184,8 +184,7 @@ def test_smolvla_pipeline_declares_hf_architectures():
 
 # ---------------------------------------------------------------------------
 # Phase 2 (TK-016) contract tests: StageExecutionType enum + string-path
-# factory resolution. See /docs/aligned_interfaces.md and SPEC.md
-# "Module structure".
+# factory resolution.
 # ---------------------------------------------------------------------------
 
 

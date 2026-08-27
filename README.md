@@ -5,7 +5,7 @@
 - 🔁 **StagePool pattern demo** — `num_replicas ≥ 2`, RoundRobin LB, `(stage_id, replica_id)` per output
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
-A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. Alignment work with vllm-omni is tracked in `.scratch/aligned-interfaces/`; this project does not claim to implement vllm-omni's full feature set. See `docs/compatibility.md` for the consumer-visible symbols that happen to align and `docs/aligned_interfaces.md` for the field-by-field truth.
+A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
 
 ## Supported models
 
@@ -78,7 +78,7 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 
 ## Configuration
 
-Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage sampling and resource defaults live in `deploy/*.yaml`, read from `Path.cwd()` at runtime. Consult `.scratch/aligned-interfaces/SPEC.md` for the locked contract.
+Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage sampling and resource defaults live in `deploy/*.yaml`, read from `Path.cwd()` at runtime.
 
 ## Repository layout
 
@@ -94,8 +94,7 @@ examples/
     online_serving/
         minimind_o/   # curl/stdlib client for /v1/chat/completions
 tests/          # automated tests
-docs/           # project notes (aligned_interfaces, compatibility, contracts/)
-.scratch/       # alignment specification and ticket checklists
+docs/           # project notes and performance archives
 ```
 
 ## Scope

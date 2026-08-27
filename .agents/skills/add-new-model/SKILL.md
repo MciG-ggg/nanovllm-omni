@@ -18,7 +18,6 @@ nanovllm-omni 是 registry 驱动:`模型`= 一个 **PipelineConfig**(注册在 
 - `nanovllm_omni/config/registry.py` — `register_pipeline`、`resolve_pipeline_config`、`OMNI_PIPELINES`、`StageExecutionType`(closed set)、`_load_builtin_pipelines()`(每族加一行 import)。
 - `deploy/<family>.yaml` — 运行时旋钮:顶层 `max_batch`、每 stage `default_sampling_params`。
 - `nanovllm_omni/models/__init__.py` — re-export 该族 loader/bundle。
-- `docs/aligned_interfaces.md` — 公共符号/行为有任何变化时记录于此。
 
 ## Step 0 — 塞得进 4GB 吗?
 
@@ -156,7 +155,7 @@ stages:
 
 ## Step 6 — 对齐记录
 
-族改了任何公共符号/行为,就按仓库工作流更新 `docs/aligned_interfaces.md`(Pipeline 拓扑节)。
+族改了任何公共符号/行为,就按仓库工作流补聚焦测试并更新 README 支持表。
 
 **如果是替换既有族(rev1 → rev2)**:GitHub issue 的 title + body 也要同步(`gh issue edit <n>` 不可逆,改之前草稿准备好)。正文里写明 model pivot 原因、新 commit 引用、acceptance criteria 勾选状态。本地命令行是 `rtk gh issue edit <n> --title "..." --body-file /tmp/issue.md`(项目里 `rtk` 是 gh wrapper,不带 `--quiet`)。
 
@@ -214,16 +213,12 @@ stages:
 - `git rm -r nanovllm_omni/models/<old_family>/ deploy/<old_family>.yaml examples/offline_inference/<old_family>/ tests/test_<old_family>.py`
 - `nanovllm_omni/config/registry.py` `_load_builtin_pipelines()` 里删对应 import 行
 - `nanovllm_omni/models/__init__.py` `__all__` 删对应 loader(如有)
-- `docs/aligned_interfaces.md` 改 `<old_family>` 行 → `<new_family>` 行
 - **不要 `git rebase -i` squash 旧 commit**:历史里保留 rev1 探索对下一轮 pivot 是有用的;一次普通 `feat(...): add new family; remove old family` commit 即可,git 会自动识别 `tests/test_<old>.py -> tests/test_<new>.py` 重命名。
 - 物理删除模型快照:本机 `rm -rf ~/models/<old_snapshot>` + 远端(WSL/jingrui)同样清理(常 5–10 GB)。
 - 关联的 demo artifact(PNG / JSON / 临时下载)也清掉。
 
 ## 禁止清单(从 AGENTS.md 移到这里)
 
-- 只用 stdlib:`@dataclass` 定义契约、`http.server` 做服务。**不加新依赖**。
-- 禁 FastAPI、uvicorn、Pydantic、WebSockets、分布式执行、全双工流式。
 - 永不修改 / import 只读参考仓库 `/Users/mcig/Projects/vllm-omni`;它只用来核对名字/签名/形状。
 - 不抄 vllm-omni 代码;适配到本仓库的更小范围。
-- 不加 `StageExecutionType` 成员(closed-set 测试锁 4 个名字),除非走 ticket。
 - 任何故意破坏公共 API 的改动必须写进 ticket,并反映在测试/文档里。

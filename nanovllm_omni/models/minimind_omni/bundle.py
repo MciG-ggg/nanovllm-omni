@@ -122,9 +122,8 @@ def load_minimind_omni_bundle(
     """Load MiniMind-O + tokenizer + Mimi onto ``device``.
 
     ``trust_remote_code`` and ``dtype`` are plumbed from
-    ``OmniEngineArgs`` (see /docs/aligned_interfaces.md "OmniEngineArgs
-    effective-field matrix"); both default to the legacy behavior so
-    existing callers do not need to change.
+    ``OmniEngineArgs`` (effective-field matrix); both default to the legacy
+    behavior so existing callers do not need to change.
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
 

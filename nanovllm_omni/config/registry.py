@@ -7,16 +7,15 @@ module is the registry-of-record: it exposes ``OMNI_PIPELINES``,
 ``merge_pipeline_deploy``, ``StageExecutionType``, and
 ``resolve_stage_factory``.
 
-Design basis: 10-round grill session in /docs/design-grill.md. Field set and
-alignment boundary are documented in /docs/aligned_interfaces.md.
+Design basis: 10-round grill session. Field set and alignment boundary
+are enforced by the registry contract tests.
 
 Phase 2 (TK-016): ``StageConfig.factory`` / ``process_input`` are now
 dotted-path strings (``"package.module:attr"``) resolved via
 ``resolve_stage_factory``; ``kind`` is the :class:`StageExecutionType` enum
 mirroring vllm-omni's LLM_AR / LLM_GENERATION / DIFFUSION / CODEC taxonomy.
 Per-stage modules are no longer statically imported by ``pipeline.py``; the
-pipeline topology file is now fully declarative. See SPEC.md "Module
-structure" for the contract.
+pipeline topology file is now fully declarative.
 """
 
 from __future__ import annotations

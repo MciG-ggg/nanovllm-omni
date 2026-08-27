@@ -2,9 +2,7 @@
 
 Runnable, weight-bearing examples for the aligned API. Layout mirrors
 vllm-omni's `examples/`: split by run mode first (`offline_inference/`,
-`online_serving/`), then one folder per model family. See
-`.scratch/aligned-interfaces/SPEC.md` for the locked Python / HTTP
-seam contracts every example exercises.
+`online_serving/`), then one folder per model family.
 
 ## Layout
 

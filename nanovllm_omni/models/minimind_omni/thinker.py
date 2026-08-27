@@ -7,9 +7,8 @@ chains. Codec decode lives in ``code2wav.py``; bundle loading lives in
 ``bundle.py``.
 
 The ``_thinker_stage`` factory wraps the end-to-end call behind the
-thinker / talker / code2wav split. TICKET-05 (``.scratch/aligned-interfaces/
-issues/05-minimind-stage-split``) is the correctness-side split that
-turns this into a real 3-stage execution; this file is the prerequisite.
+thinker / talker / code2wav split. TICKET-05 is the correctness-side split
+that turns this into a real 3-stage execution; this file is the prerequisite.
 """
 
 from __future__ import annotations

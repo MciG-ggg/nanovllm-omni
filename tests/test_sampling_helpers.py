@@ -128,7 +128,7 @@ def test_sample_one_audio_layer_penalty_only_affects_history_window() -> None:
     last3 = [10, 11, 12]
     older = [20, 21]
     full_history = older + last3  # [20, 21, 10, 11, 12]
-    n = 4000
+    n = 16000
 
     g_empty = torch.Generator().manual_seed(99)
     draws_empty = [
@@ -156,11 +156,19 @@ def test_sample_one_audio_layer_penalty_only_affects_history_window() -> None:
     ratio_last3 = frac_full_last3 / frac_empty_last3
     ratio_older = frac_full_older / frac_empty_older
 
-    assert ratio_last3 < 0.8, (
+    assert ratio_last3 < 0.85, (
         f"penalty missed last-3 history: empty={frac_empty_last3:.3f}, "
         f"penalised={frac_full_last3:.3f}, ratio={ratio_last3:.3f}"
     )
-    assert abs(ratio_older - 1.0) < 0.1, (
+    # Older-than-window ids (20, 21) must NOT be penalised. Measured over 30
+    # RNG seeds at n=16000 (top_k=64, same seed on both streams):
+    #   no-leak ratio_older = [1.008, 1.039]   (relative to empty baseline)
+    #   leak ratio_older    = [0.536, 0.700]   (if the window sliced wrong)
+    # The [0.8, 1.5] band sits in the empty gap and absorbs the wider RNG
+    # dispersion CI showed (it once sampled 0.893 at n=4000). ratio_last3
+    # < 0.85: penalised last3 land ~0.53-0.71, a missed penalty would sit
+    # near 1.05.
+    assert 0.8 < ratio_older < 1.5, (
         f"penalty leaked outside history window: empty={frac_empty_older:.3f}, "
         f"penalised={frac_full_older:.3f}, ratio={ratio_older:.3f}"
     )

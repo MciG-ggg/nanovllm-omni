@@ -16,7 +16,7 @@ nanovllm-omni 是 registry 驱动:`模型`= 一个 **PipelineConfig**(注册在 
   - `__init__.py` — 只 re-export(`PIPELINE`、bundle/loader)。
   - 各 stage 模块 — `factory` / `process_input` 指向的 callable(`module:attr`)。
 - `nanovllm_omni/config/registry.py` — `register_pipeline`、`resolve_pipeline_config`、`OMNI_PIPELINES`、`StageExecutionType`(closed set)、`_load_builtin_pipelines()`(每族加一行 import)。
-- `deploy/<family>.yaml` — 运行时旋钮:顶层 `max_batch`、每 stage `default_sampling_params`。
+- `nanovllm_omni/deploy/<family>.yaml` — 运行时旋钮:顶层 `max_batch`、每 stage `default_sampling_params`。
 - `nanovllm_omni/models/__init__.py` — re-export 该族 loader/bundle。
 
 ## Step 0 — 塞得进 4GB 吗?
@@ -127,7 +127,7 @@ from nanovllm_omni.models.<family> import pipeline as _<family>_pipeline  # noqa
 
 ## Step 3 — deploy 旋钮
 
-`deploy/<family>.yaml`(文件名必须等于 `default_deploy_config_name`):
+`nanovllm_omni/deploy/<family>.yaml`(文件名必须等于 `default_deploy_config_name`):
 
 ```yaml
 max_batch: 2
@@ -210,7 +210,7 @@ stages:
 
 如果做 rev 替换(rev1 不可用,改成 rev2),新族落地后**旧族**的产物一并清理:
 
-- `git rm -r nanovllm_omni/models/<old_family>/ deploy/<old_family>.yaml examples/offline_inference/<old_family>/ tests/test_<old_family>.py`
+- `git rm -r nanovllm_omni/models/<old_family>/ nanovllm_omni/deploy/<old_family>.yaml examples/offline_inference/<old_family>/ tests/test_<old_family>.py`
 - `nanovllm_omni/config/registry.py` `_load_builtin_pipelines()` 里删对应 import 行
 - `nanovllm_omni/models/__init__.py` `__all__` 删对应 loader(如有)
 - **不要 `git rebase -i` squash 旧 commit**:历史里保留 rev1 探索对下一轮 pivot 是有用的;一次普通 `feat(...): add new family; remove old family` commit 即可,git 会自动识别 `tests/test_<old>.py -> tests/test_<new>.py` 重命名。

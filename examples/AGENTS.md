@@ -48,8 +48,7 @@ folders.
   exec python <entrypoint>.py "$@"
   ```
 
-  `cd "$(dirname "$0")"` matters — `deploy/<model>.yaml` resolves
-  relative to the repo root only after the `cd`.
+  `cd "$(dirname "$0")"` keeps each example self-contained; `deploy/<model>.yaml` is resolved by `OmniBase._resolve_deploy` from the package's `deploy/` directory, with no repo-root dependence.
 
 ## Default `--model` paths
 
@@ -105,7 +104,7 @@ Avoid:
 
 1. Register the pipeline first if it's not in
    `nanovllm_omni.config.registry.OMNI_PIPELINES`. Use
-   `register_pipeline(...)` and add a `deploy/<model>.yaml` with
+   `register_pipeline(...)` and add a `nanovllm_omni/deploy/<model>.yaml` with
    the per-stage sampling / resource defaults — these are read by
    `Omni(...).generate(...)` via `load_deploy_config`.
 2. Create the folder:
@@ -144,7 +143,7 @@ action-only and has no `online_serving/<model>/` entry.
   on artifact shape or WAV validity.
 - Configuration. Pipeline topology stays in code
   (`nanovllm_omni/config/registry.py`); runtime knobs stay in
-  `deploy/<model>.yaml`. Examples pass `--deploy-config` only to
+  `nanovllm_omni/deploy/<model>.yaml`. Examples pass `--deploy-config` only to
   point at an alternate YAML for experiments.
 - A top-level runner script. Each example is independently runnable;
   vllm-omni has the same convention.

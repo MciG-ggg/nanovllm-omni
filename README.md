@@ -20,18 +20,20 @@ All four run on a single 4 GB consumer card (RTX 3050) in one process. Image gen
 
 ## Quickstart
 
-Install the package and its existing dependencies:
+Install the package and its existing dependencies; add the `minimind`
+extra for the audio path (torch/transformers) and `.[smolvla]` for the
+SmolVLA examples:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,minimind]"
 ```
 
 For MiniMind-O (audio), pull the weights once into local directories
 (the bundle loader is offline-first and never auto-fetches):
 
 ```bash
-hf download jingyaogong/minimind-3o --local-dir /home/mcig/minimind-3o
-hf download kyutai/mimi             --local-dir /home/mcig/mimi
+hf download jingyaogong/minimind-3o --local-dir "$HOME/minimind-3o"
+hf download kyutai/mimi             --local-dir "$HOME/mimi"
 ```
 
 Then run the single-prompt smoke against the local weights:
@@ -39,7 +41,7 @@ Then run the single-prompt smoke against the local weights:
 ```bash
 cd examples/offline_inference/minimind_o
 HF_HUB_OFFLINE=1 bash run_end2end.sh \
-    --model /home/mcig/minimind-3o --mimi /home/mcig/mimi --out audio.wav
+    --model "$HOME/minimind-3o" --mimi "$HOME/mimi" --out audio.wav
 ```
 
 `audio.wav` lands in the example folder. A CUDA-capable machine with
@@ -78,13 +80,13 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 
 ## Configuration
 
-Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage sampling and resource defaults live in `deploy/*.yaml`, read from `Path.cwd()` at runtime.
+Pipeline topology lives in code (`nanovllm_omni/config/registry.py`); per-stage sampling and resource defaults live in `nanovllm_omni/deploy/*.yaml`, shipped in the wheel and resolved from the package directory at runtime.
 
 ## Repository layout
 
 ```
 nanovllm_omni/  # package implementation (config layer in nanovllm_omni/config/)
-deploy/         # per-family sampling/resource defaults
+    deploy/     # per-family sampling/resource defaults (shipped in the wheel)
 examples/
     offline_inference/
         minimind_o/   # Python-seam audio smoke (single + batched)

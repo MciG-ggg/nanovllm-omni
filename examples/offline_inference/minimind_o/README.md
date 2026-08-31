@@ -60,7 +60,7 @@ on two prompts and asserts:
   `deploy/minimind_omni.yaml`. Override the deploy file with
   `--deploy-config /path/to/your.yaml`.
 - The shell wrappers just `cd` to the example folder and run the
-  Python entrypoint, so `deploy/minimind_omni.yaml` resolves relative
-  to the repository root.
+  Python entrypoint; `deploy/minimind_omni.yaml` is resolved by the
+  engine from the package's `deploy/` directory.
 - See `examples/online_serving/minimind_o/` for the HTTP `Omni`
   entrypoint and a curl-based chat client.

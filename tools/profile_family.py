@@ -18,7 +18,7 @@ Flags:
     --trace          export the chrome trace (can be hundreds of MB).
     --prompt TEXT    override default prompt/instruction.
     --device DEV     torch device (default: cuda when available).
-    --deploy PATH    deploy yaml; default <repo>/deploy/<family>.yaml.
+    --deploy PATH    deploy yaml; default <package>/deploy/<family>.yaml.
 """
 
 from __future__ import annotations
@@ -42,7 +42,9 @@ def _repo_root() -> Path:
 def _resolve_deploy(family: str, explicit: str | None) -> str | None:
     if explicit:
         return explicit
-    path = _repo_root() / "deploy" / f"{family}.yaml"
+    import nanovllm_omni
+
+    path = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / f"{family}.yaml"
     return str(path) if path.exists() else None
 
 

@@ -219,7 +219,11 @@ class OmniBase:
                 self.engine_args.extra.get("deploy_config_path") if self.engine_args.extra else None
             )
             if deploy_path is None:
-                deploy_path = Path.cwd() / "deploy" / pipeline.default_deploy_config_name
+                deploy_path = (
+                    Path(__file__).resolve().parent.parent
+                    / "deploy"
+                    / pipeline.default_deploy_config_name
+                )
             else:
                 deploy_path = Path(deploy_path)
             self._deploy = load_deploy_config(deploy_path)

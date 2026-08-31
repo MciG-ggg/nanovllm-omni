@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nanovllm_omni
 from nanovllm_omni.config import resolve_pipeline_config
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import StageExecutionType
@@ -13,7 +14,7 @@ from nanovllm_omni.models.smolvla import stage as smolvla_stage
 from nanovllm_omni.outputs import ActionArtifact, OmniRequestOutput
 
 REPO = Path(__file__).resolve().parents[1]
-DEPLOY = REPO / "deploy" / "smolvla.yaml"
+DEPLOY = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / "smolvla.yaml"
 
 
 class _Arr:

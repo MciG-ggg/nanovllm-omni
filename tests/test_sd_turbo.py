@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import nanovllm_omni
 from nanovllm_omni.config import resolve_pipeline_config
 from nanovllm_omni.config.params import OmniEngineArgs
 from nanovllm_omni.config.registry import StageExecutionType
@@ -14,7 +15,7 @@ from nanovllm_omni.models.sd_turbo import stage as sd_turbo_stage
 from nanovllm_omni.outputs import OmniRequestOutput
 
 REPO = Path(__file__).resolve().parents[1]
-DEPLOY = REPO / "deploy" / "sd_turbo.yaml"
+DEPLOY = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / "sd_turbo.yaml"
 
 
 def test_pipeline_registry_resolves_sd_turbo():

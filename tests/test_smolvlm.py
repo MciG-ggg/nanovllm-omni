@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import nanovllm_omni
 from nanovllm_omni.config import resolve_pipeline_config
 from nanovllm_omni.config.params import OmniEngineArgs
 from nanovllm_omni.config.registry import StageExecutionType
 from nanovllm_omni.models.smolvlm import stage as smolvlm_stage
 
 REPO = Path(__file__).resolve().parents[1]
-DEPLOY = REPO / "deploy" / "smolvlm.yaml"
+DEPLOY = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / "smolvlm.yaml"
 
 
 def test_pipeline_registry_resolves_smolvlm():

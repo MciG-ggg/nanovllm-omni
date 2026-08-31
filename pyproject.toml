@@ -7,7 +7,7 @@ name = "nanovllm-omni"
 version = "0.1.0"
 description = "Smallest vllm-omni-compatible pipeline runtime, performance-engineered for MiniMind-O with a continuous-batching thinker runner and unified omni-modal I/O contract demos."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
     { name = "nanovllm-omni contributors" },
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -94,12 +93,17 @@ packages = [
     "nanovllm_omni.entrypoints",
     "nanovllm_omni.models",
     "nanovllm_omni.models.minimind_omni",
+    "nanovllm_omni.models.sd_turbo",
     "nanovllm_omni.models.smolvla",
+    "nanovllm_omni.models.smolvlm",
+    "nanovllm_omni.optim",
+    "nanovllm_omni.optim.bench",
     "nanovllm_omni.serving",
+
 ]
 
 [tool.setuptools.package-data]
-# none: deploy/*.yaml is read from Path.cwd() at runtime, not shipped in the wheel.
+nanovllm_omni = ["deploy/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

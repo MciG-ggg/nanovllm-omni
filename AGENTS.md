@@ -52,6 +52,8 @@
 
 Alignment means consumer-visible compatibility, not identical internals. A difference is acceptable only when it is required by this project's explicit scope (for example, local single-process execution on small models and stdlib serving); document such differences in tests and docs rather than claiming unsupported parity.
 
+已知在范围内差异:内建 registry 的 `PipelineConfig` 以 `name` 为注册键(参考 vllm-omni 以 `model_type` 为键),且同名重复注册静默覆盖(参考为 validate+warn)。`name` 键是为内部一致性做的有意选择,不承诺参考级告警行为;实际行为由 `tests/test_registry_resolver.py` 的 drift-lock 测试锁定。
+
 ## 命名约定
 
 函数/变量/字段名:全词优先、`num_*` 优先。同一语义只保留一个拼写:

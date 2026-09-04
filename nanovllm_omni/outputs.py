@@ -3,23 +3,10 @@ import re
 import wave
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from enum import Flag, StrEnum, auto
-from typing import Any, TypeVar
+from enum import Flag, StrEnum, auto, nonmember
+from typing import Any, ClassVar, TypeVar
 
 _T = TypeVar("_T")
-
-
-_MODALITY_ALIASES: dict[str, str] = {
-    "speech": "audio",
-    "images": "image",
-    "latents": "latent",
-    "wav": "audio",
-    "waveform": "audio",
-    "pixel_values": "image",
-    "pixels": "image",
-    "token_ids": "text",
-    "tokens": "text",
-}
 
 
 class OutputModalityNames(StrEnum):
@@ -43,6 +30,26 @@ class OutputModality(Flag):
     AUDIO = auto()
     LATENT = auto()
 
+    # Aliases for free-text modality strings. Kept on the class (not at
+    # module scope) so the table travels with OutputModality if it is
+    # ever split into its own submodule -- module-level constants would
+    # re-introduce an import-order cycle (modality enum -> alias dict in
+    # parent module -> modality enum). ``nonmember`` (Python 3.11+) keeps
+    # ``Flag`` from treating the dict as an enum bit.
+    _ALIASES: ClassVar[dict[str, str]] = nonmember(
+        {
+            "speech": "audio",
+            "images": "image",
+            "latents": "latent",
+            "wav": "audio",
+            "waveform": "audio",
+            "pixel_values": "image",
+            "pixels": "image",
+            "token_ids": "text",
+            "tokens": "text",
+        }
+    )
+
     @classmethod
     def from_string(cls, s: str | None) -> "OutputModality":
         """Parse a free-text modality string, incl. aliases and ``+`` / ``,``.
@@ -54,7 +61,7 @@ class OutputModality(Flag):
         parts = [p.strip().lower() for p in re.split(r"[+,]", s.strip())]
         result = cls(0)
         for p in parts:
-            p = _MODALITY_ALIASES.get(p, p)
+            p = cls._ALIASES.get(p, p)
             try:
                 result |= cls[p.upper()]
             except KeyError:

@@ -1,11 +1,32 @@
 # nanovllm-omni
 
+[![CI](https://github.com/MciG-ggg/nanovllm-omni/actions/workflows/ci.yml/badge.svg)](https://github.com/MciG-ggg/nanovllm-omni/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](.)
+[![Models](https://img.shields.io/badge/models-4-green.svg)](.)
+
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
 - ⚡ **Sub-340ms p50 on RTX 3050 laptop GPU** — fused QKV/gate-up projections, fused RMSNorm, fused RoPE (in `nanovllm_omni/models/minimind_omni/attention.py`); pre-allocated KV buffer; SDPA decode with `is_causal=True`
 - 🔁 **StagePool pattern demo** — `num_replicas ≥ 2`, RoundRobin LB, `(stage_id, replica_id)` per output
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
 A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
+
+![SD-Turbo single-step image generation on RTX 3050 (512×512)](docs/images/sd_turbo_sample.png)
+
+## How this differs from `nano-vllm` and `nanovllm`
+
+There are two other Python projects with `nano-vllm`-style names; they are
+**not** the same thing:
+
+| Project | Modalities | Goal |
+|---|---|---|
+| `nanovllm-omni` (this repo) | audio / image / action / text | aligned omni-modal runtime that mirrors vllm-omni's consumer-visible API on a single 4 GB card |
+| [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) | text only | minimal educational re-implementation of vLLM's text path |
+| [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) | text only | another educational text-only vLLM reimplementation |
+
+If you arrived here searching for a *text-only* mini-vLLM, the two repos
+above are what you want.
 
 ## Supported models
 

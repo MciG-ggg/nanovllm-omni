@@ -16,6 +16,15 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Ensure uv-installed tools (ruff, black) are reachable even when the hook
+# runs from a subprocess that doesn't inherit the user's interactive PATH
+# (e.g. `pi-autoresearch log` spawns git commit in a stripped-down env).
+# uv tool install places binaries at $HOME/.local/bin.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
 # Pick the project's local venv tools when available so we don't depend
 # on a globally-installed ruff / black.
 RUFF=".venv/bin/ruff"
@@ -35,4 +44,28 @@ echo "[pre-commit] black"
 # silently breaking Omni / AsyncOmni / etc. users. AGENTS.md lists this
 # as part of the CI-equivalent checks.
 echo "[pre-commit] public API import"
-python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
+# Resolve a usable Python >= 3.10: prefer project venv, then `uv run`
+# (uv resolves the project's pinned interpreter), then a few common
+# Homebrew/Linuxbrew paths. `/usr/bin/python3` on macOS is Xcode's
+# 3.9 and lacks `typing.TypeAlias`, so we never fall back to it blindly.
+run_python() {
+  if [[ -x ".venv/bin/python" ]]; then
+    .venv/bin/python "$@"
+  elif command -v uv >/dev/null 2>&1; then
+    uv run python "$@"
+  elif [[ -x "/opt/homebrew/bin/python3.14" ]]; then
+    /opt/homebrew/bin/python3.14 "$@"
+  elif [[ -x "/opt/homebrew/bin/python3.13" ]]; then
+    /opt/homebrew/bin/python3.13 "$@"
+  elif [[ -x "/opt/homebrew/bin/python3.12" ]]; then
+    /opt/homebrew/bin/python3.12 "$@"
+  elif [[ -x "/opt/homebrew/bin/python3.11" ]]; then
+    /opt/homebrew/bin/python3.11 "$@"
+  elif [[ -x "/opt/homebrew/bin/python3.10" ]]; then
+    /opt/homebrew/bin/python3.10 "$@"
+  else
+    echo "ERROR: no usable Python >=3.10 found (need typing.TypeAlias)" >&2
+    return 1
+  fi
+}
+run_python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"

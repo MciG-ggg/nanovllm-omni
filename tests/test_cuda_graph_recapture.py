@@ -93,9 +93,9 @@ def test_prefill_records_length_and_resets() -> None:
     # records the prompt length (defect #5 re-capture key)
     assert "_prefill_len" in src
     # resets buffers so a new prompt starts from a clean KV state
-    assert "_reset_buffers()" in src
-    # buffer reset semantics: _reset_buffers must zero _kv_pos per attn
-    reset_src = inspect.getsource(cg.CudaGraphDecoder._reset_buffers)
+    assert "_reset_pos()" in src
+    # buffer reset semantics: _reset_pos must zero _kv_pos per attn
+    reset_src = inspect.getsource(cg.CudaGraphDecoder._reset_pos)
     assert "_kv_pos = 0" in reset_src
 
 

@@ -86,7 +86,7 @@ def test_enable_cuda_graph_returns_none_without_cuda() -> None:
     model = _StubModel()
     dec = cg.enable_cuda_graph(model)
     assert dec is None
-    assert not hasattr(model, cg._ENABLE_MARKER)
+    assert not hasattr(model, "_nanovllm_graph_decoder")
 
 
 def test_patched_forward_neutralizes_host_reads_without_rebind() -> None:
@@ -94,7 +94,7 @@ def test_patched_forward_neutralizes_host_reads_without_rebind() -> None:
     forward must be untouched (no class-level rebind)."""
     cls = type(_StubModel())
     src = inspect_source(cls)
-    patched = cg._patched_forward(_StubModel(), cls, src)
+    patched = cg._patched_forward(cls, src)
     assert patched is not None
     # calling the patched copy on a stub whose freq read would be dead under
     # the neutralization (freqs_cos[0,0] is 1) -- no RuntimeError raised.
@@ -110,7 +110,7 @@ def test_patched_forward_preserves_arithmetic() -> None:
     identically (the checks are dead-code'd, no arithmetic change)."""
     cls = type(_StubModel())
     src = inspect_source(cls)
-    patched = cg._patched_forward(_StubModel(), cls, src)
+    patched = cg._patched_forward(cls, src)
     assert patched is not None
 
     model = _StubModel()
@@ -136,7 +136,7 @@ def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     assert len(marks) == 1, len(marks)
 
     nid = torch.ones(1, 1, dtype=torch.long)
-    inp = cg.CudaGraphDecoder._decode_input(nid, audio_pad=2051)
+    inp = cg._build_omni_input(nid, audio_pad=2051)
     assert tuple(inp.shape) == (1, 9, 1), tuple(inp.shape)
     assert int(inp[0, 8, 0].item()) == 1  # text row carries the token
 

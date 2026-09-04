@@ -29,7 +29,6 @@ from __future__ import annotations
 import inspect
 import logging
 import textwrap
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -44,10 +43,8 @@ from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
 
 _log = logging.getLogger(__name__)
 
-_ENABLE_MARKER = "_nanovllm_cuda_graph"
 
-
-def _patched_forward(model: Any, cls: Any, src: str) -> Any:
+def _patched_forward(cls: Any, src: str) -> Any:
     """Compile a copy of cls.forward with the two freqs `[0,0]` host-read
     checks neutralized (proven capture blockers, §13/§18). Returns a plain
     function `fwd(model, **kwargs)` — never rebinds the class."""
@@ -64,66 +61,62 @@ def _patched_forward(model: Any, cls: Any, src: str) -> Any:
     return namespace["forward"]
 
 
-@dataclass
-class _GraphStep:
-    graph: Any
-    input: Any
-    output: Any
+def _build_omni_input(row: torch.Tensor, audio_pad: int) -> torch.Tensor:
+    """Build the [1, 9, X] joint text+audio input that stream_generate's
+    first forward expects (8 audio-pad rows + 1 token row).
+
+    Used twice:
+      - decode step (X=1): ``row`` is shape ``[1, 1]`` (the next token).
+      - prefill (X=seq): ``row`` is shape ``[1, seq]`` (the text prompt).
+
+    Fact #3: this 8+1 layout is load-bearing for the bit-exact contract —
+    without the audio rows, decode logits diverge from index 1.
+    """
+    width = row.shape[1]
+    # 8 audio-pad rows + 1 token row = the stream_generate joint layout
+    buf = torch.full((1, 8, width), audio_pad, dtype=torch.long, device=row.device)
+    return torch.cat((buf, row.unsqueeze(1)), dim=1)
 
 
 class CudaGraphDecoder:
     """Capture-once / replay-many CUDA-Graphed decoder over the buffer-ized
-    model's per-instance KV buffers."""
+    model's per-instance KV buffers.
+
+    Each ``self.steps[k]`` is ``(graph, static_input, output_output)``: the
+    captured CUDAGraph, the input tensor pinned to the capture-time address,
+    and the output reference held by the graph.
+    """
 
     def __init__(
         self,
         model: Any,
         fwd: Any,
         n_steps: int,
-        *,
-        temperature: float = DEFAULT_TEXT_TEMPERATURE,
-        top_p: float = DEFAULT_TEXT_TOP_P,
-        rp: float = 1.0,
     ) -> None:
         self.model = model
         self.fwd = fwd
         self.n_steps = n_steps
-        self.temperature = temperature
-        self.top_p = top_p
-        self.rp = rp
+        self.temperature = DEFAULT_TEXT_TEMPERATURE
+        self.top_p = DEFAULT_TEXT_TOP_P
+        # rp = repetition_penalty (1.0 = no penalty; matches SamplingParams.repetition_penalty).
+        self.rp = 1.0
         self.audio_pad = int(model.config.audio_pad_token)
         self.attns = [m for m in model.modules() if getattr(m, "_nanovllm_kv_buffer", False)]
-        self.steps: list[_GraphStep] = []
+        self.steps: list[tuple[Any, torch.Tensor, Any]] = []
         self._captured = False
         self._captured_len = -1
         self._prefill_len = -1
         self._last_input_ids = None
 
-    # -- stateless helpers ------------------------------------------------
-    @staticmethod
-    def _decode_input(nid: torch.Tensor, audio_pad: int) -> torch.Tensor:
-        buf = torch.full((1, 8, 1), audio_pad, dtype=torch.long, device=nid.device)
-        return torch.cat((buf, nid.unsqueeze(-1)), dim=1)
-
-    @staticmethod
-    def _prefill_input(input_ids: torch.Tensor, audio_pad: int) -> torch.Tensor:
-        """Production prefill input: [1, 9, seq] = 8 audio-pad rows + the text
-        row, matching stream_generate's first forward (fact #3: the KV state
-        must include the audio rows or decode logits diverge from index 1)."""
-        buf = torch.full(
-            (1, 8, input_ids.shape[1]), audio_pad, dtype=torch.long, device=input_ids.device
-        )
-        return torch.cat((buf, input_ids.unsqueeze(1)), dim=1)
-
-    def _reset_buffers(self) -> None:
+    def _reset_pos(self) -> None:
         for a in self.attns:
             a._kv_pos = 0
 
-    def _clear_buffers(self) -> None:
+    def _zero_kv_contents(self) -> None:
         """Zero the full per-attention KV buffer. Each generate must start a
         fresh KV session (like a new production conversation): stale KV from
-        a prior prompt must never survive into the current one. Graced with
-        in-place zero; keeps buffer addresses stable for the captured graphs."""
+        a prior prompt must never survive into the current one. In-place zero
+        keeps buffer addresses stable for the captured graphs."""
         for a in self.attns:
             if hasattr(a, "_kv_past_key"):
                 a._kv_past_key.zero_()
@@ -136,8 +129,8 @@ class CudaGraphDecoder:
         text row's logits."""
         self._prefill_len = input_ids.shape[1]
         self._last_input_ids = input_ids
-        self._reset_buffers()
-        prefill_in = self._prefill_input(input_ids, self.audio_pad)
+        self._reset_pos()
+        prefill_in = _build_omni_input(input_ids, self.audio_pad)
         with torch.no_grad():
             out = self.fwd(self.model, input_ids=prefill_in, past_key_values=None, use_cache=True)
         # text row is the last channel: logits[0, -1] is the last text position
@@ -154,7 +147,7 @@ class CudaGraphDecoder:
         """
         return not (self._captured and self._captured_len == self._prefill_len)
 
-    def _capture(self, nid: torch.Tensor) -> None:
+    def _capture(self, next_token: torch.Tensor) -> None:
         """Capture one graph per AR step over the (prefill-loaded) KV buffers.
 
         Defect #5: re-capture when the prefill length changed since the last
@@ -164,29 +157,31 @@ class CudaGraphDecoder:
         """
         if not self._needs_recapture():
             return
-        # prompt length changed -> stale per-step graphs are unsafe. The
+        # Prompt length changed -> stale per-step graphs are unsafe. The
         # buffer still holds the PREVIOUS prompt's KV in [min_len : max_len]
         # where the new prefill didn't overwrite. Clear it here (re-capture
         # branch only, same-length reuse stays un-cleared) then re-prefill the
         # current prompt so the rebuilt graphs start from clean KV.
         self.steps = []
         self._captured = False
-        self._clear_buffers()
+        self._zero_kv_contents()
         self._prefill(self._last_input_ids)
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
+        # Warmup on the side stream FIRST so cuBLAS/cuDNN workspace picks an
+        # algorithm and the capture-context fwd only records (no JIT/alloc).
+        # Both warmup and capture live on the same stream so the captured
+        # kernels inherit the side stream's bindings. Moving the warmup INSIDE
+        # torch.cuda.graph(g) breaks capture (allocator cache pollution).
         with torch.cuda.stream(side):
             for _ in range(self.n_steps):
-                inp = self._decode_input(nid, self.audio_pad).clone()
+                inp = _build_omni_input(next_token, self.audio_pad).clone()
                 with torch.no_grad():
                     self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
                 g = torch.cuda.CUDAGraph()
-                holder: dict[str, Any] = {}
                 with torch.cuda.graph(g), torch.no_grad():
-                    holder["out"] = self.fwd(
-                        self.model, input_ids=inp, past_key_values=None, use_cache=True
-                    )
-                self.steps.append(_GraphStep(graph=g, input=inp, output=holder["out"]))
+                    out = self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
+                self.steps.append((g, inp, out))
         torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
         self._captured = True
@@ -227,15 +222,14 @@ class CudaGraphDecoder:
         text_codes = [tok]
         audio_codes = [[self.audio_pad] for _ in range(num_layers)]
         history = history + [tok]
-        placeholder = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
-        self._capture(placeholder)
-        cur = placeholder
+        next_token = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
+        self._capture(next_token)
         for k in range(self.n_steps - 1):
             step_index = k + 1  # text token index at this decode step
             audio_step = step_index - 1  # audio lags text by one position
-            self.steps[k].input.copy_(self._decode_input(cur, self.audio_pad))
-            self.steps[k].graph.replay()
-            out = self.steps[k].output
+            g, inp, out = self.steps[k]
+            inp.copy_(_build_omni_input(next_token, self.audio_pad))
+            g.replay()
             tok = sample_text_token(
                 out.logits[0, -1],
                 history_ids=history,
@@ -259,7 +253,7 @@ class CudaGraphDecoder:
                     audio_history[layer].append(code)
                 else:
                     audio_codes[layer].append(self.audio_pad)
-            cur = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
+            next_token = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
         if return_audio:
             return text_codes, audio_codes
         return text_codes
@@ -270,9 +264,17 @@ def enable_cuda_graph(
 ) -> CudaGraphDecoder | None:
     """Install fixed-KV-buffer attention + return a CUDA-Graphed decoder.
 
-    Returns ``None`` (not enabled) when CUDA is unavailable or the model
-    doesn't carry the MiniMind-O freqs host-reads this integration targets.
-    Opt-in: does not touch the bundle default path.
+    Defaults:
+      - ``n_steps=16``: the e2e acceptance figure from report §14/§16.
+        Pass a smaller number to capture fewer per-step graphs (less
+        cold-start cost; the decoder emits exactly that many decode tokens).
+      - ``max_len=None``: read ``model.config.max_position_embeddings``
+        via ``enable_fixed_kv_buffer``; pass an int to override the buffer.
+
+    Returns ``None`` (not enabled) when CUDA is unavailable, the model
+    doesn't carry the MiniMind-O freqs host-reads this integration targets,
+    or no attention instance bound a fixed KV buffer. Opt-in: does not
+    touch the bundle default path.
     """
     if not torch.cuda.is_available():
         _log.info("enable_cuda_graph: no CUDA; keeping eager path")
@@ -280,8 +282,9 @@ def enable_cuda_graph(
     if not hasattr(model.config, "audio_pad_token"):
         _log.warning("enable_cuda_graph: no audio_pad_token; skipping")
         return None
-    if getattr(model, _ENABLE_MARKER, False):
-        return model._nanovllm_graph_decoder
+    existing = getattr(model, "_nanovllm_graph_decoder", None)
+    if existing is not None:
+        return existing
 
     cls = type(model)
     try:
@@ -289,18 +292,16 @@ def enable_cuda_graph(
     except (OSError, TypeError) as exc:
         _log.warning("enable_cuda_graph: cannot read forward source: %s", exc)
         return None
-    fwd = _patched_forward(model, cls, src)
+    fwd = _patched_forward(cls, src)
     if fwd is None:
         return None
 
     enable_fixed_kv_buffer(model, max_len)
-    enabled = [m for m in model.modules() if getattr(m, "_nanovllm_kv_buffer", False)]
-    if not enabled:
+    decoder = CudaGraphDecoder(model=model, fwd=fwd, n_steps=n_steps)
+    if not decoder.attns:
         _log.warning("enable_cuda_graph: no attention instances buffer-ized; skipping")
         return None
-    _log.info("enable_cuda_graph: %d attention instances buffer-ized", len(enabled))
+    _log.info("enable_cuda_graph: %d attention instances buffer-ized", len(decoder.attns))
 
-    decoder = CudaGraphDecoder(model=model, fwd=fwd, n_steps=n_steps)
-    setattr(model, _ENABLE_MARKER, True)
     model._nanovllm_graph_decoder = decoder
     return decoder

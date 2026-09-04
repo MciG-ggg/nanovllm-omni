@@ -197,6 +197,15 @@ def register_pipeline(
     under ``pipeline.name`` plus its ``registration_handles``; a callable
     resolver needs an explicit ``model_type`` (it can resolve to different
     pipelines depending on ``hf_config``).
+
+    .. warning::
+        Same-name (and same-``registration_handles``) re-registration
+        **silently overrides** the prior entry. This is a deliberate
+        in-scope divergence from vllm-omni, which raises on duplicate
+        registration. The override is locked by
+        ``tests/test_registry_resolver.py``; if you need a warn-or-raise
+        policy, read the "Definition of aligned" section of ``AGENTS.md``
+        first.
     """
     if callable(pipeline):
         if model_type is None:

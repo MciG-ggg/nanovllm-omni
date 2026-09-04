@@ -198,6 +198,16 @@ class OmniRequestOutput:
     ``multimodal_output`` carries the modality payload (audio / image / actions);
     ``custom_output`` is a free-form dict for non-modal extras. ``final_output_type``
     records which terminal stage emitted this payload.
+
+    .. note::
+        The backing field is named ``_custom_output`` (single-underscore
+        prefix) and is exposed through a ``custom_output`` property +
+        setter pair. ``to_dict()`` serializes the property as
+        ``custom_output`` in the JSON envelope. This is the intended
+        public seam — read or assign ``output.custom_output`` and never
+        touch ``_custom_output`` directly. Renaming the field would
+        break the JSON wire format, which is a public-aligned symbol
+        (see AGENTS.md "Alignment rules").
     """
 
     request_id: str = ""

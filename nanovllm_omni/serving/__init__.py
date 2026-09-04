@@ -1,10 +1,12 @@
 """Gradio serving layer.
 
-app.py  -- entry point; lazy-loads models per tab (HF Spaces friendly)
-chat.py -- AR chat tab
-image.py -- text-to-image + image-edit tabs
-vla.py -- VLA tab
-audio.py -- audio tab (MiniMind-Omni)
+app.py   -- entry point; lazy-loads models per tab (HF Spaces friendly)
+audio.py -- MiniMind-O TTS tab
+chat.py  -- SmolVLM-500M chat tab
+image.py -- SD-Turbo text-to-image tab
+vla.py   -- SmolVLA action-chunk tab
 """
 
-__all__ = []
+from .app import build_demo, main
+
+__all__ = ["build_demo", "main"]

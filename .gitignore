@@ -92,6 +92,8 @@ docs/site/
 *.flac
 *.ogg
 *.m4a
+# README Gallery sample outputs are checked in.
+!docs/gallery/*.wav
 
 # Local design notes / specs
 docs/design-grill.md

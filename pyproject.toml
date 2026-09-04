@@ -40,6 +40,13 @@ smolvla = [
     "huggingface_hub>=0.20",
     "numpy>=1.24",
 ]
+# Gradio UI demo layer (`nanovllm_omni.serving.app`). UI tool, NOT a server
+# framework -- leaves the stdlib HTTP adapter in `nanovllm_omni.serving.openai_adapter`
+# untouched. Install alongside a model-family extra (e.g. `.[minimind,gradio]`)
+# to actually run a tab; `gradio` alone only enables the demo launcher.
+gradio = [
+    "gradio>=4.0",
+]
 # Real-weight MiniMind-O path: required for
 # examples/offline_inference/minimind_o/{end2end,batched}.py and the
 # `pytest -m smoke` suite. The bundle loader is offline-first; weights
@@ -71,6 +78,12 @@ minimind = [
     "funasr>=1.0",
     # int8 stretch for TK-015 -- optional; install explicitly if you want it.
     "bitsandbytes>=0.43",
+]
+# Mirrors `[project.optional-dependencies].gradio` so `uv sync` picks it
+# up if wired into default-groups. Off by default; the UI launcher is an
+# opt-in convenience.
+gradio = [
+    "gradio>=4.0",
 ]
 
 [project.urls]

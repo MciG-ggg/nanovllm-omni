@@ -128,6 +128,7 @@ def run_one(
     temperature: float = 0.7,
     top_p: float = 0.9,
     open_thinking: bool = False,
+    use_cuda_graph: bool = False,
     run_idx: int = 0,
     max_tokens_tolerance: int = 4,
 ) -> RunResult:
@@ -187,6 +188,8 @@ def run_one(
             top_p=top_p,
             eos_token_id=eos_token_id,
             open_thinking=open_thinking,
+            use_cuda_graph=use_cuda_graph,
+            seed=seed,
         )
         t_generate_ms = _ms_since(t0)
         if gen_end is not None:

@@ -25,10 +25,10 @@ BLACK=".venv/bin/black"
 
 # 1. Lint + format (full repo, fast on Python source).
 echo "[pre-commit] ruff"
-"$RUFF" check nanovllm_omni/ tests/
+"$RUFF" check nanovllm_omni/ tests/ tools/
 
 echo "[pre-commit] black"
-"$BLACK" --check nanovllm_omni/ tests/
+"$BLACK" --check nanovllm_omni/ tests/ tools/
 
 # 2. Public-API import smoke. This is fast (a few imports) but catches
 # the most common regression class: a renamed or removed public symbol

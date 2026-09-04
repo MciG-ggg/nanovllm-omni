@@ -56,6 +56,7 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
+        "use_cuda_graph": args.use_cuda_graph,
         "seed": args.seed,
     }
 
@@ -229,6 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--seed", type=int, default=42)
     common.add_argument(
         "--open-thinking", action="store_true", help="Pass open_thinking=True to model.generate"
+    )
+    common.add_argument(
+        "--use-cuda-graph",
+        action="store_true",
+        help="Route decode through the CUDA-Graph fast path (run_generate "
+        "use_cuda_graph=True; opt-in, CUDA-only).",
     )
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")

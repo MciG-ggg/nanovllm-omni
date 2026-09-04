@@ -29,10 +29,10 @@ PYTHON=".venv/bin/python"
 
 # 1. Lint + format.
 echo "[pre-push] ruff"
-"$RUFF" check nanovllm_omni/ tests/
+"$RUFF" check nanovllm_omni/ tests/ tools/
 
 echo "[pre-push] black"
-"$BLACK" --check nanovllm_omni/ tests/
+"$BLACK" --check nanovllm_omni/ tests/ tools/
 
 # 2. Public-API import smoke. Catches the most common regression
 # class: a renamed or removed public symbol silently breaking
@@ -43,7 +43,7 @@ echo "[pre-push] public API import"
 # 3. compileall -- catches stale imports after deletions or API
 # migrations that ruff/pytest can miss on partial runs.
 echo "[pre-push] compileall"
-"$PYTHON" -m compileall -q nanovllm_omni
+"$PYTHON" -m compileall -q nanovllm_omni tools
 
 # 4. Non-smoke test suite. Smoke tests need real model weights + GPU
 # and are excluded by `-m "not smoke"` (matches the CI workflow).

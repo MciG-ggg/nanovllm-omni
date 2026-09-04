@@ -163,6 +163,11 @@ class DeployConfig:
 
     stages: tuple[DeployStageConfig, ...] = ()
     max_batch: int = 2
+    #: Route generate through the CUDA-Graph fixed-KV-buffer decoder by
+    #: default at deploy time (report §40: 3.1-3.7x generate, determinism
+    #: + robustness verified). Deploy/runtime knob — the library Python
+    #: default for generate_audio() stays False; serving reads this flag.
+    use_cuda_graph: bool = True
 
 
 OMNI_PIPELINES: dict[str, PipelineConfig | Callable[[Any], PipelineConfig | None]] = {}
@@ -239,6 +244,7 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
             for s in data.get("stages", [])
         ),
         max_batch=max_batch,
+        use_cuda_graph=bool(data.get("use_cuda_graph", True)),
     )
 
 

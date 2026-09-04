@@ -40,6 +40,11 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id
     bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    # deploy-layer default: route served requests through the CUDA-Graph
+    # fast path when the yaml enables it (report §44). generate_audio(None)
+    # resolves from bundle.use_cuda_graph.
+    if bundle is not None:
+        bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
 
     def thinker_forward(payload: Any, sampling: Any) -> Any:
         prompt = payload if isinstance(payload, str) else payload.get("prompt", "")
@@ -142,6 +147,8 @@ def run_generate(
     open_thinking: bool,
     audio_inputs: Any = None,
     audio_lens: Any = None,
+    use_cuda_graph: bool = False,
+    seed: int | None = None,
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
@@ -149,17 +156,49 @@ def run_generate(
     codec stage consumes. Labeled ``generate`` for the benchmark harness.
     ``audio_inputs`` / ``audio_lens`` (when set) ride through to the batched
     runner's prefill so the thinker sees user speech (engine-native audio in).
+
+    ``use_cuda_graph=True`` (opt-in, default off — public path unchanged)
+    routes text+audio decode through the CUDA-Graph fixed-KV-buffer decoder
+    (``optim.cuda_graph``). It returns the same list-of-8-token frames; only
+    the forward path differs. Falls back to eager ``stream_generate`` when
+    CUDA is unavailable or the model isn't capture-compatible.
+
+    ``seed`` (default None) controls the sampling RNG for the CUDA-Graph
+    path. When None, the caller's current process seed
+    (``torch.initial_seed()``) is used — same determinism contract as the
+    eager path, whose caller seeds ``torch.manual_seed``. Previously the
+    graph path hardcoded 42 and ignored the caller's seed (determinism-
+    parity defect); now it honors it.
     """
     import torch
 
-    from .generation import stream_generate
-
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
+        if use_cuda_graph and all(
+            hasattr(model, name)
+            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+        ):
+            # Graph fast path: joint text+audio decode, frames = transpose of
+            # the 8 audio channels (Mimi codebook frames, codec-stage format).
+            # Honor the caller's seed (fall back to the process RNG) so the
+            # graph path matches eager determinism for a given manual_seed.
+            from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
+
+            decoder = enable_cuda_graph(model, n_steps=max_new_tokens)
+            if decoder is not None:
+                call_seed = seed if seed is not None else int(torch.initial_seed())
+                _, audio_codes = decoder.generate_tokens(
+                    input_ids, seed=call_seed, return_audio=True
+                )
+                num_frames = len(audio_codes[0])
+                frames = [[audio_codes[ch][t] for ch in range(8)] for t in range(num_frames)]
+                return frames
         if all(
             hasattr(model, name)
             for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
         ):
+            from .generation import stream_generate
+
             stream = stream_generate(
                 model,
                 input_ids,
@@ -206,14 +245,24 @@ def generate_audio(
     audio_inputs: Any = None,
     audio_lens: Any = None,
     audio_markers: int = 0,
+    use_cuda_graph: bool | None = None,
 ) -> AudioPayload:
     """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``.
 
     Public entry point used by both the Omni entrypoint and the bench
     harness. The four helper calls happen inside a single ``no_grad`` block
     so CUDA memory peaks are not doubled by intermediate allocations.
+
+    ``use_cuda_graph`` (default None) routes decode through the CUDA-Graph
+    fixed-KV-buffer decoder (report §40: 3.1-3.7x generate; determinism +
+    robustness verified). None resolves from ``bundle.use_cuda_graph``
+    (set by the deploy layer, deploy/minimind_omni.yaml), else False -- so
+    the library call default stays eager while deployment opts in via yaml.
     """
     import torch
+
+    if use_cuda_graph is None:
+        use_cuda_graph = bool(getattr(bundle, "use_cuda_graph", False))
 
     from .code2wav import decode_audio, encode_wav
 
@@ -239,6 +288,7 @@ def generate_audio(
             open_thinking=open_thinking,
             audio_inputs=audio_inputs,
             audio_lens=audio_lens,
+            use_cuda_graph=use_cuda_graph,
         )
         if not frames:
             return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)

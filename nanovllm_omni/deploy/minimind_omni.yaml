@@ -1,4 +1,5 @@
 max_batch: 2
+use_cuda_graph: true
 stages:
   - name: thinker
     default_sampling_params:

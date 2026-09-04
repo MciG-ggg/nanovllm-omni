@@ -19,9 +19,10 @@ from typing import Any
 from nanovllm_omni import Omni
 from nanovllm_omni.config.params import SamplingParams
 
-# Repo root = parents[3] from examples/offline_inference/sd_turbo/run.py.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEPLOY_YAML = _REPO_ROOT / "deploy" / "sd_turbo.yaml"
+# Deploy YAMLs ship inside the installed package at
+# ``nanovllm_omni/deploy/``; resolve via the package's __file__ so the path
+# works whether the script runs from a wheel install or a source clone.
+_DEPLOY_YAML = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / "sd_turbo.yaml"
 
 
 def main() -> None:
@@ -48,9 +49,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    extra: dict[str, Any] = {"deploy_config_path": str(_DEPLOY_YAML)}
-    if not args.allow_download:
-        extra["allow_hf_download"] = False
+    extra: dict[str, Any] = {
+        "deploy_config_path": str(_DEPLOY_YAML),
+        "allow_hf_download": bool(args.allow_download),
+    }
     omni = Omni(args.model, device=args.device, extra=extra)
     sp_extra: dict[str, Any] = {"num_inference_steps": args.steps}
     if args.guidance is not None:

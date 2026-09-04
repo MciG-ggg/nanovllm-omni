@@ -20,13 +20,17 @@ from typing import Any
 
 from PIL import Image
 
+import nanovllm_omni
 from nanovllm_omni import Omni
 from nanovllm_omni.config.params import SamplingParams
 
-# Repo root = parents[3] from examples/offline_inference/smolvlm/run.py.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEPLOY_YAML = _REPO_ROOT / "deploy" / "smolvlm.yaml"
-_DEFAULT_MODEL = str(_REPO_ROOT / "pretrained" / "SmolVLM-500M-Instruct")
+# Deploy YAMLs ship inside the installed package at
+# ``nanovllm_omni/deploy/``; resolve via the package's __file__ so the path
+# works whether the script runs from a wheel install or a source clone.
+_DEPLOY_YAML = Path(nanovllm_omni.__file__).resolve().parent / "deploy" / "smolvlm.yaml"
+# Default to the HF repo id so ``HF_HUB_OFFLINE=1`` resolves the snapshot
+# from ``~/.cache/huggingface/hub/models--HuggingFaceTB--SmolVLM-500M-Instruct/``.
+_DEFAULT_MODEL = "HuggingFaceTB/SmolVLM-500M-Instruct"
 
 
 def _make_synthetic_image(path: Path) -> Path:

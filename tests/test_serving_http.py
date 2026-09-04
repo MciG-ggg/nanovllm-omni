@@ -22,7 +22,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from nanovllm_omni.serving.openai_adapter import serve
+# generate_audio() inside the adapter imports torch at call time. Skip the
+# whole module when torch is unavailable (e.g. the lint-and-test CI job).
+torch = pytest.importorskip("torch")
+from nanovllm_omni.serving.openai_adapter import serve  # noqa: E402 -- after importorskip
 
 _FAKE_WAV = b"RIFF....fake wav"
 

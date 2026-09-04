@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import types
 
-import torch
+import pytest
 
-from nanovllm_omni.optim import cuda_graph as cg
+torch = pytest.importorskip("torch")
+
+from nanovllm_omni.optim import cuda_graph as cg  # noqa: E402 -- after importorskip
 
 
 class _FakeConfig:

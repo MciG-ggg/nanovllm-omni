@@ -17,7 +17,9 @@ No GPU required. CPU-only.
 
 from __future__ import annotations
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 
 def kv_update_cat(

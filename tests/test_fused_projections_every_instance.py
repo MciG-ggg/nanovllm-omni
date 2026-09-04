@@ -13,10 +13,14 @@ weights, no GPU.
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
+import pytest
 
-from nanovllm_omni.models.minimind_omni.attention import enable_fused_projections
+torch = pytest.importorskip("torch")
+import torch.nn as nn  # noqa: E402 -- after importorskip
+
+from nanovllm_omni.models.minimind_omni.attention import (  # noqa: E402 -- after importorskip
+    enable_fused_projections,
+)
 
 
 class Attention(nn.Module):

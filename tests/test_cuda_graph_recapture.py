@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import types
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 
 class _StubAttn(torch.nn.Module):

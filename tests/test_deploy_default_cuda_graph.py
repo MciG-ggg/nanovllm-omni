@@ -28,7 +28,13 @@ from pathlib import Path
 
 import pytest
 
-from nanovllm_omni.config.registry import DeployConfig, load_deploy_config
+# The tests below call generate_audio() which imports torch at runtime.
+# Skip the whole module when torch is unavailable (e.g. lint-and-test CI).
+torch = pytest.importorskip("torch")
+from nanovllm_omni.config.registry import (  # noqa: E402 -- after importorskip
+    DeployConfig,
+    load_deploy_config,
+)
 
 MINIMIND_YAML = (
     Path(__file__).resolve().parent.parent / "nanovllm_omni" / "deploy" / "minimind_omni.yaml"

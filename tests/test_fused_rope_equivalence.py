@@ -19,11 +19,15 @@ the optimization silently. CPU-only.
 
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as functional  # noqa: F401  (kept for readability)
+import pytest
+
+torch = pytest.importorskip("torch")
+import torch.nn.functional as functional  # noqa: E402,F401 -- after importorskip, kept for readability
 
 # Reuse the live implementation — the thing under test.
-from nanovllm_omni.models.minimind_omni.attention import _fused_apply_rotary_pos_emb
+from nanovllm_omni.models.minimind_omni.attention import (  # noqa: E402 -- after importorskip
+    _fused_apply_rotary_pos_emb,
+)
 
 
 def _upstream_apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):

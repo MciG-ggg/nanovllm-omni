@@ -14,8 +14,10 @@ No GPU required. Pure CPU math on scaled_dot_product_attention.
 
 from __future__ import annotations
 
-import torch
-import torch.nn.functional as functional
+import pytest
+
+torch = pytest.importorskip("torch")
+import torch.nn.functional as functional  # noqa: E402 -- after importorskip
 
 # Decode shape: Q has seq_len=1 (is_causal=False, attends to all past).
 BATCH = 1

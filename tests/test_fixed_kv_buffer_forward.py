@@ -18,10 +18,14 @@ class-level dedupe; re-attach must not double-bind).
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
+import pytest
 
-from nanovllm_omni.models.minimind_omni import attention as attn_mod
+torch = pytest.importorskip("torch")
+import torch.nn as nn  # noqa: E402 -- after importorskip
+
+from nanovllm_omni.models.minimind_omni import (  # noqa: E402 -- after importorskip
+    attention as attn_mod,
+)
 
 
 class _RMSNorm(nn.Module):

@@ -107,6 +107,41 @@ def test_to_dict_audio_metadata_emits_sample_rate() -> None:
     }
 
 
+def test_from_pipeline_double_tracks_transcript_in_custom_output() -> None:
+    """MiniMind-O Q2: ``output.transcript`` from the thinker surfaces as
+    ``custom_output["transcript"]`` alongside the ``multimodal_output["audio"]``
+    seam, so the ASR side-channel round-trips through ``to_dict()`` without
+    polluting the audio field."""
+
+    class _ThinkerAudio:
+        audio = AudioPayload(data=b"RIFF....", sample_rate=24000)
+        transcript = "你好,我是 MiniMind。"
+
+    out = OmniRequestOutput.from_pipeline(
+        _ThinkerAudio(), request_id="r1", final_output_type="audio"
+    )
+    assert out.custom_output == {"transcript": "你好,我是 MiniMind。"}
+    d = out.to_dict()
+    assert d["custom_output"] == {"transcript": "你好,我是 MiniMind。"}
+    # The audio seam stays untouched -- transcript is a side-channel only.
+    import base64
+
+    assert base64.b64decode(d["multimodal_output"]["audio"]) == b"RIFF...."
+    assert "audio_metadata" in d["multimodal_output"]
+
+
+def test_from_pipeline_without_transcript_omits_custom_output() -> None:
+    """No ``.transcript`` attr on the source -> ``custom_output`` stays empty
+    and ``to_dict()`` does NOT emit a ``custom_output`` key."""
+
+    class _PlainAudio:
+        audio = AudioPayload(data=b"RIFF", sample_rate=24000)
+
+    out = OmniRequestOutput.from_pipeline(_PlainAudio(), request_id="r1")
+    assert out.custom_output == {}
+    assert "custom_output" not in out.to_dict()
+
+
 def test_from_diffusion_racks_images() -> None:
     """TK-018: images field mirrors vllm-omni's diffusion list slot."""
     imgs = [object(), object(), object()]

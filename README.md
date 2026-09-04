@@ -1,5 +1,7 @@
 # nanovllm-omni
 
+[简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/MciG-ggg/nanovllm-omni/actions/workflows/ci.yml/badge.svg)](https://github.com/MciG-ggg/nanovllm-omni/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](.)

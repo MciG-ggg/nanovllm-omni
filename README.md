@@ -14,6 +14,8 @@ A small, local reference implementation that exercises vllm-omni's stage-based s
 
 ![SD-Turbo single-step image generation on RTX 3050 (512×512)](docs/images/sd_turbo_sample.png)
 
+![MiniMind-O audio output: 8.88s @ 24 kHz mono from the bundled Thinker → Talker → Code2Wav pipeline](docs/images/minimind_o_waveform.png)
+
 ## How this differs from `nano-vllm` and `nanovllm`
 
 There are two other Python projects with `nano-vllm`-style names; they are

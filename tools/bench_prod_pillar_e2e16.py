@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import inspect
 import sys
-import textwrap
 import time
 
 import torch
@@ -32,28 +31,12 @@ from transformers import AutoTokenizer
 
 from nanovllm_omni.models.minimind_omni import create_bundle
 from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
+from nanovllm_omni.optim.cuda_graph import _build_omni_input, _patched_forward
 
 MODEL = "/home/mcig/minimind-3o"
 MIMI = "/home/mcig/mimi"
 MAX_NEW = 16
 REPEAT = 3
-
-
-def _patched_model_forward(model, cls, src):
-    patched = src.replace(
-        "if self.thinker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed"
-    ).replace("if self.talker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed")
-    assert "if False:" in patched
-    ns = dict(cls.forward.__globals__)
-    ns["__name__"] = cls.__module__
-    ns["__qualname__"] = cls.__qualname__ + ".forward_prodpillar"
-    exec(compile(textwrap.dedent(patched), "<prod-pillar>", "exec"), ns)
-    return ns["forward"]
-
-
-def _decode_input(nid: torch.Tensor, audio_pad: int) -> torch.Tensor:
-    buf = torch.full((1, 8, 1), audio_pad, dtype=torch.long, device=nid.device)
-    return torch.cat((buf, nid.unsqueeze(-1)), dim=1)
 
 
 def sample_token(logits) -> torch.Tensor:
@@ -77,7 +60,7 @@ def main() -> int:
     model = bundle.model
     audio_pad = int(model.config.audio_pad_token)
     cls = type(model)
-    fwd = _patched_model_forward(model, cls, inspect.getsource(cls.forward))
+    fwd = _patched_forward(cls, inspect.getsource(cls.forward))
     enable_fixed_kv_buffer(model, max_len=ids.shape[1] + MAX_NEW + 4)
     attns = _attn_instances(model)
     print(f"production buffer-attached attn: {len(attns)}", flush=True)
@@ -94,7 +77,7 @@ def main() -> int:
         past = out.past_key_values
         nid = out.logits[:, -1].argmax(dim=-1, keepdim=True)
         for _ in range(MAX_NEW):
-            inp = _decode_input(nid, audio_pad)
+            inp = _build_omni_input(nid, audio_pad)
             with torch.no_grad():
                 out = m_ref(input_ids=inp, past_key_values=past, use_cache=True)
             past = out.past_key_values
@@ -112,7 +95,7 @@ def main() -> int:
             out = fwd(model, input_ids=ids, past_key_values=None, use_cache=True)
         nid = out.logits[:, -1].argmax(dim=-1, keepdim=True)
         for _ in range(MAX_NEW):
-            inp = _decode_input(nid, audio_pad)
+            inp = _build_omni_input(nid, audio_pad)
             with torch.no_grad():
                 out = fwd(model, input_ids=inp, past_key_values=None, use_cache=True)
             nid = sample_token(out.logits)
@@ -123,7 +106,7 @@ def main() -> int:
     with torch.no_grad():
         pre_ref = m_ref(input_ids=ids, past_key_values=None, use_cache=True)
         nid_r = pre_ref.logits[:, -1].argmax(dim=-1, keepdim=True)
-        inp = _decode_input(nid_r, audio_pad)
+        inp = _build_omni_input(nid_r, audio_pad)
         ref = m_ref(input_ids=inp, past_key_values=pre_ref.past_key_values, use_cache=True)
     for a in attns:
         a._kv_pos = 0
@@ -131,7 +114,10 @@ def main() -> int:
         pre_buf = fwd(model, input_ids=ids, past_key_values=None, use_cache=True)
         nid_b = pre_buf.logits[:, -1].argmax(dim=-1, keepdim=True)
         got = fwd(
-            model, input_ids=_decode_input(nid_b, audio_pad), past_key_values=None, use_cache=True
+            model,
+            input_ids=_build_omni_input(nid_b, audio_pad),
+            past_key_values=None,
+            use_cache=True,
         )
     d_pre = (pre_ref.logits - pre_buf.logits).abs().max().item()
     d_dec = (ref.logits - got.logits).abs().max().item()
@@ -151,7 +137,7 @@ def main() -> int:
     with torch.cuda.stream(s):
         nid = pre_buf.logits[:, -1].argmax(dim=-1, keepdim=True)
         for _step in range(1, MAX_NEW + 1):
-            inp_static = _decode_input(nid, audio_pad).clone()
+            inp_static = _build_omni_input(nid, audio_pad).clone()
             with torch.no_grad():
                 fwd(model, input_ids=inp_static, past_key_values=None, use_cache=True)
             g = torch.cuda.CUDAGraph()
@@ -175,7 +161,7 @@ def main() -> int:
         cur = ids.clone()
         nid = pre_buf.logits[:, -1].argmax(dim=-1, keepdim=True)
         for k in range(MAX_NEW):
-            static_inps[k].copy_(_decode_input(nid, audio_pad))
+            static_inps[k].copy_(_build_omni_input(nid, audio_pad))
             graphs[k].replay()
             nid = sample_token(outs[k].logits)
             cur = torch.cat((cur, nid), dim=1)

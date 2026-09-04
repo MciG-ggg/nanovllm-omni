@@ -244,7 +244,7 @@ decoder（重 capture）**，或把 graph 形状设计为与 prompt 长度无关
 
 #### defect #5 隔离探针就绪（#51，GPU 通道暂断，未执行）
 
-`tools/bench_longrun_residue_probe.py` 落地 #50 文档的隔离协议：A/B 两臂
+`tools/bench_defect5_3cycle.py` 落地 #50 文档的隔离协议：A/B 两臂
 基础上加第三臂——在跨 prompt 之间**显式清零**每个 attention buffer 的
 解码 KV 区（`buffer[:, prefill_len:]`）。判定：
 

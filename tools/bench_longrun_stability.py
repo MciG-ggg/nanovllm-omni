@@ -6,7 +6,7 @@ CPU-verified: (a) shape-drift / OOB GPU-memory writes, (b) long-running
 buffer + decoder reuse. This probe exercises the REAL serving pattern in
 one process:
 
-  - load bundle + enable_cuda_graph ONCE (decoder cached via _ENABLE_MARKER,
+  - load bundle + enable_cuda_graph ONCE (decoder cached on model._nanovllm_graph_decoder,
     capture happens once)
   - fire 20 heterogeneous prompts from BENCH_PROMPTS through
     run_generate(use_cuda_graph=True) — reusing the SAME model+buffers

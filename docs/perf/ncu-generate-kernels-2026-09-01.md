@@ -450,7 +450,7 @@ capture**。
 - 全量 `Omni.generate` 集成（含 sampling 留 graph 外、KV 固定 buffer、
   pad+mask、host-read 外提）按计划 §3 增补执行即可；每步 3.5ms 的对标
   收益是全 investigate 的行为守则。
-- 探针工具：`tools/capture_probe.py`（in-memory monkey-patch，
+- 探针工具：`tools/bench_cuda_graph_module.py`（in-memory monkey-patch，
   可行性证据；生产集成需正式重构 forward）。
 
 ## 14. WSL RTX 3050 目标硬件基线（2026-09-01, torch 2.13+cu130）
@@ -480,7 +480,7 @@ shape 的可行性探针；全量 `Omni.generate` 集成后理论上限约 10× 
 
 ## 15. 多步 decode loop 的 CUDA Graph 测量（2026-09-01, WSL RTX 3050）
 
-工具：`tools/bench_graphed_generate.py`（复用 §13 capture-unblock 机制）。
+工具：`tools/bench_cuda_graph_module.py`（复用 §13 capture-unblock 机制）。
 
 ### 结果
 
@@ -507,7 +507,7 @@ shape 的可行性探针；全量 `Omni.generate` 集成后理论上限约 10× 
 
 ## 16. 端到端 eager 解码探针：sampling 参与后的真实上限校准（2026-09-01）
 
-工具：`tools/bench_e2e_graphed_generate.py`（忠实复刻 stream_generate 文本
+工具：`tools/bench_cuda_graph_module.py`（忠实复刻 stream_generate 文本
 分支：forward + audio_buffer pad + `.tolist()`/`multinomial` host
 sampling，16 步，EOS-free）。
 
@@ -535,7 +535,7 @@ sampling，16 步，EOS-free）。
 
 ## 17. 集成探针：每步独立 graph 的边界（2026-09-01，WSL RTX 3050）
 
-工具：`tools/bench_integrated_graphed_generate.py`——把 §16 探针升级为
+工具：`tools/bench_cuda_graph_module.py`——把 §16 探针升级为
 集成版：真实循环（audio_buffer + host sampling + KV 增长）里每步 replays
 一个捕获于该步 KV shape 的 per-step CUDA Graph。
 
@@ -577,7 +577,7 @@ API），这是计划 §3 已预判的风险，现在有了 GPU 实测证据。
 
 ## 18. decode-step capture 探针：L256 host-read 实测（2026-09-01，WSL RTX 3050）
 
-工具：`tools/probe_decode_capture_l256.py`。§12/§17 曾推测
+工具：。§12/§17 曾推测
 MiniMindOmni.forward L256 `start_pos = past_key_values[0][0].shape[1]`
 
 evere 在 decode 步（past_kv 非空）是第二个 capture blocker。本轮在真实
@@ -601,7 +601,7 @@ host-read、保留 L256 原样 → **capture 成功**。
 
 ## 19. strategy A 固定 KV buffer 正确性：bit-exact（2026-09-01，WSL RTX 3050）
 
-工具：`tools/probe_strategyA_correctness.py`——把 attention 每步
+工具：`tools/bench_cuda_graph_module.py`——把 attention 每步
 `torch.cat([past_key_value[i], cur])` 换成固定预分配 buffer 的 slice
 写入 + slice 读（plan §3 strategy A 的第一支柱），在**真实模型**（非合成
 KV）上验证是否 bit-exact。
@@ -636,7 +636,7 @@ KV）上验证是否 bit-exact。
 
 ## 20. 单 CUDA Graph + 真实 KV buffer：replay 输入敏感 + 3.38ms/step（2026-09-01）
 
-工具：`tools/probe_graph_replay_real.py`——在真实 decode 状态（buffer 含
+工具：`tools/bench_cuda_graph_module.py`——在真实 decode 状态（buffer 含
 prefill+1 步 KV）上捕获单一 CUDA Graph，测 replay 的正确性与速度。
 
 ### 结果
@@ -672,7 +672,7 @@ prefill+1 步 KV）上捕获单一 CUDA Graph，测 replay 的正确性与速度
 
 ## 21. 16 步 graphed e2e 验收：6.11×（2026-09-01，WSL RTX 3050）
 
-工具：`tools/bench_graphed_e2e16.py`——完整 16 步解码循环（真实 host
+工具：`tools/bench_prod_pillar_e2e16.py`——完整 16 步解码循环（真实 host
 multinomial sampling + KV 共享固定 buffer + 每步一个 CUDA Graph replay），
 与 eager cat 路径同 loop 对比。
 
@@ -749,7 +749,7 @@ buffer-ization（plan §3.1）已作为可开关、可回滚、CI 干净的仓�
 
 ## 22. 加速比稳健性：max_tokens 8/16/32（2026-09-01，WSL RTX 3050）
 
-`tools/bench_graphed_e2e16.py` 参数化 `MAX_NEW`（argv），跑三档长度验证
+`tools/bench_prod_pillar_e2e16.py` 参数化 `MAX_NEW`（argv），跑三档长度验证
 加速比不缩水：
 
 | max_tokens | eager (ms) | graphed (ms) | speedup |
@@ -803,7 +803,7 @@ KV buffer（`_kv_past_key/value`）、decode 喂真实 token、sampling 留 host
 
 ## 25. 生产 buffer 支柱：determinism §5.1 + multi-prompt §5.4（2026-09-01）
 
-工具：`tools/bench_determinism_prod_buffer.py`——landed 生产 patch
+工具：`tools/bench_prod_pillar_e2e16.py`——landed 生产 patch
 `enable_fixed_kv_buffer` 在 CUDA-Graphed 16 步 e2e 上的正确性闸门。
 
 ### 结果（WSL RTX 3050）
@@ -854,7 +854,7 @@ audio_step 门控正确（帧 0 全 pad=2049），frames 契约满足。首次�
 
 ## 28. WAV-MD5 确定性协议 §5.1：graph 快速路径 PASS（2026-09-01）
 
-工具：`tools/bench_wav_md5_graph.py`——跑 plan §5.1 协议：seed 42 × 5，
+工具：`tools/bench_omni_cross_prompt.py`——跑 plan §5.1 协议：seed 42 × 5，
 graph-path `run_generate(use_cuda_graph=True)` 出 frames →
 `decode_audio(bundle.mimi, frames)`（codec 消费，bench runner 同款）→
 MD5。
@@ -877,7 +877,7 @@ CUDA-Graph opt-in 快速路径**端到端确定**：不只生成层 frames 确�
 
 ## 29. §5.4 异构 prompt 稳健性：graph 快速路径 PASS（2026-09-01）
 
-工具：`tools/bench_prompt_robustness_graph.py`——用仓库自带的光
+工具：`tools/bench_omni_cross_prompt.py`——用仓库自带的光
 `BENCH_PROMPTS` 集（short_01/02/03、medium_01/02、system_01，长度 2-36
 tokens）跑 `run_generate(use_cuda_graph=True)`，每 prompt 检查
 (A) 16 frames×8 tokens 完成，(B) 2× 同 seed decode MD5 一致。
@@ -1099,12 +1099,12 @@ memory_stable=True  ->  RESULT: PASS
 #55 的修复（re-capture 分支 clear+re-prefill）改了 decode 路径;重跑此前
 验收闸门确认**未回归**（此前结果是修复前代码测的）。
 
-**§5.1 WAV-MD5 determinism**（`tools/bench_wav_md5_graph.py`）：
+**§5.1 WAV-MD5 determinism**（`tools/bench_omni_cross_prompt.py`）：
 run 0-4 (seed 42) md5 全部 = `2e6697fbef594b61` -> unique MD5 1 -> **PASS**。
 该 md5 与 #38（修复前）**完全一致** —— 修复对正常单 prompt 路径零
 行为改变（只影响异 prompt re-capture 分支）。
 
-**§5.4 异构 prompt robustness**（`tools/bench_prompt_robustness_graph.py`）：
+**§5.4 异构 prompt robustness**（`tools/bench_omni_cross_prompt.py`）：
 6 prompts（short/medium/system）全完成 + 全 deterministic -> **PASS**。
 
 **意义**:defect #5 修复是无回归的 —— 单 prompt 确定性（§5.1 nd5 逐位
@@ -1268,7 +1268,7 @@ short→medium→long→short→medium→short→short）：
 VERDICT: defect #5 CLOSED on 3050
 ```
 
-+ 原 `tools/bench_longrun_residue_probe.py` 重新跑：`BASELINE cross-prompt
++ 原 `tools/bench_defect5_3cycle.py` 重新跑：`BASELINE cross-prompt
 B True`（defect #5 已被 re-capture 修掉，baseline 已经没有 leak）。zeroing
 arm 的 False 是探测器自身干扰（zeroing 在 run 之后触发，扰动了下一次
 prefill 的 KV 起点，与 re-capture 机制无关）。
@@ -1325,7 +1325,7 @@ RESULT: PASS
 
 跑两条未被 iter #67/#68 覆盖的 prod-path 闸门：
 
-**§5.4 heterogeneous-prompt robustness**（`tools/bench_prompt_robustness_graph.py`，
+**§5.4 heterogeneous-prompt robustness**（`tools/bench_omni_cross_prompt.py`，
 6 个 BENCH_PROMPTS × 16 frame × 8-channel Mimi codes）：
 
 ```
@@ -1344,7 +1344,7 @@ GRAPh PROMPT ROBUSTNESS (§5.4): PASS
 6 个 prompt 跨度 2–36 token（覆盖 short/medium/system），全部 16 帧
 完成 + 2× same-seed MD5 匹配 + prompt 间 MD5 不同（非 constant 输出）。
 
-**§5.1 WAV-MD5 determinism**（`tools/bench_wav_md5_graph.py`，5× seed=42
+**§5.1 WAV-MD5 determinism**（`tools/bench_omni_cross_prompt.py`，5× seed=42
 同 prompt → decoded Mimi float bytes MD5）：
 
 ```

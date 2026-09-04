@@ -8,7 +8,7 @@
 [![Models](https://img.shields.io/badge/models-4-green.svg)](.)
 
 - 🎯 **MiniMind-O 流水线** — 最小的 Thinker → Talker → Code2Wav 全链路运行时,加载真实的 `jingyaogong/minimind-3o` 权重
-- ⚡ **RTX 3050 笔记本 GPU 上 sub-340ms p50** — 融合 QKV/gate-up 投影、融合 RMSNorm、融合 RoPE(在 `nanovllm_omni/models/minimind_omni/attention.py`);预分配 KV buffer;SDPA decode `is_causal=True`
+- ⚡ **RTX 3050 (4 GB) 上 ~320 ms p50 / ~345 ms p95 / ~350 ms p99** — `d2ebe56 perf(stack)` 合并后单条 MiniMind-O audio 请求(融合 QKV/gate-up 投影、融合 RMSNorm、融合 RoPE 在 `nanovllm_omni/models/minimind_omni/attention.py`;预分配 KV buffer;SDPA decode `is_causal=True`)。p50/p95/p99 来自 `docs/perf/minimind-omni-under-500ms.md`(20 次跑,torch 2.13):p50 320 ms、mean 323 ms、stdev 11.6 ms、min 305 ms、max 343 ms;p95/p99 用 mean + z·stdev 近似。WSL 上复现命令 `python -m nanovllm_omni.optim.bench time`。
 - 🔁 **StagePool 模式演示** — `num_replicas ≥ 2`,RoundRobin 负载均衡,每个输出带 `(stage_id, replica_id)`
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 

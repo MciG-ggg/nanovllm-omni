@@ -9,7 +9,7 @@
 
 - 🎯 **MiniMind-O 流水线** — 最小的 Thinker → Talker → Code2Wav 全链路运行时,加载真实的 `jingyaogong/minimind-3o` 权重
 - ⚡ **RTX 3050 (4 GB) 上 ~320 ms p50 / ~345 ms p95 / ~350 ms p99** — `d2ebe56 perf(stack)` 合并后单条 MiniMind-O audio 请求(融合 QKV/gate-up 投影、融合 RMSNorm、融合 RoPE 在 `nanovllm_omni/models/minimind_omni/attention.py`;预分配 KV buffer;SDPA decode `is_causal=True`)。p50/p95/p99 来自 `docs/perf/minimind-omni-under-500ms.md`(20 次跑,torch 2.13):p50 320 ms、mean 323 ms、stdev 11.6 ms、min 305 ms、max 343 ms;p95/p99 用 mean + z·stdev 近似。WSL 上复现命令 `python -m nanovllm_omni.optim.bench time`。
-- 🔁 **StagePool 模式演示** — `num_replicas ≥ 2`,RoundRobin 负载均衡,每个输出带 `(stage_id, replica_id)`
+- 🔁 **StagePool 模式(单 replica in-process)** — per-stage 持续批处理通过 `RuntimeScheduler` 完成;多 replica + RoundRobin LB 已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
 一个小型、本地的参考实现,在单卡上跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。
@@ -158,7 +158,7 @@ docs/           # 项目笔记与性能归档
 
 同卡上的请求级并行用 in-process 批量 runner(`examples/offline_inference/minimind_o/batched.py`,由 `tests/test_batched_generation.py` 锁定 — Q10a)。多卡、per-stage 子进程隔离、tensor-parallel 和 pipeline-parallel 调度器都明确不在范围内;以后要加任意一项,改动必须从改造 `bundle.py`(每个 replica 一个 bundle)和 `engine/runtime.py`(per-replica 推理路径)开始,而不是把 vllm-omni 的 `StageRuntime` 硬塞进一个今天用不上的运行时。
 
-四个支持的模型族共用同一个单进程运行时:per-stage 持续批处理(TK-004)和 per-stage replica + RoundRobin LB(TK-007)都是 in-process 数据结构(`engine/runtime_scheduler.py`、`engine/load_balancer.py`),不是子进程池。
+四个支持的模型族共用同一个单进程运行时:per-stage 持续批处理(TK-004)通过 `engine/runtime_scheduler.py` in-process 实现。per-stage replica + RoundRobin LB 层(TK-007)已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)。
 
 ## 致谢
 

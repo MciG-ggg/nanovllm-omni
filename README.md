@@ -9,7 +9,7 @@
 
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
 - ⚡ **~320 ms p50 / ~345 ms p95 / ~350 ms p99 on RTX 3050 (4 GB) with `--use-cuda-graph` opt-in** — single-prompt MiniMind-O audio, post the `d2ebe56 perf(stack)` merge (fused QKV/gate-up projections, fused RMSNorm, fused RoPE in `nanovllm_omni/models/minimind_omni/attention.py`; pre-allocated KV buffer; SDPA decode with `is_causal=True`). **Without `--use-cuda-graph`, default bench runs ~715 ms p50 on the same hardware** (verified 2026-09, torch 2.13.0+cu130). Numbers from `docs/perf/minimind-omni-under-500ms.md` (20 runs, torch 2.13): p50 320 ms mean 323 ms stdev 11.6 ms min 305 ms max 343 ms; p95/p99 approximated from mean + z·stdev.
-- 🔁 **StagePool pattern demo** — `num_replicas ≥ 2`, RoundRobin LB, `(stage_id, replica_id)` per output
+- 🔁 **StagePool pattern (single-replica in-process)** — per-stage continuous batching via `RuntimeScheduler`; multi-replica + RoundRobin LB removed after measuring `num_replicas=1 == num_replicas=2` (`tests/test_batched_runner_contract.py`)
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
 A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
@@ -254,10 +254,10 @@ any are added later, the change must start by reworking
 `StageRuntime` into a runtime that has no use for it today.
 
 The four supported model families all run on the same single-process
-runtime: per-stage continuous batching (TK-004) and per-stage replica
-+ RoundRobin LB (TK-007) are wired as in-process data structures
-(`engine/runtime_scheduler.py`, `engine/load_balancer.py`), not as
-subprocess pools.
+runtime: per-stage continuous batching (TK-004) is wired in-process
+via `engine/runtime_scheduler.py`. The per-stage replica + RoundRobin
+LB layer (TK-007) was removed after measuring `num_replicas=1 ==
+num_replicas=2` (`tests/test_batched_runner_contract.py`).
 
 ## Acknowledgements
 

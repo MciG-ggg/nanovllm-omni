@@ -95,6 +95,20 @@ outputs = engine.generate([{"prompt": "do the task", "image": rgb_obs}],
 outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 ```
 
+### 复现延迟数字
+
+上面的 320 ms p50 需要 CUDA-Graph 快路径(`--use-cuda-graph` opt-in;CUDA-only)。不传这个 flag,同一硬件上默认跑 ~715 ms p50。
+
+```bash
+# 在 WSL 里(~mcig@mcigs-wsl)—需要 torch + 本地权重 snapshot
+python -m nanovllm_omni.optim.bench time \
+    --model ~/minimind-3o --mimi ~/mimi \
+    --max-tokens 16 --runs 5 --warmup 2 \
+    --use-cuda-graph
+```
+
+完整分布(CUDA-Graph path,25 次实验 trace,kernel 级别拆分):`docs/perf/minimind-omni-under-500ms.md`。Eager path 基线(`d2ebe56` 合并前):`docs/perf/session-1.md`。
+
 ## 配置
 
 流水线拓扑在代码里(`nanovllm_omni/config/registry.py`);per-stage 的采样和资源默认在 `nanovllm_omni/deploy/*.yaml`,打进 wheel,运行时从包目录解析。

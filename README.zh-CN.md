@@ -30,6 +30,22 @@
 
 如果你搜的是*纯文本*的 mini-vLLM,看上面两个仓库才对。
 
+## 同名兄弟项目
+
+[`Rising0321/nano-vllm-omni`](https://github.com/Rising0321/nano-vllm-omni) 是另一个独立项目,碰巧和我们的仓库名 *以及* Python 包名(`nanovllm_omni`)都一样。它**不是**本仓库的 fork,**也不是**重写 —— 是被别人起的、scope 不同的同名项目。
+
+| 维度 | `MciG-ggg/nanovllm-omni`(本仓库) | `Rising0321/nano-vllm-omni` |
+|---|---|---|
+| 模态 | 音频、图像、VLM-文本、动作 | 视频(I2V / TI2V) |
+| 模型族 | MiniMind-O、SD-Turbo、SmolVLM、SmolVLA | 只 Wan2.2-TI2V-5B |
+| 硬件目标 | RTX 3050 4 GB,单进程 | RTX 3090 24 GB,单进程 + CPU offload |
+| 流水线形态 | 一个 `Omni(...)` 内 per-family 阶段工厂 | 显式 step-wise 调度器(`request → scheduler → runner → pipeline`) |
+| 对齐目标 | `vllm-omni` 消费侧 API | `vllm-omni` 扩散阶段契约(`prepare_encode → denoise_step → step_scheduler → post_decode`) |
+
+两个项目都是对 `vllm-omni` 的独立教学式解读,谁也不是谁的 fork。如果你要找**视频 I2V / Wan2.2** 的实现,Rising0321 那个仓库才是。
+
+> **提醒:** 两个项目都发布同名 Python 包 `nanovllm_omni`。同一个 venv 里装会冲突,得用两个独立环境。
+
 ## 支持的模型
 
 | 模型 | 阶段数 | 输出 | 权重 |

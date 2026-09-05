@@ -32,6 +32,30 @@ There are two other Python projects with `nano-vllm`-style names; they are
 If you arrived here searching for a *text-only* mini-vLLM, the two repos
 above are what you want.
 
+## A name-sharing peer project
+
+[`Rising0321/nano-vllm-omni`](https://github.com/Rising0321/nano-vllm-omni) is
+an independent `nano-vllm-omni` project that happens to share our repository
+name *and* our Python package name (`nanovllm_omni`). It is **not** a fork
+and **not** a re-implementation of this repo — it's a peer, picked by
+someone else, with a different scope.
+
+| Axis | `MciG-ggg/nanovllm-omni` (this repo) | `Rising0321/nano-vllm-omni` |
+|---|---|---|
+| Modalities | audio, image, VLM-text, action | video (I2V / TI2V) |
+| Model families | MiniMind-O, SD-Turbo, SmolVLM, SmolVLA | Wan2.2-TI2V-5B only |
+| Hardware target | RTX 3050 4 GB, single process | RTX 3090 24 GB, single process + CPU offload |
+| Pipeline shape | per-family stage factory inside one `Omni(...)` | explicit step-wise scheduler (`request → scheduler → runner → pipeline`) |
+| Aligned with | `vllm-omni` consumer-visible API | `vllm-omni` diffusion stage contract (`prepare_encode → denoise_step → step_scheduler → post_decode`) |
+
+Both projects are independent educational reads of `vllm-omni`; neither is
+a fork of the other. If you arrived here looking for the **video I2V /
+Wan2.2** path, the Rising0321 repo is what you want.
+
+> **Heads-up:** both projects ship a Python package named `nanovllm_omni`.
+> Installing them in the same virtualenv will conflict; use separate
+> environments.
+
 ## Supported models
 
 | Model | Stages | Output | Weights |

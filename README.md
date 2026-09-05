@@ -259,6 +259,27 @@ runtime: per-stage continuous batching (TK-004) and per-stage replica
 (`engine/runtime_scheduler.py`, `engine/load_balancer.py`), not as
 subprocess pools.
 
+## Acknowledgements
+
+- [`vllm-omni`](https://github.com/vllm-project/vllm-omni) — the omni-modal
+  serving architecture and consumer-visible API contract that this project
+  studies and aligns with. We do not import from it; the README's "Scope"
+  section documents the divergence.
+- [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm)
+  and [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) —
+  educational re-implementations of vLLM's text path that showed how a
+  serving stack can be compressed into ~1k lines of readable Python. Their
+  structure informed the per-family stage factories in this repo.
+- The model authors whose weights we ship:
+  - MiniMind-O — [`jingyaogong/minimind-3o`](https://huggingface.co/jingyaogong/minimind-3o)
+  - Mimi codec — [`kyutai/mimi`](https://huggingface.co/kyutai/mimi)
+  - SD-Turbo — [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo)
+  - SmolVLM-500M — [`HuggingFaceTB/SmolVLM-500M-Instruct`](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct)
+  - SmolVLA — [`HuggingFaceVLA/smolvla_libero`](https://huggingface.co/HuggingFaceVLA/smolvla_libero) on the [LIBERO](https://libero-project.github.io) benchmark
+- [Hugging Face `diffusers`](https://github.com/huggingface/diffusers) and
+  [`transformers`](https://github.com/huggingface/transformers) — the
+  underlying inference code paths used by SD-Turbo / SmolVLM / MiniMind-O.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

@@ -160,6 +160,20 @@ docs/           # 项目笔记与性能归档
 
 四个支持的模型族共用同一个单进程运行时:per-stage 持续批处理(TK-004)和 per-stage replica + RoundRobin LB(TK-007)都是 in-process 数据结构(`engine/runtime_scheduler.py`、`engine/load_balancer.py`),不是子进程池。
 
+## 致谢
+
+- [`vllm-omni`](https://github.com/vllm-project/vllm-omni) — 我们对其 omni 模态服务架构与消费侧 API 契约进行教学式解读并与之对齐。本仓库不导入它的代码,具体偏离见 README「Scope / 范围」一节。
+- [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm)
+  和 [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) — 把 vLLM 文本路径压缩到 ~1k 行可读 Python 的教学重写,本仓库的 per-family 阶段工厂受到了它们的结构启发。
+- 模型作者(我们直接使用其权重):
+  - MiniMind-O — [`jingyaogong/minimind-3o`](https://huggingface.co/jingyaogong/minimind-3o)
+  - Mimi 编码器 — [`kyutai/mimi`](https://huggingface.co/kyutai/mimi)
+  - SD-Turbo — [`stabilityai/sd-turbo`](https://huggingface.co/stabilityai/sd-turbo)
+  - SmolVLM-500M — [`HuggingFaceTB/SmolVLM-500M-Instruct`](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct)
+  - SmolVLA — [`HuggingFaceVLA/smolvla_libero`](https://huggingface.co/HuggingFaceVLA/smolvla_libero) 跑在 [LIBERO](https://libero-project.github.io) 基准上
+- [Hugging Face `diffusers`](https://github.com/huggingface/diffusers) 和
+  [`transformers`](https://github.com/huggingface/transformers) — SD-Turbo / SmolVLM / MiniMind-O 背后的推理代码路径。
+
 ## License
 
 Apache-2.0。详见 [LICENSE](LICENSE)。

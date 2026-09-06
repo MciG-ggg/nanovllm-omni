@@ -86,11 +86,11 @@ class BatchedThinkerState:
     audio_inputs: Any = None
     audio_lens: Any = None
 
-    # Bridge hidden states: one ``[hidden_size]`` tensor
-    # per step the runner completes (prefill = 1 entry for the last prompt
-    # position; each decode = 1 entry). Populated only when the runner was
-    # constructed with ``capture_bridge_states=True``. The talker stage
-    # consumes this list via ``extract_bridge_states(state)``.
+    # Bridge hidden states: one ``[hidden_size]`` tensor per prompt position
+    # added during prefill plus one per decode step. Populated only when the
+    # runner was constructed with ``capture_bridge_states=True``. The talker
+    # stage consumes this list via ``extract_bridge_states(state)``; the
+    # prefill rows align 1:1 with the prompt span the talker conditions on.
     bridge_states: list[Any] = field(default_factory=list)
 
 
@@ -382,11 +382,10 @@ class BatchedThinkerRunner:
             for r, rid in enumerate(req_ids):
                 self.kv_pool.write(rid, layer, key=k, value=v, row=r)
 
-        # Bridge capture: stash the thinker's bridge-layer hidden state at
-        # the LAST prompt position for each request (the position that
-        # produced the predicted next-text token). Phase 1 stores only the
-        # final-prompt-position row; multi-step bridge history is added when
-        # the talker MTP path becomes a real per-stage module (Phase 3).
+        # Bridge capture: stash the thinker's bridge-layer hidden state for
+        # every prompt position (each prefill position produces a bridge row
+        # the talker conditions on, matching ``prompt_len`` in the talker's
+        # ``_select_bridge_states`` alignment).
         if self.capture_bridge_states:
             self._capture_prefill_bridge(req_ids)
 
@@ -516,16 +515,17 @@ class BatchedThinkerRunner:
     # -- bridge capture ---------------------------------
 
     def _capture_prefill_bridge(self, req_ids: list[str]) -> None:
-        """Stash per-request last-position bridge state after prefill."""
+        """Stash per-request bridge state for every prompt position after prefill."""
         captured = _read_bridge_capture(self.model, self._bridge_capture_layer)
         if captured is None:
             return  # capture not installed / layer not monkey-patched
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
-            # captured shape: [B, num_positions, hidden_size]. Take the last
-            # position (the one whose next-text token was predicted).
-            per_request = captured[r, -1, :].detach()
-            st.bridge_states.append(per_request)
+            # captured shape: [B, num_positions, hidden_size]. Append each
+            # prompt position so the bridge sequence lines up with the talker's
+            # span alignment (``prompt_len`` bridge rows before the decode rows).
+            for row in captured[r].detach():
+                st.bridge_states.append(row)
 
     def _capture_decode_bridge(self, req_ids: list[str]) -> None:
         """Stash per-request bridge state for each decode step."""
@@ -647,11 +647,12 @@ def _read_bridge_capture(model: Any, bridge_layer: int) -> Any:
 def extract_bridge_states(state: BatchedThinkerState) -> Any:
     """Stack the per-step bridge hidden states for one request.
 
-    Returns a ``[num_steps, hidden_size]`` tensor (CPU clone so the
-    caller can mutate without affecting the runner's buffer). Returns
-    an empty ``[0, hidden_size]`` tensor when the runner was not
-    constructed with ``capture_bridge_states=True``; consumers must
-    guard against the empty shape or enable capture explicitly.
+    Returns a ``[num_positions + num_steps, hidden_size]`` tensor (CPU clone
+    so the caller can mutate without affecting the runner's buffer): one row
+    per prompt position captured at prefill plus one row per decode step.
+    Returns an empty ``[0, hidden_size]`` tensor when the runner was not
+    constructed with ``capture_bridge_states=True``; consumers must guard
+    against the empty shape or enable capture explicitly.
     """
     import torch
 

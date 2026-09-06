@@ -214,12 +214,38 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
     assert observed_args.extra["devices"] == ("cpu",)
 
 
-def test_minimind_full_mode_fails_without_silent_collapsed_fallback():
+def test_minimind_full_mode_is_supported_and_does_not_silently_collapse():
+    """Phase 8: full is now an executable MiniMind mode, not a silent fallback.
+
+    Construction succeeds (no raise), and the topology declares ``full`` so
+    drift back to a gate can never silently degrade into collapsed output.
+    """
     from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
 
-    with pytest.raises(ValueError, match="full mode is not supported"):
-        PipelineRunner(
-            MINIMIND_OMNI_PIPELINE,
-            DeployConfig(pipeline_kind="full"),
-            _make_args(),
-        )
+    assert "full" in MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds
+    assert "collapsed" in MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds
+    # Constructing the runner validates the kind without loading any model
+    # (stage instances are built lazily on the first ``run``).
+    PipelineRunner(
+        MINIMIND_OMNI_PIPELINE,
+        DeployConfig(pipeline_kind="full"),
+        _make_args(),
+    )
+
+
+def test_undeclared_full_mode_still_fails_without_silent_collapsed_fallback():
+    """Pipelines that never declared ``full`` keep the hard gate."""
+    pipeline = _make_pipeline(
+        [
+            StageConfig(
+                0,
+                "thinker",
+                StageExecutionType.LLM_AR,
+                "tests._stage_factories:thinker_simple",
+                is_terminal=True,
+            )
+        ]
+    )  # supported_pipeline_kinds defaults to ("collapsed",)
+
+    with pytest.raises(ValueError, match="pipeline_kind 'full' is not supported"):
+        PipelineRunner(pipeline, DeployConfig(pipeline_kind="full"), _make_args())

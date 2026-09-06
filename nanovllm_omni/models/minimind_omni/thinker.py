@@ -25,27 +25,38 @@ from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 def _thinker_stage(deploy: Any, args: Any) -> Any:
     """Stage 0 factory: returns a callable that runs the thinker.
 
-    The "thinker" invokes the entire end-to-end pipeline via
-    ``generate_audio`` so that the field topology is exercised without
-    requiring a 3-stage split.
+    Collapsed mode invokes the entire end-to-end pipeline via
+    ``generate_audio`` (text -> audio in one call). Full mode runs the
+    bridge-capturing generation and emits a ``ThinkerStageOutput`` that
+    ``thinker2talker`` converts for the talker stage.
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
     audio_encoder_path = extra_args.pop("audio_encoder_path", None) or extra_args.pop(
         "audio_encoder", None
     )
+    provided_bundle = extra_args.pop("bundle", None)
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
         "dtype": getattr(args, "dtype", None),
     }
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id
-    bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    # ``extra["bundle"]`` lets offline tests / bench harnesses inject a
+    # prebuilt bundle so the factory never touches the network.
+    bundle = (
+        provided_bundle
+        if provided_bundle is not None
+        else create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    )
     # deploy-layer default: route served requests through the CUDA-Graph
     # fast path when the yaml enables it (report §44). generate_audio(None)
     # resolves from bundle.use_cuda_graph.
     if bundle is not None:
         bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
+
+    if getattr(deploy, "pipeline_kind", "collapsed") != "collapsed":
+        return _full_thinker_stage(bundle, deploy)
 
     def thinker_forward(payload: Any, sampling: Any) -> Any:
         prompt = payload if isinstance(payload, str) else payload.get("prompt", "")
@@ -86,6 +97,107 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
         return out
 
     return thinker_forward
+
+
+def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
+    """Full-mode stage 0: emit a ``ThinkerStageOutput`` with bridge states.
+
+    Runs the bridge-capturing generation with the deploy layer's post-EOS
+    sequence (Phase 2 opt-in) and internal-stop token, then hands the
+    aligned bridge + token ids to ``thinker2talker``. The thinker does NOT
+    decode audio here -- that is the code2wav stage's job.
+
+    Audio input (``extra["audio"]`` / ASR) is a collapsed-path feature; the
+    full path is text-to-audio only until that bridging is wired, so the
+    stage fails loud instead of silently dropping the audio side-channel.
+    """
+    post_eos_padding_count = int(getattr(deploy, "post_eos_padding_count", 128) or 0)
+    internal_stop_token_id = getattr(deploy, "internal_stop_token_id", None)
+
+    def thinker_forward_full(payload: Any, sampling: Any) -> Any:
+        import uuid
+
+        import torch
+
+        from .generation import stream_generate
+        from .stage_processors import ThinkerStageOutput
+
+        if isinstance(payload, str):
+            prompt = payload
+        elif isinstance(payload, dict):
+            prompt = payload.get("prompt", "")
+        else:
+            prompt = str(payload)
+        extra = (
+            dict(getattr(sampling, "extra", None) or {})
+            if sampling is not None and hasattr(sampling, "extra")
+            else {}
+        )
+        if extra.get("audio") is not None:
+            raise NotImplementedError(
+                "MiniMind full pipeline is text-to-audio only in this build; "
+                "audio input is served by the collapsed pipeline. Set "
+                "pipeline_kind='collapsed' to use extra['audio']."
+            )
+        eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+        audio_special_token = getattr(
+            getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
+        )
+        request_id = f"mmo-full-{uuid.uuid4().hex[:12]}"
+        with torch.no_grad():
+            input_ids = tokenize_for_generate(
+                bundle.tokenizer,
+                prompt,
+                bool(extra.get("open_thinking", False)),
+                audio_special_token=audio_special_token,
+            ).to(bundle.device)
+            captured_bridge: list[torch.Tensor] = []
+            output_tokens: list[int] = []
+            stream = stream_generate(
+                bundle.model,
+                input_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
+                temperature=float(sampling.temperature) if sampling is not None else 0.7,
+                top_p=float(sampling.top_p) if sampling is not None else 0.9,
+                open_thinking=bool(extra.get("open_thinking", False)),
+                capture_bridge_states=True,
+                bridge_state_callback=captured_bridge.append,
+                post_eos_padding_count=post_eos_padding_count,
+                internal_stop_token_id=internal_stop_token_id,
+            )
+            for text_chunk, _audio_frame in stream:
+                if text_chunk is not None:
+                    output_tokens = [
+                        int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
+                    ]
+        bridge = (
+            captured_bridge[0]
+            if captured_bridge and captured_bridge[0].numel() > 0
+            else torch.empty(0, 0, dtype=torch.float32)
+        )
+        prompt_ids = (
+            input_ids[0].detach().cpu().tolist() if input_ids.ndim == 2 else list(input_ids)
+        )
+        # The runner predicts the first output token at prefill (its bridge
+        # row is the last prompt position), so the talker only decodes the
+        # remaining output tokens. The bridge-aligned text span is therefore
+        # prompt + output[1:], whose length matches the captured bridge rows.
+        aligned_text = prompt_ids + (output_tokens[1:] if len(output_tokens) > 1 else [])
+        return ThinkerStageOutput(
+            bridge_states=bridge,
+            prompt_token_ids=prompt_ids,
+            output_token_ids=output_tokens,
+            text_token_ids=aligned_text,
+            input_ids=input_ids,
+            request_id=request_id,
+            metadata={
+                "pipeline_kind": "full",
+                "post_eos_padding_count": post_eos_padding_count,
+            },
+        )
+
+    return thinker_forward_full
 
 
 def tokenize_for_generate(

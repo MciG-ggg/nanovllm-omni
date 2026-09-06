@@ -1,4 +1,5 @@
-# collapsed is the current safe fallback; full remains capability-gated.
+# collapsed is the safe default (legacy end-to-end thinker); full is wired
+# and available for the 3-stage path (RTX-3050 validation still to run).
 pipeline_kind: collapsed
 max_batch: 2
 use_cuda_graph: true

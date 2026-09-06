@@ -926,34 +926,217 @@ def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
 # ---------------------------------------------------------------------------
 
 
-def _talker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory: identity pass-through.
+def _drive_talker_generation(
+    talker: MiniMindOmniTalkerForConditionalGeneration,
+    payload: Any,
+    *,
+    temperature: float = 0.2,
+    top_k: int = 50,
+    do_sample: bool = True,
+) -> Any:
+    """Run the talker wrapper over a ``TalkerInputPayload``; return code rows.
 
-    Wires this to the wrapped talker, but the actual
-    ``forward / postprocess`` plumbing is added by the pipeline runner
-    in Phase 4 (per-stage ``process_input`` hookup). Until then, the
-    stage factory still returns an identity callable so existing field
-    topology / pipeline runner tests stay green.
+    Drives the LLM_AR contract the wrapper exposes (``preprocess`` /
+    ``forward`` / ``postprocess`` / ``compute_logits`` / ``sample`` /
+    ``talker_mtp``) with the reference delayed-diagonal MTP alignment:
+    prefill over the bridge prompt span, then one decode step per output
+    bridge row, layer-0 sampled per step and the residual codebook layers
+    predicted by ``talker_mtp`` from the previous step's hidden state.
 
-    # Identity pass-through is the minimum that exercises the
-    # pipeline registry's dotted-path resolution + StageConfig.__post_init__
-    # validation without requiring the runner to know about LLM_AR
-    # per-stage forward; swap for a real runner-bound callable in Phase 4.
+    Returns a frame-major ``[frames, num_code_layers]`` long tensor -- the
+    Code2Wav stage's input contract. Per-request watchdog state on the
+    wrapper is cleared before returning so sequential requests never inherit
+    a stale forced-stop flag.
     """
+    from types import SimpleNamespace
 
-    def talker_forward(payload: Any, sampling: Any) -> Any:
-        return payload
+    import torch
 
-    return talker_forward
+    request_id = payload.request_id or "mmo-full-talker"
+    device = payload.bridge_states.device
+    prompt_ids = list(payload.prompt_token_ids)
+    output_ids = list(payload.output_token_ids)
+    all_ids = list(payload.text_token_ids)
+    if not all_ids:
+        all_ids = prompt_ids + output_ids
+    prompt_len = len(prompt_ids)
+    bridge = payload.bridge_states
+    num_decode_steps = max(0, int(bridge.shape[0]) - prompt_len)
+    if num_decode_steps == 0:
+        # Nothing beyond the prompt span: still emit one audio row so the
+        # stage hands the code2wav stage a non-empty frame table.
+        num_decode_steps = 1
+
+    info: dict[str, Any] = {
+        "hidden_states": {"bridge": bridge},
+        "ids": {"prompt": prompt_ids, "output": output_ids, "all": all_ids},
+        "request_id": request_id,
+        "_omni_prompt_len": prompt_len,
+    }
+    if payload.speaker_embedding is not None:
+        info["spk_emb"] = payload.speaker_embedding
+
+    rows: list[torch.Tensor] = []
+    try:
+        # Prefill: run the whole prompt span through the trunk once and
+        # keep the last hidden row as the seed for the first MTP step.
+        prefill_ids = torch.full(
+            (prompt_len,), talker.audio_pad_token, dtype=torch.long, device=device
+        )
+        info["_omni_num_computed_tokens"] = 0
+        info["_omni_is_prefill"] = True
+        _input_ids, embeds, _update = talker.preprocess(prefill_ids, None, **info)
+        hidden = talker.forward(
+            input_ids=None,
+            positions=torch.arange(prompt_len, dtype=torch.long, device=device),
+            inputs_embeds=embeds,
+        )
+        post = talker.postprocess(hidden, request_id=request_id, _omni_is_prefill=True)
+        last_hidden = post.get("hidden_states", {}).get("last")
+        if not isinstance(last_hidden, torch.Tensor):
+            last_hidden = hidden[-1:]
+
+        # Decode: one step per output bridge row; residuals from the previous
+        # step's hidden state (delayed diagonal MTP).
+        for step in range(num_decode_steps):
+            num_computed = prompt_len + step
+            prev_code = int(rows[-1][0]) if rows else talker.audio_pad_token
+            step_ids = torch.tensor([prev_code], dtype=torch.long, device=device)
+            info["hidden_states"] = {"bridge": bridge, "last": last_hidden}
+            info["_omni_num_computed_tokens"] = num_computed
+            info["_omni_is_prefill"] = False
+            _step_ids, embeds, update = talker.preprocess(step_ids, None, **info)
+            hidden = talker.forward(
+                input_ids=None,
+                positions=torch.tensor([num_computed], dtype=torch.long, device=device),
+                inputs_embeds=embeds,
+            )
+            logits = talker.compute_logits(hidden)
+            meta = SimpleNamespace(
+                temperature=temperature,
+                top_k=top_k,
+                do_sample=do_sample,
+                generator=None,
+                request_ids=[request_id],
+            )
+            layer0 = talker.sample(logits, meta)
+            mtp_inputs = update.get("mtp_inputs")
+            if isinstance(mtp_inputs, (tuple, list)) and len(mtp_inputs) >= 3:
+                last_hidden_for_mtp, text_step, active_mask = mtp_inputs[:3]
+            else:
+                last_hidden_for_mtp, text_step, active_mask = last_hidden, None, None
+            row = talker.talker_mtp(
+                input_ids=layer0,
+                input_embeds=embeds,
+                last_talker_hidden=last_hidden_for_mtp,
+                text_step=text_step,
+                active_mask=active_mask,
+                temperature=temperature,
+                top_k=top_k,
+                do_sample=do_sample,
+            )
+            rows.append(row[0])
+            last_hidden = hidden[-1:]
+            if int(row[0, -1].item()) == talker.audio_stop_token:
+                break
+    finally:
+        # Drop per-request flags so a recycled request id never inherits a
+        # stale forced-stop (no cross-request state leak).
+        talker.on_requests_finished([request_id])
+
+    if not rows:
+        return torch.empty((0, talker.num_code_layers), dtype=torch.long, device=device)
+    return torch.stack(rows, dim=0)
+
+
+def _talker_stage(deploy: Any, args: Any) -> Any:
+    """Stage 1 factory: real talker in full mode, identity pass-through otherwise.
+
+    Collapsed mode is the safe default: the thinker factory already returns
+    final audio, so the talker barrel passes the payload through unchanged.
+
+    Full mode consumes a ``TalkerInputPayload`` (produced by
+    ``thinker2talker``), drives the talker wrapper + ``talker_mtp`` over the
+    bridge hidden states, and returns a ``TalkerOutput`` whose
+    ``multimodal_outputs['codes']['audio']`` carries ``[F, num_code_layers]``
+    code rows for the code2wav stage.
+    """
+    if getattr(deploy, "pipeline_kind", "collapsed") == "collapsed":
+
+        def talker_forward_identity(payload: Any, sampling: Any) -> Any:
+            del sampling
+            return payload
+
+        return talker_forward_identity
+
+    extra = dict(getattr(args, "extra", None) or {})
+    injected_talker = extra.get("talker")
+    injected_bundle = extra.get("bundle")
+    stage_cache: dict[str, Any] = {}
+
+    def _resolve_talker() -> Any:
+        if "talker" in stage_cache:
+            return stage_cache["talker"]
+        if injected_talker is not None:
+            talker = injected_talker
+        elif injected_bundle is not None:
+            talker = getattr(injected_bundle, "talker", None)
+            if talker is None:
+                talker = wrap_talker(injected_bundle)
+        else:
+            from .bundle import create_bundle
+
+            bundle = create_bundle(
+                model_id=args.model,
+                device=args.device,
+                trust_remote_code=getattr(args, "trust_remote_code", True),
+                dtype=getattr(args, "dtype", None),
+            )
+            talker = wrap_talker(bundle)
+        stage_cache["talker"] = talker
+        return talker
+
+    def talker_forward_full(payload: Any, sampling: Any) -> Any:
+        from .stage_processors import TalkerInputPayload
+
+        if not isinstance(payload, TalkerInputPayload):
+            raise TypeError(
+                "MiniMind full-mode talker stage requires a TalkerInputPayload "
+                f"(thinker2talker output); got {type(payload).__name__}."
+            )
+        temperature = (
+            float(getattr(sampling, "temperature", 0.2) or 0.2) if sampling is not None else 0.2
+        )
+        top_k = int((sampling.extra or {}).get("top_k", 50)) if sampling is not None else 50
+        do_sample = (
+            bool(getattr(sampling, "do_sample", True))
+            if sampling is not None and hasattr(sampling, "do_sample")
+            else True
+        )
+        codes = _drive_talker_generation(
+            _resolve_talker(),
+            payload,
+            temperature=temperature,
+            top_k=top_k,
+            do_sample=do_sample,
+        )
+        if codes.shape[0] == 0:
+            return TalkerOutput(text_hidden_states=None, multimodal_outputs={})
+        return TalkerOutput(
+            text_hidden_states=payload.bridge_states[: codes.shape[0]],
+            multimodal_outputs={"codes": {"audio": codes}},
+        )
+
+    return talker_forward_full
 
 
 def _identity_process_input(payload: Any, prompt: str) -> Any:
     """Default ``process_input``: pass the previous stage's output through unchanged.
 
-    Used by the happy-path glue layer; Phase 4 will
-    replace this with a real bridge hidden-state extraction + talker
-    forward call.
+    Used by the happy-path glue layer; the MiniMind pipeline binds its real
+    stage processors (``thinker2talker`` / ``talker2code2wav``) instead.
     """
+    del prompt
     return payload
 
 
@@ -961,6 +1144,7 @@ __all__ = [
     "MiniMindOmniTalkerForConditionalGeneration",
     "TalkerOutput",
     "wrap_talker",
+    "_drive_talker_generation",
     "_identity_process_input",
     "_talker_stage",
 ]

@@ -216,9 +216,8 @@ class DeployConfig:
         if self.pipeline_kind not in supported:
             names = ", ".join(sorted(supported)) or "none"
             raise ValueError(
-                f"full mode is not supported by pipeline {pipeline_cfg.name!r} "
-                f"(pipeline_kind={self.pipeline_kind!r}); supported kinds: {names}. "
-                "It is intentionally gated until its stage factories are available."
+                f"pipeline_kind {self.pipeline_kind!r} is not supported by "
+                f"pipeline {pipeline_cfg.name!r}; supported kinds: {names}."
             )
 
     def __post_init__(self) -> None:

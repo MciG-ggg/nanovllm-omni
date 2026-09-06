@@ -12,10 +12,18 @@ declarative contract; per-stage implementation lives in
 ``thinker.py`` / ``talker.py`` / ``code2wav.py``.
 
 For the collapsed default, the thinker factory still invokes the existing
-``generate_audio`` end-to-end wrapper. The stage-input hooks now use pure
-MiniMind payload processors: final audio passes through unchanged, while a
-future full-stage thinker/talker/code2wav factory can consume the typed
-handoff envelopes without changing this topology.
+``generate_audio`` end-to-end wrapper. Full stage execution is wired: the
+thinker factory emits a ``ThinkerStageOutput`` with bridge hidden states,
+``thinker2talker`` turns that into a ``TalkerInputPayload``, the talker stage
+drives the talker wrapper + ``talker_mtp`` over the bridge to produce code
+rows, ``talker2code2wav`` turns them into a ``Code2WavInputPayload``, and
+the code2wav stage decodes them to 24 kHz mono WAV.
+
+Full mode is enabled (``supported_pipeline_kinds=("collapsed", "full")``)
+because the three-stage path executes end-to-end on CPU with injected stage
+doubles; behavioral parity against real MiniMind-3o / Mimi weights is the
+outstanding RTX-3050 validation (see ``tests/test_full_pipeline.py``). The
+collapsed pipeline remains the deploy default.
 """
 
 from __future__ import annotations
@@ -61,9 +69,10 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
     ),
     default_deploy_config_name="minimind_omni.yaml",
     registration_handles=("minimind_o", "jingyaogong/minimind-3o"),
-    # The current factories intentionally remain collapsed: thinker already
-    # returns final audio and talker is a compatibility pass-through.
-    supported_pipeline_kinds=("collapsed",),
+    # Both runtime modes are executable: collapsed keeps the legacy
+    # end-to-end thinker (and remains the deploy default), while full drives
+    # the 3-stage thinker -> talker -> code2wav path with typed payloads.
+    supported_pipeline_kinds=("collapsed", "full"),
 )
 
 PIPELINE = MINIMIND_OMNI_PIPELINE

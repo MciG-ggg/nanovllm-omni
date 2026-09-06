@@ -53,8 +53,9 @@ def stream_generate(
     flips True (text EOS + last audio layer stopped, or ``max_new_tokens``).
 
     When ``capture_bridge_states`` is true, the runner captures one bridge
-    hidden state per prefill/decode step. ``bridge_state_callback`` receives
-    the stacked CPU tensor before the generator returns.
+    hidden state per prompt position (prefill) plus one per decode step.
+    ``bridge_state_callback`` receives the stacked CPU tensor before the
+    generator returns.
     """
     import torch
 

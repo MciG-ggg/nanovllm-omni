@@ -12,8 +12,7 @@ What's ported verbatim from vllm-omni (vLLM-specific infrastructure stripped):
   * ``_make_inputs_embeds``              -- bridge + audio embedding fusion
   * ``_sample_codebook_logits_batch``    -- per-codebook multinomial
   * ``preprocess / forward / compute_logits / sample / postprocess``
-  * ``_normalise_audio_code_rows`` and ``_ready_diagonal_audio_frames``
-    -- mark-only for Phase 3 MTP
+  * ``talker_mtp`` and delayed diagonal frame alignment
   * ``on_requests_finished``             -- per-request state cleanup
   * ``make_omni_output``                 -- output envelope
   * ``load_weights``                     -- HF ``model.talker.*`` -> our ``self.*``
@@ -40,20 +39,16 @@ Phase 1 scope (TICKET-05 / commit 1):
     (captured upstream by ``BatchedThinkerRunner`` -- commit 2).
 
 Out of scope:
-  * Full-code (multi-codebook) sampling integration
-    (``_normalise_audio_code_rows``, ``_ready_diagonal_audio_frames``
-    are present but only exercised in tests + ``make_omni_output``)   -- Phase 3
-  * Stage processor for thinker->talker handoff                    -- Phase 4
-  * Talker CUDA graph                                              -- Phase 7
+  * Pipeline stage processor for thinker->talker handoff             -- Phase 4
+  * Talker CUDA graph                                               -- Phase 7
 
 # ponytail: bridge hidden states are consumed on whatever device the
 # thinker left them on; Phase 1 assumes the same device as the talker
 # parameters (joint forward materialises bridge there). A separate
 # device-mismatch path is added when the pipeline runner routes
 # thinker/talker across stages (Phase 4).
-# ponytail: only the layer-0 lm_head is sampled here; the remaining 7
-# adapter heads (``TalkerHead.adapters``) stay on the module for the
-# future full-code integration but are not sampled in Phase 1.
+# ponytail: the collapsed eager runner remains separate; the MTP seam is
+# local and explicit until the pipeline runner owns stage handoff (Phase 4).
 """
 
 from __future__ import annotations
@@ -369,6 +364,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         do_sample: bool = True,
         temperature: float = 0.2,
         top_k: int = 50,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample one token per codebook layer per request row.
 
@@ -390,11 +386,105 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             flat = flat / temperature
             if 0 < top_k < vocab:
                 top_val, top_idx = flat.topk(top_k, dim=-1)
-                sample = torch.multinomial(torch.softmax(top_val, dim=-1), 1)
+                sample = torch.multinomial(torch.softmax(top_val, dim=-1), 1, generator=generator)
                 sampled = top_idx.gather(-1, sample).squeeze(-1)
             else:
-                sampled = torch.multinomial(torch.softmax(flat, dim=-1), 1).squeeze(-1)
+                sampled = torch.multinomial(
+                    torch.softmax(flat, dim=-1), 1, generator=generator
+                ).squeeze(-1)
         return sampled.reshape(num_layers, batch).transpose(0, 1).contiguous()
+
+    @torch.inference_mode()
+    def talker_mtp(
+        self,
+        input_ids: torch.Tensor,
+        input_embeds: torch.Tensor,
+        last_talker_hidden: torch.Tensor,
+        text_step: torch.Tensor,
+        *,
+        active_mask: torch.Tensor | None = None,
+        temperature: float = 0.2,
+        top_k: int = 50,
+        do_sample: bool = True,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """Generate one delayed diagonal row of audio codebooks.
+
+        ``input_ids`` supplies the current layer-0 code and the adapter heads
+        predict layers ``1..num_code_layers-1`` from the previous talker
+        hidden state. ``active_mask`` is exact ``[B, num_code_layers]`` for
+        batched calls; a one-dimensional mask is accepted only for ``B=1``.
+        """
+        if input_ids.ndim == 1:
+            if input_ids.numel() == 0:
+                raise ValueError("input_ids must contain at least one row")
+            batch_size = int(input_ids.shape[0])
+            layer0 = input_ids
+        elif input_ids.ndim == 2 and input_ids.shape[1] == 1:
+            batch_size = int(input_ids.shape[0])
+            layer0 = input_ids[:, 0]
+        else:
+            raise ValueError("input_ids must have shape [batch_size] or [batch_size, 1]")
+
+        if input_embeds.ndim < 1 or input_embeds.shape[0] != batch_size:
+            raise ValueError(
+                f"input_embeds must have first dimension {batch_size}, "
+                f"got {tuple(input_embeds.shape)}"
+            )
+        if last_talker_hidden.ndim == 1:
+            if batch_size != 1:
+                raise ValueError("last_talker_hidden must have one row per input_ids row")
+        elif last_talker_hidden.shape[0] != batch_size:
+            raise ValueError("last_talker_hidden must have one row per input_ids row")
+        if text_step.ndim == 1:
+            if batch_size != 1:
+                raise ValueError("text_step must have one row per input_ids row")
+        elif text_step.shape[0] != batch_size:
+            raise ValueError("text_step must have one row per input_ids row")
+
+        output_device = input_embeds.device
+        hidden = last_talker_hidden.reshape(batch_size, -1).to(
+            device=output_device, dtype=input_embeds.dtype
+        )
+        logits_by_layer = self.lm_head(hidden)
+        if len(logits_by_layer) != self.num_code_layers:
+            raise ValueError(
+                f"lm_head returned {len(logits_by_layer)} code layers; "
+                f"expected {self.num_code_layers}"
+            )
+        residual_codes = self._sample_codebook_logits_batch(
+            logits_by_layer[1:],
+            do_sample=do_sample,
+            temperature=temperature,
+            top_k=top_k,
+            generator=generator,
+        )
+        audio_codes = torch.cat(
+            (
+                layer0.to(device=output_device, dtype=torch.long).reshape(batch_size, 1),
+                residual_codes.to(device=output_device, dtype=torch.long),
+            ),
+            dim=1,
+        )
+
+        if active_mask is not None:
+            if active_mask.ndim == 1:
+                if batch_size != 1 or active_mask.shape[0] != self.num_code_layers:
+                    raise ValueError(
+                        "active_mask must have shape " f"[{batch_size}, {self.num_code_layers}]"
+                    )
+                active_mask = active_mask.unsqueeze(0)
+            elif active_mask.ndim != 2 or active_mask.shape != (
+                batch_size,
+                self.num_code_layers,
+            ):
+                raise ValueError(
+                    "active_mask must have shape "
+                    f"[{batch_size}, {self.num_code_layers}], got {tuple(active_mask.shape)}"
+                )
+            active = active_mask.to(device=output_device, dtype=torch.bool)
+            audio_codes = audio_codes.masked_fill(~active, self.audio_pad_token)
+        return audio_codes
 
     # ------------------------------------------------------------------
     # LLM_AR interface (mirrors vllm-omni's stage contract)
@@ -542,9 +632,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor | TalkerOutput) -> torch.Tensor | None:
         """Project the talker hidden state to layer-0 audio logits.
 
-        vllm-omni samples one token stream; the remaining adapter heads
-        are kept for the future full-code integration (Phase 3) but not
-        returned here.
+        vllm-omni samples one token stream; residual adapter heads are
+        consumed by ``talker_mtp`` for delayed full-code output.
         """
         if isinstance(hidden_states, TalkerOutput):
             hidden_states = hidden_states.text_hidden_states
@@ -559,7 +648,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     ) -> torch.Tensor | None:
         """Sample one audio token per request row from layer-0 logits.
 
-        Phase 1: simple multinomial with the metadata's ``temperature`` /
+        Uses simple multinomial sampling with the metadata's ``temperature`` /
         ``top_k`` / ``generator`` (when supplied). ``internal_stop_token_id``
         is force-masked to ``-inf`` so the watchdog can force-stop on it.
         """
@@ -652,8 +741,12 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             frame = torch.stack(
                 [rows[end - delay + layer, layer] for layer in range(self.num_code_layers)]
             )
-            # Upstream emits only fully active frames; stop/pad rows terminate audio.
-            if (frame >= self.audio_vocab_size).any():
+            # Every diagonal entry must be a sampled code, not a boundary row.
+            if (
+                (frame >= self.audio_vocab_size).any()
+                or (frame == self.audio_pad_token).any()
+                or (frame == self.audio_stop_token).any()
+            ):
                 continue
             frames.append(frame)
         if not frames:

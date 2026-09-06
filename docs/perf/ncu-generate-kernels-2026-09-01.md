@@ -1401,3 +1401,102 @@ Omni.generate 公开 Python API 上**全路径字节级 deterministic**。
 
 ---
 
+## §52 defect A + defect B 修复 + 长度矩阵 GPU 验证
+
+(2026-09-06)
+
+### 52.1 背景
+
+`enable_cuda_graph` 第一次返回的 decoder 是 capture-once 缓存。
+两个独立的「预算烤进图」缺陷影响跨请求复用:
+
+- **defect A**：`CudaGraphDecoder` 的 `_needs_recapture` 只比较
+  `_captured_len` 与当前 prefill 长度，但 `for _ in range(self.n_steps)`
+  烤入 capture 的 step count 也是预请求的 `n_steps`。如果后续请求
+  用不同 `max_tokens` 调 `enable_cuda_graph(model, n_steps=new_budget)`，
+  early-return 命中 existing decoder 但图仍是旧预算，回放得到旧 step 数。
+- **defect B**：`generate_tokens` 的主循环 `for k in range(n_steps - 1)`
+  只看步数，不看 EOS / audio_stop。eager `BatchedThinkerRunner.step_finished`
+  (`batched_generation.py:430-435`) 在 `text_finished AND
+  audio_codes[7][-1] == audio_stop` 时按内容停。graph 路径在 production
+  default 上是消费者可见行为差异：graph 6×5×16 出 16 帧，eager 出 ~9。
+
+### 52.2 修复
+
+`nanovllm_omni/optim/cuda_graph.py`：
+
+1. `CudaGraphDecoder.__init__` 加 `self._captured_n_steps = -1` —— 烤预算键。
+2. `_needs_recapture` 改成三键合取：
+   `_captured AND _captured_len == _prefill_len AND _captured_n_steps == n_steps`。
+3. `_capture` 末尾记录 `self._captured_n_steps = self.n_steps`。
+4. `enable_cuda_graph` 把 early-return 改为「existing.存在 → 检查预算；
+   变化 → bump `existing.n_steps` + log → 返回 existing」。fixed-budget
+   serve path（每请求同 `n_steps`）永远走 else 分支保持 capture-once。
+
+`generate_tokens` 加 `_should_stop(tok, audio_codes)` 纯判定函数 + 主循环
+break on True；种子 EOS flip `self._text_finished`，音频通道 7 命中
+`audio_stop_token` 时返回 True（与 eager `step_finished` 闸完全等价）。
+`enable_cuda_graph` 新增 `eos_token_id` / `audio_stop_token` kwargs，None
+时回退到 `model.eos_token_id_2` / `model.audio_stop_token`（parity with
+eager `batched_generation.py:119`）。
+
+### 52.3 GPU 验证（RTX 3050）
+
+| 实验 | 命令 | 结果 |
+| --- | --- | --- |
+| **A 长度矩阵** | `bench matrix --lengths 8,16,32,64,120 --use-cuda-graph` | median_frames = 请求预算（8/16/32/64/120）；log 显示 `budget 8 -> 16 -> 32 -> 64 -> 120 (re-capture on next generate)`；总耗时线性 81 → 1058 ms。 |
+| **A 6×5×16 graph** | `bench time --max-tokens 16 --runs 5 --use-cuda-graph` | 6 提示 × 5 跑 = 16 帧/prompt（130-150 ms total_median），与 defect A 修复前一致（capture-once 路径未退化）。 |
+| **A 确定性门** | `tools/bench_prompt_robustness_graph.py` | 6/6 提示同 seed MD5 唯一性 + 跨提示 MD5 互异（§5.4 ALL-DETERMINISTIC: True）。 |
+| **A defect #5 守门** | `tools/bench_defect5_3cycle.py` | 3-cycle short/medium/long 全 identical，VERDICT: defect #5 CLOSED on 3050。 |
+
+| 实验 | 命令 | 结果 |
+| --- | --- | --- |
+| **B 长度矩阵** | 同上 | graph 仍出预算帧（8/16/32/64/120 = 8/16/32/64/120）；eager 1/9/25/57/113；与上一轮未修复 defect B 时的 graph 数字一致 —— **defect B 的 stop predicate 在 graph 上不触发**。 |
+
+### 52.4 关键发现:defect B 的 predicate 在 graph 上是死代码
+
+详细 trace 暴露根因：**graph 路径的采样分布 ≠ eager 采样分布**。
+
+对「你好。」prompt seed=42:
+- eager 文本采样: `[849, 658, 294, 4166, 2621, 5983, 705, 4151, 296, 1935, 776, 2, ...]`，
+  第 10 步命中 `eos_token_id=2`，`_text_finished` flip，step_finished
+  第 15 步由 `st.step >= max_new_tokens` 兜底停。
+- graph 文本采样: `[849, 463, 533, 851, 533, 410, 294, 410, 410, 463, 410, 410, 3134, 463, 463, 463]`，
+  16 步**全程不命中** `eos_token_id=2`，`_text_finished` 永远是 False。
+  graph 音频通道 7: `[2049, 2049, ..., 981, 417, 1407, 72, 1196, 981, 417, 1407]`
+  全程不命中 `audio_stop_token=2050`。
+
+=> defect B 加上的 `_should_stop` predicate **从未返回 True**，是结构性
+死代码。两步采样从第一步就分叉（849 → 658 vs 849 → 463），说明 graph
+的 forward logits ≠ eager forward logits —— CUDA Graph capture 引入的
+数值 / 状态差异，不是简单的「忘记加 break」。
+
+### 52.5 当前决策与下一步
+
+- **defect A 完全闭环**：长度矩阵跨 5 档预算全部 re-capture 正确，
+  determinism / longrun / defect #5 守门不退化，CPU 测试 12 项（11 原 + 1
+  budget-change）全绿。生产 fixed-budget serve path（`_thinker_stage`
+  + YAML 默认）完全不受影响。
+- **defect B 半闭环**：predicate 结构对齐 eager `step_finished`，但
+  因 graph 采样 ≠ eager 采样，predicate 触发条件永远不会满足，行为仍
+  与修复前一致（graph 出满 n_steps 帧）。修法选项:
+  1. 撤回 predicate 作为「未来 hook」（低风险，但 dead code）
+  2. 调查 graph 与 eager logits 差异（capture-time RNG 副作用？attention
+     buffer 几何？precision 漂移？）—— GPU profile 工具（nsys / ncu）才能定根因。
+  3. 在 Omni 层加 host-side 截断（最简单，但修不了 graph 内部采样偏差）。
+
+  本次留 predicate + 标 dead-code（不在用户可见行为上撒谎），并把
+  「graph 采样 ≠ eager」列为 ideas backlog 下一轮高优方向。
+
+### 52.6 文件改动
+
+- `nanovllm_omni/optim/cuda_graph.py`：`__init__` 加 `_captured_n_steps`；
+  `_needs_recapture` 改三键合取；`_capture` 末尾记录 `_captured_n_steps`；
+  `enable_cuda_graph` 把 existing decoder 检查与预算 bump 合并到一处；
+  新增 `_should_stop` / `generate_tokens` 主循环 break；`enable_cuda_graph`
+  新增 eos/audio_stop kwargs。
+- `tests/test_cuda_graph_recapture.py`：原 11 项测试加 `_captured_n_steps`
+  字段；新增 `test_capture_invalidates_on_budget_change`（12 项全绿）。
+
+---
+

@@ -8,7 +8,7 @@
 [![Models](https://img.shields.io/badge/models-4-green.svg)](.)
 
 - 🎯 **MiniMind-O 流水线** — 最小的 Thinker → Talker → Code2Wav 全链路运行时,加载真实的 `jingyaogong/minimind-3o` 权重
-- ⚡ **RTX 3050 (4 GB) 上 ~320 ms p50 / ~345 ms p95 / ~350 ms p99** — `d2ebe56 perf(stack)` 合并后单条 MiniMind-O audio 请求(融合 QKV/gate-up 投影、融合 RMSNorm、融合 RoPE 在 `nanovllm_omni/models/minimind_omni/attention.py`;预分配 KV buffer;SDPA decode `is_causal=True`)。p50/p95/p99 来自 `docs/perf/minimind-omni-under-500ms.md`(20 次跑,torch 2.13):p50 320 ms、mean 323 ms、stdev 11.6 ms、min 305 ms、max 343 ms;p95/p99 用 mean + z·stdev 近似。WSL 上复现命令 `python -m nanovllm_omni.optim.bench time`。
+- ⚡ **RTX 3050 (4 GB) 上 `--use-cuda-graph` 约 177 ms total 中位数** — 单条 MiniMind-O audio(16-frame thinker 解码),在 `8f6d522`(仅 full 三阶段,torch 2.14.0+cu130)上重测 2026-09。CUDA-Graph 六题各 20 次跑,中位 173-182 ms;eager 默认 457-553 ms(各 10 次)。**不传 `--use-cuda-graph` 时同一硬件约 483 ms total 中位数。** 数据见 `docs/perf/tk005-rtx3050.md`;旧的 ~320 ms / ~715 ms 是 torch 2.13.0+cu130、collapsed 退役前测得。
 - 🔁 **StagePool 模式(单 replica in-process)** — per-stage 持续批处理通过 `RuntimeScheduler` 完成;多 replica + RoundRobin LB 已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
@@ -113,17 +113,17 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 
 ### 复现延迟数字
 
-上面的 320 ms p50 需要 CUDA-Graph 快路径(`--use-cuda-graph` opt-in;CUDA-only)。不传这个 flag,同一硬件上默认跑 ~715 ms p50。
+上面的约 177 ms total 中位数需要 CUDA-Graph 快路径(`--use-cuda-graph` opt-in;CUDA-only)。不传这个 flag,同一硬件上默认跑约 483 ms total 中位数。
 
 ```bash
 # 在 WSL 里(~mcig@mcigs-wsl)—需要 torch + 本地权重 snapshot
 python -m nanovllm_omni.optim.bench time \
     --model ~/minimind-3o --mimi ~/mimi \
-    --max-tokens 16 --runs 5 --warmup 2 \
+    --max-tokens 16 --runs 20 --warmup 1 \
     --use-cuda-graph
 ```
 
-完整分布(CUDA-Graph path,25 次实验 trace,kernel 级别拆分):`docs/perf/minimind-omni-under-500ms.md`。Eager path 基线(`d2ebe56` 合并前):`docs/perf/session-1.md`。
+完整分布(CUDA-Graph path,kernel 级别拆分):`docs/perf/minimind-omni-under-500ms.md`。仅 full 三阶段的 RTX 3050 重测(torch 2.14):`docs/perf/tk005-rtx3050.md`。Eager path 基线(`d2ebe56` 合并前):`docs/perf/session-1.md`。
 
 ## 配置
 

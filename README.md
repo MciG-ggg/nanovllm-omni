@@ -8,7 +8,7 @@
 [![Models](https://img.shields.io/badge/models-4-green.svg)](.)
 
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
-- ⚡ **~320 ms p50 / ~345 ms p95 / ~350 ms p99 on RTX 3050 (4 GB) with `--use-cuda-graph` opt-in** — single-prompt MiniMind-O audio, post the `d2ebe56 perf(stack)` merge (fused QKV/gate-up projections, fused RMSNorm, fused RoPE in `nanovllm_omni/models/minimind_omni/attention.py`; pre-allocated KV buffer; SDPA decode with `is_causal=True`). **Without `--use-cuda-graph`, default bench runs ~715 ms p50 on the same hardware** (verified 2026-09, torch 2.13.0+cu130). Numbers from `docs/perf/minimind-omni-under-500ms.md` (20 runs, torch 2.13): p50 320 ms mean 323 ms stdev 11.6 ms min 305 ms max 343 ms; p95/p99 approximated from mean + z·stdev.
+- ⚡ **~177 ms total median on RTX 3050 (4 GB) with `--use-cuda-graph` opt-in** — single-prompt MiniMind-O audio (16-frame thinker decode), re-measured 2026-09 on `8f6d522` (full three-stage only; torch 2.14.0+cu130). CUDA-Graph path median 173-182 ms across the six bench prompts (20 runs each); eager default 457-553 ms (10 runs each). **Without `--use-cuda-graph`, default bench runs ~483 ms total median on the same hardware.** Numbers from `docs/perf/tk005-rtx3050.md`; the older ~320 ms / ~715 ms figures were measured on torch 2.13.0+cu130 before the collapsed pipeline was retired.
 - 🔁 **StagePool pattern (single-replica in-process)** — per-stage continuous batching via `RuntimeScheduler`; multi-replica + RoundRobin LB removed after measuring `num_replicas=1 == num_replicas=2` (`tests/test_batched_runner_contract.py`)
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
@@ -180,21 +180,22 @@ Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do no
 
 ### Reproducing the latency claim
 
-The 320 ms p50 number above requires the CUDA-Graph fast path
+The ~177 ms total-median figure requires the CUDA-Graph fast path
 (`--use-cuda-graph` opt-in; CUDA-only). Without the flag, default bench
-runs ~715 ms p50 on the same hardware.
+runs ~483 ms total median on the same hardware.
 
 ```bash
 # Inside the WSL box (~mcig@mcigs-wsl) — needs torch + the local weight snapshots
 python -m nanovllm_omni.optim.bench time \
     --model ~/minimind-3o --mimi ~/mimi \
-    --max-tokens 16 --runs 5 --warmup 2 \
+    --max-tokens 16 --runs 20 --warmup 1 \
     --use-cuda-graph
 ```
 
-Full distribution (CUDA-Graph path, 25-experiment trace, kernel breakdown):
-`docs/perf/minimind-omni-under-500ms.md`. Eager-path baseline (pre-`d2ebe56`):
-`docs/perf/session-1.md`.
+Full distribution (CUDA-Graph path, kernel breakdown):
+`docs/perf/minimind-omni-under-500ms.md`. RTX-3050 re-measurement on the
+full-only tree (torch 2.14): `docs/perf/tk005-rtx3050.md`. Eager-path
+baseline (pre-`d2ebe56`): `docs/perf/session-1.md`.
 
 ## Configuration
 

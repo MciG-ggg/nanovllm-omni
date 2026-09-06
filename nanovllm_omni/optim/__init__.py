@@ -1,1 +1,1 @@
-"""Performance + optimization utilities for nanovllm-omni (TK-011..)."""
+"""Performance + optimization utilities (TK-011..)."""

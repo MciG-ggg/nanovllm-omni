@@ -1,6 +1,6 @@
 """Per-request sequence state for the per-stage continuous-batching scheduler.
 
-Data structures lifted from vllm-omni's ``Sequence`` / ``PrefillChunk`` shape
+Data structures lifted from the reference's ``Sequence`` / ``PrefillChunk`` shape
 (TK-004). ``Sequence`` is the per-request mutable state a stage's scheduler
 owns; ``PrefillChunk`` marks a sub-range of a prompt being prefilled this
 round so the same scheduler can interleave prefill with decode (Q8a).
@@ -19,7 +19,7 @@ from typing import Any
 class SequenceStatus(enum.Enum):
     """Lifecycle states a single sequence passes through.
 
-    Finer than vllm-omni's coarse WAITING/FINISHED split so the scheduler
+    Finer than the reference's coarse WAITING/FINISHED split so the scheduler
     can interleave prefill with decode (a sequence in PREFILL does not yet
     appear in decode groups).
     """

@@ -7,7 +7,7 @@ One ``RuntimeScheduler`` + one ``BatchedThinkerRunner`` already delivers the
 measured ~+87% throughput for batch=2 vs serial (group forwarding of equal
 KV-length requests); the ceremony above them was deleted.
 
-Loop mirrors vllm-omni's ``schedule() -> execute(prefill+decode) ->
+Loop mirrors the reference's ``schedule() -> execute(prefill+decode) ->
 update_from_output``; finished thinkers drop OUT to the serial
 talker/mimi->wav chain (Q9a) via ``code2wav.decode_audio``.
 """

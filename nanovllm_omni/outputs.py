@@ -10,7 +10,7 @@ _T = TypeVar("_T")
 
 
 class OutputModalityNames(StrEnum):
-    """Canonical keys for output modalities (vllm-omni `output_modality.py`)."""
+    """Canonical keys for output modalities (mirrors the reference's ``output_modality`` keys)."""
 
     TEXT = "text"
     IMAGE = "image"
@@ -200,7 +200,7 @@ class AudioPayload:
 
 @dataclass
 class OmniRequestOutput:
-    """Unified request output (vllm-omni `OmniRequestOutput` shape).
+    """Unified request output (mirrors the reference's ``OmniRequestOutput`` shape).
 
     ``multimodal_output`` carries the modality payload (audio / image / actions);
     ``custom_output`` is a free-form dict for non-modal extras. ``final_output_type``
@@ -272,7 +272,7 @@ class OmniRequestOutput:
         final_output_type: str = "text",
         **kwargs: Any,
     ):
-        """Build from a stage's raw output, copying content fields (vllm-omni shape).
+        """Build from a stage's raw output, copying content fields (reference shape).
 
         ``outputs`` and ``multimodal_output`` are copied from *source* when present;
         ``request_id`` / ``final_output_type`` / extra kwargs override defaults.
@@ -309,7 +309,7 @@ class OmniRequestOutput:
         return self.multimodal_output is not None and "image" in self.multimodal_output
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable dict (vllm-omni ``to_dict`` shape).
+        """JSON-serializable dict (mirrors the reference's ``to_dict`` shape).
 
         ``multimodal_output`` is materialized as ``{key: value}`` where tensor
         values are detached to CPU and converted to lists, and ``bytes`` values
@@ -332,7 +332,7 @@ class OmniRequestOutput:
                     result["multimodal_output"][key] = base64.b64encode(value.wav_bytes()).decode(
                         "ascii"
                     )
-                    # vllm-omni `multimodal_output` carries a metadata dict
+                    # The reference's `multimodal_output` carries a metadata dict
                     # alongside the payload; surface the WAV sample rate so
                     # the HTTP adapter does not hardcode it (TK-018).
                     result["multimodal_output"][f"{key}_metadata"] = {
@@ -432,7 +432,7 @@ class TextArtifact:
     ``text`` is the decoded string the stage produced; ``token_ids`` is the
     optional raw token sequence (e.g. for downstream re-scoring or
     logprob inspection). ``token_ids=None`` means "not exposed by this stage";
-    an empty list means "exposed but empty". Mirrors vllm-omni's text
+    an empty list means "exposed but empty". Mirrors the reference's text
     artifact shape.
     """
 

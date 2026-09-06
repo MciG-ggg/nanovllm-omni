@@ -21,7 +21,7 @@ def _default_device() -> str:
 OmniPromptType: TypeAlias = str | dict[str, Any]
 """One generate() prompt: text, or a dict carrying modal content.
 
-The dict shape mirrors vllm-omni's OmniTextPrompt -- a ``prompt`` key plus
+The dict shape mirrors the reference ``OmniTextPrompt`` -- a ``prompt`` key plus
 optional modal payload fields (``image``, ...). A text-only str or a dict
 without modal fields behave identically.
 """

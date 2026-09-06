@@ -30,9 +30,9 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 def _name_match_candidate(model: str) -> str:
     """basename of the model id/path, lowercased with separators stripped.
 
-    vllm-omni uses this same trick for the path-substring fallback (e.g.
+    The reference uses this same trick for the path-substring fallback (e.g.
     ``cosyvoice3`` beats ``cosyvoice`` by length). Mirrors their helper so
-    existing local-dir inference matches what vllm-omni would do.
+    existing local-dir inference matches what the reference would do.
     """
     name = Path(model.rstrip("/")).name or model
     return name.lower().replace("-", "").replace("_", "")
@@ -61,7 +61,7 @@ def try_infer_model_type(
 ) -> str | None:
     """Auto-detect the registered ``PipelineConfig.name`` for a model id/path.
 
-    Cascade mirrors ``vllm_omni.config.config_factory.try_infer_model_type``:
+    Cascade mirrors the reference's ``config_factory.try_infer_model_type``:
 
     1. ``PretrainedConfig.from_pretrained`` -> ``model_type`` (skipped if
        transformers is unavailable; not in the base install).

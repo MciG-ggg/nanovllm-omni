@@ -5,9 +5,9 @@ nothing about concurrency, async, HTTP, or multi-replica routing. The
 companion class ``PipelineExecutor`` (in ``engine/executor.py``) wraps
 this runner for async and multi-request use.
 
-Design basis: 10-round grill session. vllm-omni's StagePool and
+Design basis: 10-round grill session. The reference's StagePool and
 Orchestrator are designed for multi-replica routing and cross-stage
-request lifecycle management; neither is needed for nanovllm-omni's
+request lifecycle management; neither is needed for this project's
 single-process, single-GPU scope.
 
 Phase 2 (TK-016): stage factories and ``process_input`` hooks are

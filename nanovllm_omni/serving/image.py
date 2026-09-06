@@ -54,7 +54,7 @@ def register(demo: Any) -> None:
         # via a stderr log without failing the request.
         if init_image is not None:
             print(
-                "[nanovllm-omni serving.image] init_image ignored: "
+                "[serving.image] init_image ignored: "
                 "current sd_turbo stage is text-only (img2img is reserved).",
                 flush=True,
             )

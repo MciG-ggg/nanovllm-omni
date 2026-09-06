@@ -1,4 +1,4 @@
-"""Top-level Gradio demo for ``nanovllm-omni``.
+"""Top-level Gradio demo.
 
 Composes four lazy-loaded tabs (audio / image / chat / vla) into a single
 ``gr.Blocks`` instance. Each tab module owns its own engine state and
@@ -29,9 +29,9 @@ def build_demo() -> Any:
     """Build the multi-tab Gradio demo. Returns without launching."""
     import gradio as gr  # noqa: PLC0415 -- lazy: avoid hard dep on gradio at import
 
-    with gr.Blocks(title="nanovllm-omni demo", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Omni demo", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
-            "# nanovllm-omni demo\n"
+            "# Omni demo\n"
             "Each tab lazy-loads its own engine on first click; do not load more than one "
             "tab's model at once on a 4 GB GPU.\n\n"
             "Pre-install the matching extras (`[minimind]`, `[smolvla]`, ...) before "
@@ -45,7 +45,7 @@ def build_demo() -> Any:
 
 
 def main() -> None:
-    """Entry point for ``python -m nanovllm_omni.serving.app``."""
+    """Entry point for the Gradio demo module."""
     demo = build_demo()
     demo.queue().launch()
 

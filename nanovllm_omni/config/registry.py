@@ -13,7 +13,7 @@ are enforced by the registry contract tests.
 Phase 2 (TK-016): ``StageConfig.factory`` / ``process_input`` are now
 dotted-path strings (``"package.module:attr"``) resolved via
 ``resolve_stage_factory``; ``kind`` is the :class:`StageExecutionType` enum
-mirroring vllm-omni's LLM_AR / LLM_GENERATION / DIFFUSION / CODEC taxonomy.
+mirroring the reference's LLM_AR / LLM_GENERATION / DIFFUSION / CODEC taxonomy.
 Per-stage modules are no longer statically imported by ``pipeline.py``; the
 pipeline topology file is now fully declarative.
 """
@@ -33,7 +33,7 @@ import yaml
 class StageExecutionType(StrEnum):
     """Pipeline-stage execution taxonomy.
 
-    Mirrors vllm-omni's StageExecutionType (LLM_AR / LLM_GENERATION /
+    Mirrors the reference's StageExecutionType (LLM_AR / LLM_GENERATION /
     DIFFUSION / CODEC). ``StrEnum`` so members compare equal to legacy
     string values (``StageExecutionType.LLM_AR == "ar"``) while remaining
     a closed set. Add new members here when a new execution class is
@@ -104,7 +104,7 @@ class StageConfig:
         # topology mistakes fail at construction time (when the pipeline
         # is registered) rather than at first request run. The factory
         # resolution also forces per-stage modules to be importable from
-        # the registry's vantage point, mirroring vllm-omni's
+        # the registry's vantage point, mirroring the reference's
         # pipeline-registry contract.
         if not isinstance(self.kind, StageExecutionType):
             raise TypeError(
@@ -193,7 +193,7 @@ def register_pipeline(
 ) -> None:
     """Register a PipelineConfig (or resolver) under a model_type key.
 
-    Mirrors vllm-omni's ``register_pipeline``: a ``PipelineConfig`` registers
+    Mirrors the reference's ``register_pipeline``: a ``PipelineConfig`` registers
     under ``pipeline.name`` plus its ``registration_handles``; a callable
     resolver needs an explicit ``model_type`` (it can resolve to different
     pipelines depending on ``hf_config``).
@@ -201,7 +201,7 @@ def register_pipeline(
     .. warning::
         Same-name (and same-``registration_handles``) re-registration
         **silently overrides** the prior entry. This is a deliberate
-        in-scope divergence from vllm-omni, which raises on duplicate
+        in-scope divergence from the reference, which raises on duplicate
         registration. The override is locked by
         ``tests/test_registry_resolver.py``; if you need a warn-or-raise
         policy, read the "Definition of aligned" section of ``AGENTS.md``
@@ -230,10 +230,9 @@ def resolve_pipeline_config(model_type: str, hf_config: Any | None = None) -> Pi
 
     ``OMNI_PIPELINES`` may hold either a ``PipelineConfig`` (returned as-is)
     or a callable resolver ``(hf_config) -> PipelineConfig | None`` (invoked
-    with ``hf_config``). This mirrors vllm-omni's pipeline registry; the
-    first parameter is named ``model_type`` to match
-    ``vllm_omni.config.pipeline_registry.resolve_pipeline_config`` for
-    keyword callers.
+    with ``hf_config``). This mirrors the reference's pipeline registry; the
+    first parameter is named ``model_type`` to match the reference's
+    ``resolve_pipeline_config`` keyword signature for keyword callers.
     """
     return _resolve_value(OMNI_PIPELINES.get(model_type), hf_config)
 

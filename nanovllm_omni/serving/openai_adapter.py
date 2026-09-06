@@ -180,7 +180,7 @@ def serve(state, host: str, port: int) -> None:
             except Exception as exc:
                 self._json(500, {"error": {"message": str(exc), "type": "server_error"}})
 
-    print(f"nanovllm-omni adapter on http://{host}:{port}/v1/chat/completions", file=sys.stderr)
+    print(f"Omni adapter on http://{host}:{port}/v1/chat/completions", file=sys.stderr)
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 

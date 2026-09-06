@@ -1,6 +1,6 @@
 """Per-stage runtime scheduler (TK-004).
 
-Mirrors vllm-omni's per-stage ``Scheduler`` shape:
+Mirrors the reference's per-stage ``Scheduler`` shape:
 
   - one ``RuntimeScheduler`` instance per LLM stage (thinker, talker)
   - each instance owns its own waiting / running / finished queues

@@ -144,16 +144,41 @@ def main() -> int:
             past.append((torch.zeros(1, 1, 2, 4), torch.zeros(1, 1, 2, 4)))
         fake_model.forward(inp, past_key_values=tuple(past), use_cache=True, logits_to_keep=1)
 
+    # --- Isolated single talker.talker_mtp call (the unit CUDA Graph captures) ---
+    # Fixed shapes matching what the decode loop passes every step. do_sample=False
+    # matches graph capture semantics (CUDA Graphs can't capture multinomial).
+    hidden_size = 8
+    num_code_layers = 8
+    mtp_inputs = {
+        "input_ids": torch.zeros(1, dtype=torch.long),
+        "input_embeds": torch.zeros(1, 1, hidden_size),
+        "last_talker_hidden": torch.zeros(1, hidden_size),
+        "text_step": torch.zeros(1, hidden_size),
+        "active_mask": torch.ones(1, num_code_layers, dtype=torch.bool),
+    }
+
+    def talker_mtp_single():
+        talker.talker_mtp(
+            **mtp_inputs,
+            temperature=0.2,
+            top_k=50,
+            do_sample=False,
+        )
+
     # Warm
     stage1_full()
     stage0_decode_step()
+    for _ in range(3):
+        talker_mtp_single()
 
     s1_full = _profile(stage1_full, n_runs=5, label="stage1_full")
     s0_step = _profile(stage0_decode_step, n_runs=20, label="stage0_decode_step")
+    mtp_single = _profile(talker_mtp_single, n_runs=100, label="talker_mtp_single")
 
     # Wall time (independent, no profiler overhead)
     s1_med, s1_tot = _wall_time(stage1_full, n_runs=10)
     s0_med, s0_tot = _wall_time(stage0_decode_step, n_runs=50)
+    mtp_med, mtp_tot = _wall_time(talker_mtp_single, n_runs=200)
 
     # --- Report ---
     print("=" * 70)
@@ -183,6 +208,12 @@ def main() -> int:
     print("  top 5 ops:")
     for op, n in s1_full["top_10_ops"][:5]:
         print(f"    {n:>5}  {op[:80]}")
+    print()
+
+    print("--- Stage 1: ONE isolated talker.talker_mtp call (graph capture unit) ---")
+    print(f"  ops/call:          {mtp_single['ops_per_call']}")
+    print(f"  ms/call (profiler): {mtp_single['ms_per_call']:.3f}")
+    print(f"  ms/call (wall):    {mtp_med:.4f}  (median over 200)")
     print()
 
     ops_per_step_s1 = s1_full["ops_per_call"] // num_decode_steps

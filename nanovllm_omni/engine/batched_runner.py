@@ -41,6 +41,8 @@ def run_batched_generate(
     base_seed: int = 42,
     deploy: Any = None,
     kv_max_sequence_len: int | None = None,
+    post_eos_padding_count: int = 0,
+    internal_stop_token_id: int | None = None,
 ) -> list[Any]:
     """Continuous-batching entry: tokenize -> drain one scheduler -> serial WAV.
 
@@ -68,6 +70,8 @@ def run_batched_generate(
         open_thinking=open_thinking,
         base_seed=base_seed,
         kv_max_sequence_len=kv_max_sequence_len,
+        post_eos_padding_count=post_eos_padding_count,
+        internal_stop_token_id=internal_stop_token_id,
     )
 
     # Submit everything up-front; the scheduler admits <= max_batch as it
@@ -87,7 +91,9 @@ def run_batched_generate(
         finished: set[str] = set()
         for group in out.prefill_groups:
             runner.prefill_group(group)
-            prefilled.update(chunk.sequence.request_id for chunk in group.items)
+            group_rids = {chunk.sequence.request_id for chunk in group.items}
+            prefilled.update(group_rids)
+            finished.update(rid for rid in group_rids if runner.step_finished(rid))
         for group in out.decode_groups:
             runner.decode_group(group)
             for sequence in group.items:

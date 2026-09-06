@@ -168,6 +168,27 @@ class DeployConfig:
     #: + robustness verified). Deploy/runtime knob — the library Python
     #: default for generate_audio() stays False; serving reads this flag.
     use_cuda_graph: bool = True
+    # Full three-stage MiniMind-O mode uses these reference-compatible
+    # post-EOS controls; collapsed mode leaves them unused until explicit
+    # generation opts in.
+    post_eos_padding_count: int = 128
+    internal_stop_token_id: int = 17
+    talker_max_steps_after_last_thinker_token: int = 192
+
+    def __post_init__(self) -> None:
+        _validate_runtime_int("post_eos_padding_count", self.post_eos_padding_count, minimum=0)
+        _validate_runtime_int("internal_stop_token_id", self.internal_stop_token_id)
+        _validate_runtime_int(
+            "talker_max_steps_after_last_thinker_token",
+            self.talker_max_steps_after_last_thinker_token,
+        )
+
+
+def _validate_runtime_int(name: str, value: Any, minimum: int | None = None) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
 
 
 OMNI_PIPELINES: dict[str, PipelineConfig | Callable[[Any], PipelineConfig | None]] = {}
@@ -244,6 +265,11 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
     max_batch = int(data.get("max_batch", 2))
     if max_batch < 1:
         raise ValueError(f"max_batch must be >= 1, got {max_batch}")
+    post_eos_padding_count = data.get("post_eos_padding_count", 128)
+    internal_stop_token_id = data.get("internal_stop_token_id", 17)
+    talker_max_steps_after_last_thinker_token = data.get(
+        "talker_max_steps_after_last_thinker_token", 192
+    )
     return DeployConfig(
         stages=tuple(
             DeployStageConfig(
@@ -254,6 +280,9 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
         ),
         max_batch=max_batch,
         use_cuda_graph=bool(data.get("use_cuda_graph", True)),
+        post_eos_padding_count=post_eos_padding_count,
+        internal_stop_token_id=internal_stop_token_id,
+        talker_max_steps_after_last_thinker_token=talker_max_steps_after_last_thinker_token,
     )
 
 

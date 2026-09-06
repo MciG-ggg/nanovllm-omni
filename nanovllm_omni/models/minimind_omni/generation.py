@@ -39,6 +39,8 @@ def stream_generate(
     audio_lens: Any = None,
     capture_bridge_states: bool = False,
     bridge_state_callback: Callable[[Any], None] | None = None,
+    post_eos_padding_count: int = 0,
+    internal_stop_token_id: int | None = None,
     **_kwargs: Any,
 ) -> Iterator[tuple[Any, Any]]:
     """Stream MiniMind-O output one decode step at a time.
@@ -69,6 +71,8 @@ def stream_generate(
         eos_token_id=eos_token_id if eos_token_id is not None else 2,
         open_thinking=open_thinking,
         capture_bridge_states=capture_bridge_states,
+        post_eos_padding_count=post_eos_padding_count,
+        internal_stop_token_id=internal_stop_token_id,
     )
     rid = runner.add_request(
         input_ids[0].tolist(), audio_inputs=audio_inputs, audio_lens=audio_lens
@@ -86,6 +90,8 @@ def stream_generate(
             if rid in group_rids:
                 runner.prefill_group(group)
                 prefilled.add(rid)
+                if runner.step_finished(rid):
+                    finished.add(rid)
         for group in out.decode_groups:
             group_rids = [sequence.request_id for sequence in group.items]
             if rid not in group_rids:

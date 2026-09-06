@@ -152,6 +152,8 @@ def run_generate(
     seed: int | None = None,
     capture_bridge_states: bool = False,
     bridge_state_callback: Callable[[Any], None] | None = None,
+    post_eos_padding_count: int = 0,
+    internal_stop_token_id: int | None = None,
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
@@ -181,9 +183,16 @@ def run_generate(
 
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
-        if use_cuda_graph and all(
-            hasattr(model, name)
-            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+        # Full post-EOS mode stays eager until the graph decoder accepts the
+        # internal-stop sequence and bridge capture; its current visible-EOS
+        # stop logic cannot satisfy that contract (Phase 4 integration).
+        if (
+            use_cuda_graph
+            and post_eos_padding_count == 0
+            and all(
+                hasattr(model, name)
+                for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+            )
         ):
             # Graph fast path: joint text+audio decode, frames = transpose of
             # the 8 audio channels (Mimi codebook frames, codec-stage format).
@@ -224,6 +233,8 @@ def run_generate(
                 audio_lens=audio_lens,
                 capture_bridge_states=capture_bridge_states,
                 bridge_state_callback=bridge_state_callback,
+                post_eos_padding_count=post_eos_padding_count,
+                internal_stop_token_id=internal_stop_token_id,
             )
         else:
             # TODO: delete

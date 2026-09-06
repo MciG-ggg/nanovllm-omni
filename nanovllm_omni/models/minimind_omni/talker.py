@@ -40,8 +40,6 @@ Phase 1 scope (TICKET-05 / commit 1):
     (captured upstream by ``BatchedThinkerRunner`` -- commit 2).
 
 Out of scope:
-  * Post-EOS state machine + watchdog
-    (``max_steps_after_last_thinker_token``)             -- Phase 2
   * Full-code (multi-codebook) sampling integration
     (``_normalise_audio_code_rows``, ``_ready_diagonal_audio_frames``
     are present but only exercised in tests + ``make_omni_output``)   -- Phase 3
@@ -156,11 +154,17 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         # vllm-omni uses an explicit ``internal_stop_token_id``; the vendored
         # HF OmniConfig does not expose one, so default to ``audio_stop_token``
         # so the Phase 2 watchdog can be wired without a config bump.
-        self.internal_stop_token_id: int = int(
+        self.internal_stop_token_id: int = (
             getattr(self._config, "internal_stop_token_id", self.audio_stop_token)
             if self._config
             else self.audio_stop_token
         )
+        if isinstance(self.internal_stop_token_id, bool) or not isinstance(
+            self.internal_stop_token_id, int
+        ):
+            raise ValueError(
+                "internal_stop_token_id must be an integer, " f"got {self.internal_stop_token_id!r}"
+            )
         self.audio_vocab_size: int = int(
             getattr(self._config, "audio_vocab_size", 2112) if self._config else 2112
         )
@@ -170,11 +174,19 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         )
         # Watchdog length. vllm-omni publishes 192; vendored HF has no knob, so
         # default to the same value to keep the Phase 2 watchdog contract.
-        self.max_steps_after_last_thinker_token: int = int(
+        self.max_steps_after_last_thinker_token: int = (
             getattr(self._config, "talker_max_steps_after_last_thinker_token", 192)
             if self._config
             else 192
         )
+        if isinstance(self.max_steps_after_last_thinker_token, bool) or not isinstance(
+            self.max_steps_after_last_thinker_token, int
+        ):
+            raise ValueError(
+                "talker_max_steps_after_last_thinker_token must be an integer, "
+                f"got {self.max_steps_after_last_thinker_token!r}"
+            )
+        self._steps_after_last_thinker_by_req: dict[str, int] = {}
         self.hidden_size: int = int(
             getattr(self._config, "talker_hidden_size", 768) if self._config else 768
         )
@@ -442,14 +454,16 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             )
             if not is_prefill:
                 request_id = info_dict.get("request_id")
-                steps_after_last_thinker = max(0, num_computed - bridge_len + 1)
-                if (
-                    isinstance(request_id, str)
-                    and self.max_steps_after_last_thinker_token >= 0
-                    and num_computed >= bridge_len
-                    and steps_after_last_thinker >= self.max_steps_after_last_thinker_token
-                ):
-                    self._stop_pending_by_req[request_id] = True
+                if isinstance(request_id, str) and num_computed >= bridge_len:
+                    steps_after_last_thinker = (
+                        self._steps_after_last_thinker_by_req.get(request_id, 0) + 1
+                    )
+                    self._steps_after_last_thinker_by_req[request_id] = steps_after_last_thinker
+                    if (
+                        self.max_steps_after_last_thinker_token >= 0
+                        and steps_after_last_thinker >= self.max_steps_after_last_thinker_token
+                    ):
+                        self._stop_pending_by_req[request_id] = True
         else:
             update.setdefault("codes", {})["audio"] = torch.full(
                 (span_len, self.num_code_layers),
@@ -693,6 +707,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         """
         for req_id in finished_req_ids:
             self._stop_pending_by_req.pop(req_id, None)
+            self._steps_after_last_thinker_by_req.pop(req_id, None)
 
     def make_omni_output(
         self,

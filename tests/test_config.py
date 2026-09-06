@@ -90,6 +90,9 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     )
     deploy = load_deploy_config(path)
     assert isinstance(deploy, DeployConfig)
+    assert deploy.post_eos_padding_count == 128
+    assert deploy.internal_stop_token_id == 17
+    assert deploy.talker_max_steps_after_last_thinker_token == 192
     assert {s.name for s in deploy.stages} == {"thinker", "talker", "code2wav"}
 
     pipeline = resolve_pipeline_config("minimind_o")
@@ -101,6 +104,45 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     assert by_name["talker"]["temperature"] == 0.2
     assert by_name["talker"]["watchdog_limit"] == 192
     assert by_name["code2wav"] == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("post_eos_padding_count", -1),
+        ("post_eos_padding_count", "many"),
+        ("internal_stop_token_id", "stop"),
+        ("talker_max_steps_after_last_thinker_token", 1.5),
+    ],
+)
+def test_deploy_config_rejects_invalid_phase_2_values(tmp_path: Path, key: str, value: object):
+    path = tmp_path / "invalid-deploy.yaml"
+    path.write_text(f"{key}: {value!r}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=key):
+        load_deploy_config(path)
+
+
+def test_deploy_config_accepts_disabled_talker_watchdog(tmp_path: Path):
+    path = tmp_path / "disabled-watchdog.yaml"
+    path.write_text(
+        "post_eos_padding_count: 0\n"
+        "internal_stop_token_id: 17\n"
+        "talker_max_steps_after_last_thinker_token: -1\n",
+        encoding="utf-8",
+    )
+    deploy = load_deploy_config(path)
+    assert deploy.post_eos_padding_count == 0
+    assert deploy.internal_stop_token_id == 17
+    assert deploy.talker_max_steps_after_last_thinker_token == -1
+
+
+def test_deploy_config_dataclass_validates_phase_2_values():
+    with pytest.raises(ValueError, match="post_eos_padding_count"):
+        DeployConfig(post_eos_padding_count=-1)
+    with pytest.raises(ValueError, match="internal_stop_token_id"):
+        DeployConfig(internal_stop_token_id="stop")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="talker_max_steps"):
+        DeployConfig(talker_max_steps_after_last_thinker_token=1.5)  # type: ignore[arg-type]
 
 
 def test_register_pipeline_adds_entry():

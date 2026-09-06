@@ -310,10 +310,14 @@ def test_on_requests_finished_clears_per_request_state() -> None:
     bundle = make_fake_bundle()
     talker = wrap_talker(bundle)
     talker._stop_pending_by_req.update({"req-A": True, "req-B": True, "req-C": True})
+    talker._steps_after_last_thinker_by_req.update({"req-A": 2, "req-B": 3, "req-C": 4})
     talker.on_requests_finished({"req-A", "req-C"})
     assert "req-A" not in talker._stop_pending_by_req
     assert "req-C" not in talker._stop_pending_by_req
     assert "req-B" in talker._stop_pending_by_req
+    assert "req-A" not in talker._steps_after_last_thinker_by_req
+    assert "req-C" not in talker._steps_after_last_thinker_by_req
+    assert talker._steps_after_last_thinker_by_req["req-B"] == 3
 
 
 def test_postprocess_stashes_last_hidden_and_code_history() -> None:

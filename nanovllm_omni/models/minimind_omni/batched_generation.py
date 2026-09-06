@@ -65,8 +65,13 @@ class BatchedThinkerState:
     # MiniMind text-state machine: after EOS emit enter-token once then pads.
     text_finished: bool = False
     first_finished: bool = True
+    post_eos_started: bool = False
+    post_eos_remaining: int = 0
+    internal_stop_emitted: bool = False
 
-    # decode calls completed (each appends one text token + 8 audio codes)
+    # Decode calls completed (each appends one text token + 8 audio codes).
+    # The prefill prediction is also a generated token, but does not advance
+    # ``step`` because audio alignment starts at the first decode call.
     step: int = 0
 
     # open_thinking audio gating: when the trailing text tokens match
@@ -110,10 +115,22 @@ class BatchedThinkerRunner:
         base_seed: int = 42,
         kv_max_sequence_len: int | None = None,
         capture_bridge_states: bool = False,
+        post_eos_padding_count: int = 0,
+        internal_stop_token_id: int | None = None,
     ) -> None:
         self.bundle = bundle
         self.sched = sched
         self.model = bundle.model
+        if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+            raise ValueError(f"max_new_tokens must be an integer, got {max_new_tokens!r}")
+        if max_new_tokens < 1:
+            raise ValueError(f"max_new_tokens must be >= 1, got {max_new_tokens}")
+        if isinstance(post_eos_padding_count, bool) or not isinstance(post_eos_padding_count, int):
+            raise ValueError(
+                "post_eos_padding_count must be an integer, " f"got {post_eos_padding_count!r}"
+            )
+        if post_eos_padding_count < 0:
+            raise ValueError("post_eos_padding_count must be >= 0")
         self.sampling = {
             "temperature": temperature,
             "top_p": top_p,
@@ -124,6 +141,18 @@ class BatchedThinkerRunner:
             "enter": getattr(self.model, "enter_token_id", 201),
             "pad": getattr(self.model, "pad_token_id", 0),
         }
+        self.post_eos_padding_count = int(post_eos_padding_count)
+        self.internal_stop_token_id = (
+            internal_stop_token_id
+            if internal_stop_token_id is not None
+            else getattr(self.model, "internal_stop_token_id", 17)
+        )
+        if isinstance(self.internal_stop_token_id, bool) or not isinstance(
+            self.internal_stop_token_id, int
+        ):
+            raise ValueError(
+                "internal_stop_token_id must be an integer, " f"got {self.internal_stop_token_id!r}"
+            )
         self.audio_pad: int = int(getattr(self.model, "audio_pad_token", 0))
         self.audio_stop: int = int(getattr(self.model, "audio_stop_token", 0))
         # Bridge hidden-state capture (TICKET-05 phase 1). Off by default so
@@ -368,7 +397,7 @@ class BatchedThinkerRunner:
             st = self.states[rid]
             token = self._sample_text(st, text_logits[r, 0, :])
             if st.text_finished:  # unreachable on first token, kept for symmetry
-                token = self._enter_or_pad(st)
+                token = self._next_post_eos_token(st)
             st.text_tokens.append(token)
             self._note_audio(st, [self.audio_pad] * 8)
             if not st.text_finished and token == self.sampling["eos"]:
@@ -401,7 +430,7 @@ class BatchedThinkerRunner:
             # text already finished, then append, then flip finished on EOS.
             token = self._sample_text(st, text_logits[r, 0, :])
             if st.text_finished:
-                token = self._enter_or_pad(st)
+                token = self._next_post_eos_token(st)
             st.text_tokens.append(token)
             # Detect think_end (open_thinking audio gating). Detection must
             # happen before ``st.step += 1`` so the +2 offset uses the current
@@ -420,10 +449,26 @@ class BatchedThinkerRunner:
             if not st.text_finished and token == self.sampling["eos"]:
                 st.text_finished = True
 
-    def _enter_or_pad(self, st: BatchedThinkerState) -> int:
-        token = self.sampling["enter"] if st.first_finished else self.sampling["pad"]
-        st.first_finished = False
-        return token
+    def _next_post_eos_token(self, st: BatchedThinkerState) -> int:
+        """Return the next token after EOS for the selected pipeline mode.
+
+        ``post_eos_padding_count == 0`` preserves the collapsed pipeline's
+        legacy enter/pad behavior. Full stage execution opts into the
+        reference sequence: enter, a bounded PAD tail, then internal stop.
+        """
+        if self.post_eos_padding_count == 0:
+            token = self.sampling["enter"] if st.first_finished else self.sampling["pad"]
+            st.first_finished = False
+            return token
+        if not st.post_eos_started:
+            st.post_eos_started = True
+            st.post_eos_remaining = self.post_eos_padding_count
+            return self.sampling["enter"]
+        if st.post_eos_remaining > 0:
+            st.post_eos_remaining -= 1
+            return self.sampling["pad"]
+        st.internal_stop_emitted = True
+        return self.internal_stop_token_id
 
     def _note_audio(self, st: BatchedThinkerState, codes: list[int]) -> None:
         """Append one step of audio codes, track stop positions, emit frames.
@@ -463,8 +508,10 @@ class BatchedThinkerRunner:
     def step_finished(self, rid: str) -> bool:
         """MiniMind thinker termination: text finished AND last layer hit stop."""
         st = self.states[rid]
-        if st.step >= self.sampling["max_new_tokens"]:
+        if len(st.text_tokens) >= self.sampling["max_new_tokens"]:
             return True
+        if self.post_eos_padding_count > 0:
+            return st.internal_stop_emitted
         return bool(st.text_finished and st.audio_codes[7][-1] == self.audio_stop)
 
     # -- bridge capture (TICKET-05 phase 1) ---------------------------------

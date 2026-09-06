@@ -11,11 +11,11 @@ process_input are dotted-path strings resolved by
 declarative contract; per-stage implementation lives in
 ``thinker.py`` / ``talker.py`` / ``code2wav.py``.
 
-For TICKET-02, the three stage factories are a happy-path glue layer that
-invokes the existing ``generate_audio`` end-to-end wrapper via the
-thinker. The post-EOS state machine, talker watchdog, and bridge
-hidden-state conversion are deferred to TICKET-05; field set / topology
-shape match vllm-omni's pipeline-registry pattern.
+For the collapsed default, the thinker factory still invokes the existing
+``generate_audio`` end-to-end wrapper. The stage-input hooks now use pure
+MiniMind payload processors: final audio passes through unchanged, while a
+future full-stage thinker/talker/code2wav factory can consume the typed
+handoff envelopes without changing this topology.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
             name="talker",
             kind=StageExecutionType.LLM_AR,
             factory=f"{_MINIMIND_OMNI_FAMILY}.talker:_talker_stage",
-            process_input=f"{_MINIMIND_OMNI_FAMILY}.talker:_identity_process_input",
+            process_input=f"{_MINIMIND_OMNI_FAMILY}.stage_processors:thinker2talker",
             input_sources=(0,),
         ),
         StageConfig(
@@ -53,7 +53,7 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
             name="code2wav",
             kind=StageExecutionType.CODEC,
             factory=f"{_MINIMIND_OMNI_FAMILY}.code2wav:_code2wav_stage",
-            process_input=f"{_MINIMIND_OMNI_FAMILY}.talker:_identity_process_input",
+            process_input=f"{_MINIMIND_OMNI_FAMILY}.stage_processors:talker2code2wav",
             input_sources=(1,),
             is_terminal=True,
             final_output_type="audio",

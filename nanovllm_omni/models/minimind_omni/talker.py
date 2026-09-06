@@ -1080,15 +1080,26 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
             float(getattr(sampling, "temperature", 0.2) or 0.2) if sampling is not None else 0.2
         )
         top_k = int((sampling.extra or {}).get("top_k", 50)) if sampling is not None else 50
-        do_sample_user = (
-            bool(getattr(sampling, "do_sample", True))
-            if sampling is not None and hasattr(sampling, "do_sample")
-            else True
-        )
+        # ``do_sample`` lives in ``sampling.extra`` (deploy YAML default), so
+        # a yaml can opt the talker stage into greedy. Defaults to True.
+        do_sample_user = True
+        if sampling is not None:
+            if hasattr(sampling, "do_sample"):
+                do_sample_user = bool(sampling.do_sample)
+            elif (sampling.extra or {}).get("do_sample") is not None:
+                do_sample_user = bool(sampling.extra["do_sample"])
         mtp_runner, graph_engaged = _resolve_mtp_runner()
-        # Graph module routes ``do_sample=True`` to eager (CUDA Graphs can't
-        # capture stochastic multinomial). Force greedy when the graph is
-        # engaged so the graph actually fires.
+        # CUDA Graphs can't capture stochastic multinomial, so the graph only
+        # fires on greedy (do_sample=False). When the graph is engaged we force
+        # greedy and log a one-time notice so a sampling request isn't silently
+        # downgraded. Set use_talker_cuda_graph: false in the YAML to keep
+        # sampling.
+        if do_sample_user and graph_engaged:
+            logger.info(
+                "talker CUDA Graph engaged forces greedy decode; request "
+                "do_sample=True ignored. Set use_talker_cuda_graph: false to "
+                "keep sampling."
+            )
         do_sample = do_sample_user and not graph_engaged
         codes = _drive_talker_generation(
             _resolve_talker(),

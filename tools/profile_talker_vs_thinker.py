@@ -32,14 +32,6 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
-# Explicit eager baseline: disable stage-0's CUDA Graph during profile so
-# the per-step op count reflects the no-graph surface. Real production runs
-# graphed (deploy/minimind_omni.yaml has use_cuda_graph: true), so this
-# isolates "what each stage's eager cost is" for apples-to-apples comparison.
-# On the fake fixture, enable_cuda_graph returns None anyway (FakeMiniMindOmni
-# is not the upstream shape), so this is defensive for real-model runs.
-USE_CUDA_GRAPH = False  # set True to mirror production stage-0 path
-
 from _talker_fixtures import make_fake_bundle, span_bridge  # noqa: E402
 from test_batched_generation import FakeMiniMindOmni  # noqa: E402
 
@@ -128,12 +120,6 @@ def _wall_time(fn, *, n_runs: int = 5) -> tuple[float, float]:
 def main() -> int:
     bundle, talker, fake_model, payload, prompt_len, num_decode_steps = _build_setup()
 
-    # --- Stage 1 prefill (1 call over bridge prompt span) ---
-    def stage1_prefill():
-        # Reset last_hidden so prefill runs fresh
-        talker._steps_after_last_thinker_by_req.pop("profile-rid", None)
-        talker._stop_pending_by_req.pop("profile-rid", None)
-
     # Use _drive_talker_generation for the full stage 1 run (prefill + decode loop)
     def stage1_full():
         # Recreate payload each time to avoid mutation between calls
@@ -175,7 +161,6 @@ def main() -> int:
     print("=" * 70)
     print("Fake bundle: hidden=8, vocab=16, layers=2 (thinker/talker tiny)")
     print(f"Prompt: {prompt_len} tokens, talker decode steps: {num_decode_steps}")
-    print(f"use_cuda_graph = {USE_CUDA_GRAPH} (eager baseline; fake model can't graph anyway)")
     print()
 
     print("--- Stage 0: ONE joint model decode step ([B=1, 9, 1]) ---")

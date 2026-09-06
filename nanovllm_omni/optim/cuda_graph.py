@@ -36,6 +36,7 @@ import torch
 from nanovllm_omni.models.minimind_omni._sampling import (
     DEFAULT_TEXT_TEMPERATURE,
     DEFAULT_TEXT_TOP_P,
+    NUM_AUDIO_LAYERS,
     sample_one_audio_layer,
     sample_text_token,
 )
@@ -51,8 +52,15 @@ def _patched_forward(cls: Any, src: str) -> Any:
     patched = src.replace(
         "if self.thinker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed"
     ).replace("if self.talker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed")
-    if "if False:" not in patched:
-        _log.warning("enable_cuda_graph: no freqs host-reads to neutralize; skipping")
+    # Require exactly the two known capture blockers to be neutralized, so
+    # a drift in the upstream forward's freqs-check spelling fails loud
+    # instead of silently skipping one host-read during capture.
+    if patched.count("if False:") != 2:
+        _log.warning(
+            "enable_cuda_graph: expected 2 freqs host-reads to neutralize, "
+            "found %s; skipping graph path",
+            patched.count("if False:"),
+        )
         return None
     namespace = dict(cls.forward.__globals__)
     namespace["__name__"] = cls.__module__
@@ -202,9 +210,11 @@ class CudaGraphDecoder:
         side.wait_stream(torch.cuda.current_stream())
         # Warmup on the side stream FIRST so cuBLAS/cuDNN workspace picks an
         # algorithm and the capture-context fwd only records (no JIT/alloc).
-        # Both warmup and capture live on the same stream so the captured
-        # kernels inherit the side stream's bindings. Moving the warmup INSIDE
-        # torch.cuda.graph(g) breaks capture (allocator cache pollution).
+        # torch.cuda.graph(g) internally captures on its own default capture
+        # stream and joins back after, so warmup-then-capture on a side stream
+        # keeps the recorded kernels' stream bindings consistent. Moving the
+        # warmup INSIDE torch.cuda.graph(g) breaks capture (allocator cache
+        # pollution).
         with torch.cuda.stream(side):
             for _ in range(self.n_steps):
                 inp = _build_omni_input(next_token, self.audio_pad).clone()
@@ -236,7 +246,9 @@ class CudaGraphDecoder:
         """
         if not self._text_finished and tok == self.eos_token_id:
             self._text_finished = True
-        return self._text_finished and audio_codes[7][-1] == self.audio_stop_token
+        return (
+            self._text_finished and audio_codes[NUM_AUDIO_LAYERS - 1][-1] == self.audio_stop_token
+        )
 
     def generate_tokens(
         self, input_ids: torch.Tensor, *, seed: int | None = None, return_audio: bool = False
@@ -259,7 +271,7 @@ class CudaGraphDecoder:
         The ``torch.Generator`` advance stops at the content-natural end
         (no dummy draws), matching eager parity up to the stop step.
         """
-        num_layers = 8
+        num_layers = NUM_AUDIO_LAYERS
         prefill_logits = self._prefill(input_ids)
         history = list(input_ids.reshape(-1).tolist())
         audio_history: list[list[int]] = [[] for _ in range(num_layers)]
@@ -290,8 +302,20 @@ class CudaGraphDecoder:
             step_index = k + 1  # text token index at this decode step
             audio_step = step_index - 1  # audio lags text by one position
             g, inp, out = self.steps[k]
-            inp.copy_(_build_omni_input(next_token, self.audio_pad))
-            g.replay()
+            try:
+                inp.copy_(_build_omni_input(next_token, self.audio_pad))
+                g.replay()
+            except Exception as exc:  # noqa: BLE001 - graph replay can fail for many CUDA reasons
+                # Drop stale per-step graphs so a later request recaptures,
+                # then surface a clear error (parity: talker_cuda_graph.decode
+                # invalidates + falls back; here there is no clean eager path
+                # because the model is already buffer-ized).
+                self.steps = []
+                self._captured = False
+                raise RuntimeError(
+                    f"CUDA Graph replay failed at step {step_index}: {exc}; "
+                    "capture state reset — retry will recapture."
+                ) from exc
             tok = sample_text_token(
                 out.logits[0, -1],
                 history_ids=history,

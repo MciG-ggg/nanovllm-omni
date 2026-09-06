@@ -2,8 +2,13 @@
 """E2E test of talker CUDA Graph on real weights (RTX 3050).
 
 Drives Omni.generate end-to-end with use_talker_cuda_graph on, verifies
-the WAV is valid, and reports wall time + per-stage breakdown. Compares
-against use_talker_cuda_graph: false (eager talker) to quantify the saving.
+the WAV is valid, and reports wall time. Compares use_talker_cuda_graph:
+true vs false (eager talker) to quantify the saving.
+
+Both arms run greedy (the deploy yaml sets do_sample: false): the graph
+arm forces greedy internally, so making the eager arm greedy also keeps
+the delta attributable to graph dispatch rather than a sampling->greedy
+behavior change. (An earlier reporting mixed those two effects.)
 
 Usage:
     HF_HUB_OFFLINE=1 python tools/profile_talker_graph_e2e.py \
@@ -45,7 +50,11 @@ def _time_generate(omni, prompt: str, runs: int) -> tuple[float, bytes]:
 
 
 def _write_deploy(use_talker_graph: bool, path: Path) -> None:
-    # Use realistic MiniMind-O defaults so stage 1 dominates.
+    # Use realistic MiniMind-O defaults so stage 1 dominates. ``do_sample:
+    # false`` on the talker stage runs BOTH arms greedy: the graph arm forces
+    # greedy internally (CUDA Graphs can't capture multinomial), so making the
+    # eager arm greedy too isolates the delta to graph dispatch rather than
+    # mixing in a sampling->greedy behavior change.
     path.write_text(
         f"max_batch: 1\n"
         f"use_cuda_graph: false\n"
@@ -58,7 +67,7 @@ def _write_deploy(use_talker_graph: bool, path: Path) -> None:
         f"    max_num_batched_tokens: 512\n"
         f"    default_sampling_params: {{temperature: 0.7, max_tokens: 512}}\n"
         f"  - name: talker\n"
-        f"    default_sampling_params: {{temperature: 0.2, watchdog_limit: 192}}\n"
+        f"    default_sampling_params: {{temperature: 0.2, watchdog_limit: 192, do_sample: false}}\n"
         f"  - name: code2wav\n"
         f"    enforce_eager: true\n"
         f"    default_sampling_params: {{}}\n",

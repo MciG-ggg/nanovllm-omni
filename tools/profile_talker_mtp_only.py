@@ -4,6 +4,10 @@
 The stage-1 talker_mtp path is what enable_talker_mtp_cuda_graph captures
 per-step. This script measures JUST that call (no prefill, no surrounding
 driver loop) to get a clean ops/step number for the graphed surface.
+
+Profiles do_sample=False to match the graph's capture semantics (CUDA Graphs
+can't capture multinomial); eager-sampling op counts would overstate what a
+graph saves.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ def main() -> int:
             active_mask=active_mask,
             temperature=0.2,
             top_k=50,
-            do_sample=True,
+            do_sample=False,
         )
 
     # Profile
@@ -65,7 +69,7 @@ def main() -> int:
                     active_mask=active_mask,
                     temperature=0.2,
                     top_k=50,
-                    do_sample=True,
+                    do_sample=False,
                 )
 
     table = prof.key_averages()
@@ -89,7 +93,7 @@ def main() -> int:
             active_mask=active_mask,
             temperature=0.2,
             top_k=50,
-            do_sample=True,
+            do_sample=False,
         )
     wall_ms = (time.perf_counter() - t0) / 200 * 1000
 

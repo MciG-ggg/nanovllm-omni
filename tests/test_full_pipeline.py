@@ -503,3 +503,65 @@ def test_talker_mtp_runner_dispatch_picks_eager_when_no_cuda(
     )
     assert rows.shape[0] > 0
     assert rows.shape[1] == 8
+
+
+def test_talker_mtp_runner_dispatch_uses_graph_decode_when_supplied(
+    tmp_path: Path,
+) -> None:
+    """When mtp_runner exposes decode(), _drive_talker_generation calls it.
+
+    Covers the graph-dispatch branch (``if mtp_decode is not None``) that the
+    real CUDA path exercises on GPU but CI never hits. Uses a CPU fake runner
+    exposing ``decode`` with the talker_mtp contract.
+    """
+    from nanovllm_omni.models.minimind_omni.stage_processors import (
+        TalkerInputPayload,
+    )
+    from nanovllm_omni.models.minimind_omni.talker import (
+        _drive_talker_generation,
+        wrap_talker,
+    )
+
+    fixtures = make_full_fixtures()
+    bundle, _talker, mimi, _model = fixtures
+    talker = wrap_talker(bundle)
+    hidden_size = talker.text_hidden_size
+    prompt_len = 4
+    num_decode_steps = 4
+    bridge = torch.randn(prompt_len + num_decode_steps - 1, hidden_size, dtype=torch.float32)
+    payload = TalkerInputPayload(
+        input_ids=torch.full((prompt_len,), 9, dtype=torch.long),
+        bridge_states=bridge,
+        text_token_ids=tuple(range(prompt_len + num_decode_steps)),
+        prompt_token_ids=tuple(range(prompt_len)),
+        output_token_ids=tuple(range(prompt_len, prompt_len + num_decode_steps)),
+        request_id="graph-dispatch-test",
+        metadata={},
+    )
+
+    class _FakeMtpRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def decode(self, **kwargs: Any) -> torch.Tensor:
+            self.calls.append(kwargs)
+            # Return code-a (0) rows: never equals audio_stop_token, so the
+            # wrapper's early-stop guard doesn't truncate the decode loop.
+            return torch.zeros(1, 8, dtype=torch.long)
+
+    runner = _FakeMtpRunner()
+    rows = _drive_talker_generation(
+        talker,
+        payload,
+        temperature=0.2,
+        top_k=50,
+        do_sample=False,
+        mtp_runner=runner,
+    )
+    # decode was called once per decode step (bridge rows minus prompt =
+    # num_decode_steps - 1), and rows came back valid.
+    assert len(runner.calls) == num_decode_steps - 1
+    assert rows.shape[0] == num_decode_steps - 1
+    assert rows.shape[1] == 8
+    # active_mask is forwarded through the graph-dispatch branch.
+    assert all("active_mask" in call for call in runner.calls)

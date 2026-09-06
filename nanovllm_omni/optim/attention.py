@@ -386,6 +386,10 @@ def _attention_forward_buffered(
     key = module.repeat_kv(k_hist, self.n_rep).transpose(1, 2)
     value = module.repeat_kv(v_hist, self.n_rep).transpose(1, 2)
 
+    # No ``past_key_value is not None`` guard here on purpose: the fixed
+    # buffer always has >= 1 prepended history row by the time decode runs
+    # (graphed path always prefills first, _kv_pos >= 1), so decode never
+    # SDPA's against an empty history.
     if sequence_len == 1 and attention_mask is None:
         output = functional.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False

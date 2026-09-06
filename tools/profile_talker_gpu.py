@@ -48,21 +48,15 @@ def _count_kernels(fn, n: int = 1) -> tuple[int, list[tuple[str, int]]]:
         record_shapes=False,
     ) as prof:
         fn()
-    # Count CUDA kernel launches via the cudaLaunchKernel event in CPU trace
-    events = prof.events()
-    cuda_launches = [e for e in events if "cudaLaunchKernel" in e.name]
     # Aggregate by CUDA kernel name
-    cuda_kernels: dict[str, int] = {}
-    for e in events:
-        if e.device_type == torch._C._autograd.DeviceType.CUDA or "kernel" in e.name.lower():
-            # The CUDA row in key_averages uses the kernel symbol
-            pass
     key_avgs = prof.key_averages()
-    for it in key_avgs:
-        if it.device_type == torch._C._autograd.DeviceType.CUDA and it.count > 0:
-            cuda_kernels[it.key] = it.count
+    cuda_kernels = {
+        it.key: it.count
+        for it in key_avgs
+        if it.device_type == torch._C._autograd.DeviceType.CUDA and it.count > 0
+    }
     top = sorted(cuda_kernels.items(), key=lambda x: -x[1])[:10]
-    return len(cuda_launches), top
+    return sum(cuda_kernels.values()), top
 
 
 def main() -> int:

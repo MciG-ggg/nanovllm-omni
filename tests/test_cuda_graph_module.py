@@ -72,8 +72,12 @@ class _StubModel(torch.nn.Module):
         self.talker.freqs_sin = torch.zeros(1, 1)
 
     def forward(self, input_ids=None, past_key_values=None, use_cache=False, **kw):
-        # mirrors upstream shape: check the freq host-reads then return logits
+        # mirrors upstream shape: check the two freq host-reads then return
+        # logits (both thinker and talker, matching the real MiniMindOmni
+        # forward that _patched_forward must neutralize)
         if self.thinker.freqs_cos[0, 0] == 0:
+            raise RuntimeError("unreachable")
+        if self.talker.freqs_cos[0, 0] == 0:
             raise RuntimeError("unreachable")
         b, s = input_ids.shape
         logits = torch.zeros(b, s, 8)

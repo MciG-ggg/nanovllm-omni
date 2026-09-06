@@ -16,7 +16,7 @@ from .bundle import (
     create_stages,
     load_minimind_omni_bundle,
 )
-from .code2wav import decode_audio, encode_wav
+from .code2wav import MiniMindOmniCode2Wav, decode_audio, encode_wav, load_mimi_codec
 from .pipeline import MINIMIND_OMNI_PIPELINE, PIPELINE
 from .stage_processors import (
     Code2WavInputPayload,
@@ -39,6 +39,8 @@ __all__ = [
     "create_stages",
     "decode_audio",
     "encode_wav",
+    "load_mimi_codec",
+    "MiniMindOmniCode2Wav",
     "generate_audio",
     "load_minimind_omni_bundle",
     "MiniMindOmniTalkerForConditionalGeneration",

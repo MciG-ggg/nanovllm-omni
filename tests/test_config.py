@@ -73,8 +73,8 @@ def test_stage_config_is_frozen():
         raise AssertionError("StageConfig must be frozen")
 
 
-def test_deploy_config_defaults_to_collapsed_and_parses_modes(tmp_path: Path):
-    assert DeployConfig().pipeline_kind == "collapsed"
+def test_deploy_config_defaults_to_full_and_parses_modes(tmp_path: Path):
+    assert DeployConfig().pipeline_kind == "full"
     for mode in ("collapsed", "full"):
         path = tmp_path / f"{mode}.yaml"
         path.write_text(f"pipeline_kind: {mode}\n", encoding="utf-8")

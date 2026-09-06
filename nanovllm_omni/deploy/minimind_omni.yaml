@@ -1,6 +1,6 @@
-# collapsed is the safe default (legacy end-to-end thinker); full is wired
-# and available for the 3-stage path (RTX-3050 validation still to run).
-pipeline_kind: collapsed
+# full is the only supported runtime mode: 3-stage thinker -> talker ->
+# code2wav, validated against real MiniMind-3o / Mimi weights on RTX 3050.
+pipeline_kind: full
 max_batch: 2
 use_cuda_graph: true
 # Used by the future full three-stage path; collapsed mode keeps legacy EOS behavior.

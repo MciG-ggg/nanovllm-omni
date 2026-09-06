@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import wave
-from collections.abc import Mapping
 from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
@@ -36,12 +35,10 @@ def load_mimi_codec(
     return _cast_model_dtype(mimi, dtype, device).to(device)
 
 
-def _is_collapsed_audio(payload: Any) -> bool:
-    if isinstance(payload, AudioPayload):
-        return True
-    if isinstance(payload, Mapping):
-        return isinstance(payload.get("audio"), AudioPayload)
-    return isinstance(getattr(payload, "audio", None), AudioPayload)
+def _is_code2wav_payload(payload: Any) -> bool:
+    from .stage_processors import Code2WavInputPayload
+
+    return isinstance(payload, Code2WavInputPayload)
 
 
 class MiniMindOmniCode2Wav:
@@ -53,15 +50,11 @@ class MiniMindOmniCode2Wav:
 
     def __call__(self, payload: Any, sampling: Any = None) -> Any:
         del sampling
-        if _is_collapsed_audio(payload):
-            return payload
-
         from .stage_processors import Code2WavInputPayload
 
         if not isinstance(payload, Code2WavInputPayload):
             raise TypeError(
-                "MiniMind Code2Wav expected Code2WavInputPayload or collapsed "
-                f"AudioPayload, got {type(payload).__name__}."
+                "MiniMind Code2Wav expected Code2WavInputPayload, " f"got {type(payload).__name__}."
             )
         import torch
 

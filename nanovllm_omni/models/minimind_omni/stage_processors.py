@@ -1,11 +1,9 @@
-"""Pure MiniMind-O payload processors for the split pipeline.
+"""Pure MiniMind-O payload processors for the full three-stage pipeline.
 
 The processors only reshape and validate stage handoff data. They never call a
-model. The collapsed runner still returns an ``AudioPayload`` from the thinker;
-that payload (and a thin transcript wrapper around it) is passed through by
-identity so the legacy path cannot execute the thinker twice.
+model.
 
-Full-mode contracts:
+Contracts:
 
 * ``ThinkerStageOutput.bridge_states`` is ``[T, H]`` (``[B, T, H]`` is
   accepted and flattened for a single request). ``T`` is aligned with the
@@ -24,8 +22,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-
-from nanovllm_omni.outputs import AudioPayload
 
 from .bundle import MIMI_SAMPLE_RATE
 
@@ -100,14 +96,6 @@ def _as_token_list(value: Any) -> list[int]:
     if isinstance(value, torch.Tensor):
         return [int(token) for token in value.detach().cpu().reshape(-1).tolist()]
     return [int(token) for token in value]
-
-
-def _collapsed_audio(payload: Any) -> bool:
-    if isinstance(payload, AudioPayload):
-        return True
-    if isinstance(payload, Mapping):
-        return isinstance(payload.get("audio"), AudioPayload)
-    return isinstance(getattr(payload, "audio", None), AudioPayload)
 
 
 def _metadata(payload: Any) -> dict[str, Any]:
@@ -216,14 +204,14 @@ def _speaker_embedding(payload: Any) -> torch.Tensor | None:
 
 
 def thinker2talker(payload: Any, prompt: str = "") -> Any:
-    """Convert one thinker result into a talker input, or pass collapsed audio.
+    """Convert one thinker result into a talker input.
 
     ``prompt`` is part of the local runner hook signature. Full-mode payloads
     carry token IDs from the thinker; tokenizing here would violate the pure
     processor boundary, so the prompt is intentionally unused.
     """
     del prompt
-    if _collapsed_audio(payload) or isinstance(payload, TalkerInputPayload):
+    if isinstance(payload, TalkerInputPayload):
         return payload
 
     prompt_ids, output_ids, all_ids = _aligned_text_ids(payload)
@@ -294,9 +282,9 @@ def _normalise_audio_codes(payload: Any) -> torch.Tensor:
 
 
 def talker2code2wav(payload: Any, prompt: str = "") -> Any:
-    """Convert one talker result into a Code2Wav input, or pass collapsed audio."""
+    """Convert one talker result into a Code2Wav input."""
     del prompt
-    if _collapsed_audio(payload) or isinstance(payload, Code2WavInputPayload):
+    if isinstance(payload, Code2WavInputPayload):
         return payload
 
     audio_codes = _normalise_audio_codes(payload)

@@ -84,15 +84,6 @@ def test_stage_rejects_empty_code_rows() -> None:
         stage(Code2WavInputPayload(torch.empty(0, 8, dtype=torch.long)))
 
 
-def test_collapsed_audio_and_transcript_wrapper_are_identity() -> None:
-    stage = MiniMindOmniCode2Wav(FakeMimi(), "cpu")
-    audio = AudioPayload(data=b"RIFF", sample_rate=24_000)
-    wrapped = SimpleNamespace(audio=audio, transcript="hello")
-
-    assert stage(audio) is audio
-    assert stage(wrapped) is wrapped
-
-
 def test_stage_rejects_untyped_mapping_instead_of_guessing() -> None:
     stage = MiniMindOmniCode2Wav(FakeMimi(), "cpu")
 

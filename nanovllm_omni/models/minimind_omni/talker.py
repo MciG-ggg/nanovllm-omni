@@ -1064,25 +1064,14 @@ def _drive_talker_generation(
 
 
 def _talker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory: real talker in full mode, identity pass-through otherwise.
+    """Stage 1 factory: real talker over ``TalkerInputPayload``.
 
-    Collapsed mode is the safe default: the thinker factory already returns
-    final audio, so the talker barrel passes the payload through unchanged.
-
-    Full mode consumes a ``TalkerInputPayload`` (produced by
-    ``thinker2talker``), drives the talker wrapper + ``talker_mtp`` over the
-    bridge hidden states, and returns a ``TalkerOutput`` whose
+    Consumes a ``TalkerInputPayload`` (produced by ``thinker2talker``),
+    drives the talker wrapper + ``talker_mtp`` over the bridge hidden
+    states, and returns a ``TalkerOutput`` whose
     ``multimodal_outputs['codes']['audio']`` carries ``[F, num_code_layers]``
     code rows for the code2wav stage.
     """
-    if getattr(deploy, "pipeline_kind", "collapsed") == "collapsed":
-
-        def talker_forward_identity(payload: Any, sampling: Any) -> Any:
-            del sampling
-            return payload
-
-        return talker_forward_identity
-
     extra = dict(getattr(args, "extra", None) or {})
     injected_talker = extra.get("talker")
     injected_bundle = extra.get("bundle")

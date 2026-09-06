@@ -17,7 +17,6 @@ from nanovllm_omni.models.minimind_omni.stage_processors import (
     thinker2talker,
 )
 from nanovllm_omni.models.minimind_omni.talker import TalkerOutput
-from nanovllm_omni.outputs import AudioPayload
 
 
 def test_thinker2talker_preserves_text_speaker_and_metadata() -> None:
@@ -128,16 +127,6 @@ def test_talker2code2wav_rejects_malformed_codes(codes: object, error: str) -> N
 
     with pytest.raises((TypeError, ValueError), match=error):
         talker2code2wav(source)
-
-
-def test_collapsed_audio_is_passed_through_by_identity() -> None:
-    audio = AudioPayload(data=b"RIFF", sample_rate=24_000)
-    wrapped = SimpleNamespace(audio=audio, transcript="hello")
-
-    assert thinker2talker(audio) is audio
-    assert talker2code2wav(audio) is audio
-    assert thinker2talker(wrapped) is wrapped
-    assert talker2code2wav(wrapped) is wrapped
 
 
 def test_processors_do_not_execute_a_model() -> None:

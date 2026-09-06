@@ -18,23 +18,19 @@ from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
 
-from .audio import attach_audio_encoder, load_audio
 from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 
 
 def _thinker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: returns a callable that runs the thinker.
+    """Stage 0 factory: runs the bridge-capturing thinker for the talker.
 
-    Collapsed mode invokes the entire end-to-end pipeline via
-    ``generate_audio`` (text -> audio in one call). Full mode runs the
-    bridge-capturing generation and emits a ``ThinkerStageOutput`` that
-    ``thinker2talker`` converts for the talker stage.
+    Emits a ``ThinkerStageOutput`` carrying bridge hidden states + text span
+    that ``thinker2talker`` converts for the talker stage. The legacy
+    collapsed single-call path is retired (RTX-3050 validated the 3-stage
+    path end-to-end).
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
-    audio_encoder_path = extra_args.pop("audio_encoder_path", None) or extra_args.pop(
-        "audio_encoder", None
-    )
     provided_bundle = extra_args.pop("bundle", None)
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
@@ -55,48 +51,9 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     if bundle is not None:
         bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
 
-    if getattr(deploy, "pipeline_kind", "collapsed") != "collapsed":
-        return _full_thinker_stage(bundle, deploy)
-
-    def thinker_forward(payload: Any, sampling: Any) -> Any:
-        prompt = payload if isinstance(payload, str) else payload.get("prompt", "")
-        extra = (
-            (sampling.extra or {}) if sampling is not None and hasattr(sampling, "extra") else {}
-        )
-        audio_inputs = audio_lens = None
-        transcript = None
-        n_markers = 0
-        audio = extra.get("audio")
-        if audio is not None:
-            # Q1/Q4: SenseVoice fbank -> engine-native prefill injection.
-            # Q2: same model transcribes the speech (double-track ASR).
-            sv = attach_audio_encoder(bundle, audio_encoder_path)
-            samples = load_audio(audio)
-            audio_inputs, audio_lens, n_markers = sv.fbank(samples)
-            audio_inputs = audio_inputs.to(getattr(bundle, "device", "cpu"))
-            audio_lens = audio_lens.to(getattr(bundle, "device", "cpu"))
-            transcript = sv.transcribe(samples)
-        out = generate_audio(
-            bundle,
-            prompt,
-            max_tokens=int(sampling.max_tokens) if sampling is not None else 16,
-            temperature=float(sampling.temperature) if sampling is not None else 0.7,
-            top_p=float(sampling.top_p) if sampling is not None else 1.0,
-            open_thinking=bool(extra.get("open_thinking", False)),
-            audio_inputs=audio_inputs,
-            audio_lens=audio_lens,
-            audio_markers=n_markers,
-        )
-        if transcript:
-            # AudioPayload is frozen; carry the double-track ASR transcript
-            # on a thin wrapper so ``from_pipeline`` can surface it without
-            # mutating the modal payload.
-            from types import SimpleNamespace
-
-            out = SimpleNamespace(audio=out, transcript=transcript)
-        return out
-
-    return thinker_forward
+    # The three-stage full pipeline is the only supported runtime mode; the
+    # legacy collapsed factory is retired, so no fallback is kept.
+    return _full_thinker_stage(bundle, deploy)
 
 
 def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
@@ -135,9 +92,8 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
         )
         if extra.get("audio") is not None:
             raise NotImplementedError(
-                "MiniMind full pipeline is text-to-audio only in this build; "
-                "audio input is served by the collapsed pipeline. Set "
-                "pipeline_kind='collapsed' to use extra['audio']."
+                "MiniMind full pipeline is text-to-audio only; audio input "
+                "(ASR) is not wired for the three-stage path."
             )
         eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
         audio_special_token = getattr(

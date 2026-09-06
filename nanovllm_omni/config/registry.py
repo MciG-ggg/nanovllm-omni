@@ -142,9 +142,10 @@ class PipelineConfig:
     # whose ``hf_config_predicate`` (if any) accepts the loaded config.
     hf_architectures: tuple[str, ...] = ()
     hf_config_predicate: Callable[[Any], bool] | None = None
-    # A pipeline must explicitly opt into full mode; collapsed is the safe
-    # default for legacy factories.
-    supported_pipeline_kinds: tuple[str, ...] = ("collapsed",)
+    # The full three-stage pipeline is the only supported runtime mode; the
+    # legacy collapsed (single-thinker end-to-end) path was retired after
+    # RTX-3050 real-weight validation.
+    supported_pipeline_kinds: tuple[str, ...] = ("full",)
 
 
 @dataclass(frozen=True)
@@ -202,13 +203,11 @@ class DeployConfig:
     #: + robustness verified). Deploy/runtime knob — the library Python
     #: default for generate_audio() stays False; serving reads this flag.
     use_cuda_graph: bool = True
-    # Full three-stage MiniMind-O mode uses these reference-compatible
-    # post-EOS controls; collapsed mode leaves them unused until explicit
-    # generation opts in.
+    # Full three-stage MiniMind-O mode: post-EOS bridge sequence + watchdog.
     post_eos_padding_count: int = 128
     internal_stop_token_id: int = 17
     talker_max_steps_after_last_thinker_token: int = 192
-    pipeline_kind: str = "collapsed"
+    pipeline_kind: str = "full"
 
     def validate_pipeline_kind(self, pipeline_cfg: PipelineConfig) -> None:
         """Reject a selected mode when the topology has not declared support."""
@@ -366,7 +365,7 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
     data = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(data, Mapping):
         raise ValueError("deploy YAML must contain a mapping at the top level")
-    pipeline_kind = data.get("pipeline_kind", "collapsed")
+    pipeline_kind = data.get("pipeline_kind", "full")
     max_batch = int(data.get("max_batch", 2))
     if max_batch < 1:
         raise ValueError(f"max_batch must be >= 1, got {max_batch}")

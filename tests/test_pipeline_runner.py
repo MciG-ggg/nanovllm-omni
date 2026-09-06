@@ -214,16 +214,15 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
     assert observed_args.extra["devices"] == ("cpu",)
 
 
-def test_minimind_full_mode_is_supported_and_does_not_silently_collapse():
-    """Phase 8: full is now an executable MiniMind mode, not a silent fallback.
+def test_minimind_full_mode_is_only_supported_kind():
+    """Full is the only executable MiniMind mode (collapsed retired).
 
     Construction succeeds (no raise), and the topology declares ``full`` so
     drift back to a gate can never silently degrade into collapsed output.
     """
     from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
 
-    assert "full" in MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds
-    assert "collapsed" in MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds
+    assert MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds == ("full",)
     # Constructing the runner validates the kind without loading any model
     # (stage instances are built lazily on the first ``run``).
     PipelineRunner(
@@ -233,19 +232,14 @@ def test_minimind_full_mode_is_supported_and_does_not_silently_collapse():
     )
 
 
-def test_undeclared_full_mode_still_fails_without_silent_collapsed_fallback():
-    """Pipelines that never declared ``full`` keep the hard gate."""
-    pipeline = _make_pipeline(
-        [
-            StageConfig(
-                0,
-                "thinker",
-                StageExecutionType.LLM_AR,
-                "tests._stage_factories:thinker_simple",
-                is_terminal=True,
-            )
-        ]
-    )  # supported_pipeline_kinds defaults to ("collapsed",)
+def test_undeclared_mode_still_fails_without_silent_fallback():
+    """Pipelines that never declared a requested mode keep the hard gate."""
+    import dataclasses
+
+    from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
+
+    # A pipeline that only declares the retired collapsed kind cannot run full.
+    pipeline = dataclasses.replace(MINIMIND_OMNI_PIPELINE, supported_pipeline_kinds=("collapsed",))
 
     with pytest.raises(ValueError, match="pipeline_kind 'full' is not supported"):
         PipelineRunner(pipeline, DeployConfig(pipeline_kind="full"), _make_args())

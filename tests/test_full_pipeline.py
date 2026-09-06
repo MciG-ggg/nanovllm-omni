@@ -273,8 +273,20 @@ def _assert_wav(output: OmniRequestOutput, sample_rate: int = 24_000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_full_mode_is_declared_and_deploy_default_stays_collapsed() -> None:
-    assert MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds == ("collapsed", "full")
+def test_full_mode_is_only_supported_kind_and_is_deploy_default() -> None:
+    assert MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds == ("full",)
+    from nanovllm_omni.config import DeployConfig, load_deploy_config
+
+    assert DeployConfig().pipeline_kind == "full"
+    import pathlib
+
+    deploy_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "nanovllm_omni"
+        / "deploy"
+        / "minimind_omni.yaml"
+    )
+    assert load_deploy_config(deploy_path).pipeline_kind == "full"
 
 
 def test_full_mode_e2e_produces_decodable_wav_through_omni(tmp_path: Path) -> None:
@@ -407,12 +419,6 @@ def test_full_mode_rejects_audio_input_with_clear_message(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 # Collapsed regression: deploy default unchanged
 # ---------------------------------------------------------------------------
-
-
-def test_collapsed_mode_still_returns_valid_wav(tmp_path: Path) -> None:
-    omni = _new_omni(tmp_path, "collapsed", make_full_fixtures())
-    (output,) = omni.generate("hello", SamplingParams(max_tokens=12, temperature=0.7, top_p=0.9))
-    _assert_wav(output, sample_rate=24_000)
 
 
 def test_codec_helpers_roundtrip_full_codes(tmp_path: Path) -> None:

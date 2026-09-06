@@ -89,6 +89,65 @@ def cmd_time(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(args: argparse.Namespace) -> int:
+    """Length matrix: prompts x {--lengths} budget sweep (defect B verification).
+
+    Each cell runs ``run_n(bundle, prompt, n=args.runs, warmup=args.warmup,
+    max_tokens=L, use_cuda_graph=args.use_cuda_graph)`` and reports the
+    median frames + generate_ms. Emits a markdown table; defect B fix is
+    visible here as ``frames < L`` once content terminates naturally.
+    """
+    import statistics
+
+    bundle = _load_bundle(args)
+    prompts = _resolve_prompts(args.prompts)
+    lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
+    if not lengths:
+        raise SystemExit("--lengths must list at least one integer")
+
+    rows: list[dict[str, object]] = []
+    for prompt in prompts:
+        for length in lengths:
+            kwargs = _kwargs(args)
+            kwargs["max_tokens"] = length
+            for r in run_n(bundle, prompt, n=args.runs, warmup=args.warmup, **kwargs):
+                rows.append(
+                    {
+                        "prompt_id": prompt.id,
+                        "length": length,
+                        "frames": r.frames,
+                        "generate_ms": r.times.generate_ms,
+                        "total_ms": r.times.total_ms,
+                    }
+                )
+
+    # Per-cell aggregate
+    cells: dict[tuple[str, int], list[dict[str, object]]] = {}
+    for row in rows:
+        cells.setdefault((row["prompt_id"], row["length"]), []).append(row)
+
+    cols = ("prompt_id", "length", "frames", "generate_median_ms", "total_median_ms")
+    lines = [
+        "| " + " | ".join(cols) + " |",
+        "| " + " | ".join(["---"] * len(cols)) + " |",
+    ]
+    for prompt_id, length in sorted(cells):
+        rs = cells[(prompt_id, length)]
+        gen = [float(r["generate_ms"]) for r in rs]
+        tot = [float(r["total_ms"]) for r in rs]
+        frames = [int(r["frames"]) for r in rs]
+        cells_row = (
+            prompt_id,
+            str(length),
+            str(int(statistics.median(frames))),
+            f"{statistics.median(gen):.2f}",
+            f"{statistics.median(tot):.2f}",
+        )
+        lines.append("| " + " | ".join(cells_row) + " |")
+    print("\n".join(lines) + "\n")
+    return 0
+
+
 def cmd_trace_torch(args: argparse.Namespace) -> int:
     from torch.profiler import ProfilerActivity, profile
 
@@ -247,6 +306,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV output path (default: docs/perf/session-1.csv)",
     )
     p_time.set_defaults(func=cmd_time)
+
+    p_matrix = sub.add_parser(
+        "matrix",
+        parents=[common],
+        help="Length matrix: prompts x --lengths sweep (defect B verification)",
+    )
+    p_matrix.add_argument(
+        "--lengths",
+        default="8,16,32,64,120",
+        help="Comma-separated budgets to sweep (default: 8,16,32,64,120)",
+    )
+    p_matrix.add_argument("--runs", type=int, default=3)
+    p_matrix.add_argument("--warmup", type=int, default=1)
+    p_matrix.set_defaults(func=cmd_matrix)
 
     p_torch = sub.add_parser(
         "trace-torch", parents=[common], help="Capture torch.profiler Chrome trace"

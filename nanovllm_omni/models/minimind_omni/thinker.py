@@ -182,9 +182,13 @@ def run_generate(
             # the 8 audio channels (Mimi codebook frames, codec-stage format).
             # Honor the caller's seed (fall back to the process RNG) so the
             # graph path matches eager determinism for a given manual_seed.
+            # defect B: thread eos_token_id so graphed decode halts at the
+            # content-natural end (parity with BatchedThinkerRunner.step_finished).
+            # audio_stop_token falls back to ``model.audio_stop_token`` inside
+            # ``enable_cuda_graph`` (matches eager's batched_generation.py:119).
             from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
 
-            decoder = enable_cuda_graph(model, n_steps=max_new_tokens)
+            decoder = enable_cuda_graph(model, n_steps=max_new_tokens, eos_token_id=eos_token_id)
             if decoder is not None:
                 call_seed = seed if seed is not None else int(torch.initial_seed())
                 _, audio_codes = decoder.generate_tokens(

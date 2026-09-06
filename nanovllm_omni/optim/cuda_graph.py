@@ -92,6 +92,9 @@ class CudaGraphDecoder:
         model: Any,
         fwd: Any,
         n_steps: int,
+        *,
+        eos_token_id: int | None = None,
+        audio_stop_token: int | None = None,
     ) -> None:
         self.model = model
         self.fwd = fwd
@@ -101,12 +104,29 @@ class CudaGraphDecoder:
         # rp = repetition_penalty (1.0 = no penalty; matches SamplingParams.repetition_penalty).
         self.rp = 1.0
         self.audio_pad = int(model.config.audio_pad_token)
+        # Stop parity with BatchedThinkerRunner.step_finished (defect B fix):
+        # graphed decode halts when text EOS observed AND the last audio
+        # layer emits audio_stop. ``None`` falls back to model attributes
+        # (matches eager's ``int(getattr(self.model, 'audio_stop_token', 0))``
+        # pattern at batched_generation.py:119).
+        self.eos_token_id = (
+            int(eos_token_id)
+            if eos_token_id is not None
+            else int(getattr(model, "eos_token_id_2", 2))
+        )
+        self.audio_stop_token = (
+            int(audio_stop_token)
+            if audio_stop_token is not None
+            else int(getattr(model, "audio_stop_token", 0))
+        )
         self.attns = [m for m in model.modules() if getattr(m, "_nanovllm_kv_buffer", False)]
         self.steps: list[tuple[Any, torch.Tensor, Any]] = []
         self._captured = False
         self._captured_len = -1
         self._prefill_len = -1
         self._last_input_ids = None
+        # defect B: text EOS state flag, flips on first sampled EOS token.
+        self._text_finished = False
 
     def _reset_pos(self) -> None:
         for a in self.attns:
@@ -188,6 +208,20 @@ class CudaGraphDecoder:
         self._captured_len = self._prefill_len
 
     # -- programmatic API -------------------------------------------------
+    def _should_stop(self, tok: int, audio_codes: list[list[int]]) -> bool:
+        """Defect B fix: parity with ``BatchedThinkerRunner.step_finished``.
+
+        Flips ``self._text_finished`` the first time a sampled text token
+        equals ``eos_token_id``; returns True once that flag is set AND
+        the most recent code on the last audio channel equals
+        ``audio_stop_token``. Pure decision method -- kept separate so the
+        CPU contract test exercises the real predicate (no hand-replicated
+        copy).
+        """
+        if not self._text_finished and tok == self.eos_token_id:
+            self._text_finished = True
+        return self._text_finished and audio_codes[7][-1] == self.audio_stop_token
+
     def generate_tokens(
         self, input_ids: torch.Tensor, *, seed: int | None = None, return_audio: bool = False
     ) -> list[int] | tuple[list[int], list[list[int]]]:
@@ -202,6 +236,12 @@ class CudaGraphDecoder:
         decoder draws the audio codes through the same ``gen`` (advancing
         its state exactly like production) even when the caller only wants
         text. For WAV output the audio codes are returned as well.
+
+        Stopping (defect B fix): the main loop checks
+        ``_should_stop(tok, audio_codes)`` after each decode step and
+        breaks on match -- matches ``BatchedThinkerRunner.step_finished``.
+        The ``torch.Generator`` advance stops at the content-natural end
+        (no dummy draws), matching eager parity up to the stop step.
         """
         num_layers = 8
         prefill_logits = self._prefill(input_ids)
@@ -224,6 +264,12 @@ class CudaGraphDecoder:
         history = history + [tok]
         next_token = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
         self._capture(next_token)
+        # seed0 stop check: text_finished flag may flip here, but no audio
+        # code sampled yet -> break only triggers when both gates fire.
+        if self._should_stop(tok, audio_codes):
+            if return_audio:
+                return text_codes, audio_codes
+            return text_codes
         for k in range(self.n_steps - 1):
             step_index = k + 1  # text token index at this decode step
             audio_step = step_index - 1  # audio lags text by one position
@@ -254,22 +300,38 @@ class CudaGraphDecoder:
                 else:
                     audio_codes[layer].append(self.audio_pad)
             next_token = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
+            # defect B: halt at content-natural end; ``_should_stop`` flips
+            # _text_finished on EOS, returns True once last-layer audio_stop.
+            if self._should_stop(tok, audio_codes):
+                break
         if return_audio:
             return text_codes, audio_codes
         return text_codes
 
 
 def enable_cuda_graph(
-    model: Any, n_steps: int = 16, max_len: int | None = None
+    model: Any,
+    n_steps: int = 16,
+    max_len: int | None = None,
+    *,
+    eos_token_id: int | None = None,
+    audio_stop_token: int | None = None,
 ) -> CudaGraphDecoder | None:
     """Install fixed-KV-buffer attention + return a CUDA-Graphed decoder.
 
     Defaults:
       - ``n_steps=16``: the e2e acceptance figure from report §14/§16.
         Pass a smaller number to capture fewer per-step graphs (less
-        cold-start cost; the decoder emits exactly that many decode tokens).
+        cold-start cost; the decoder emits at most that many decode
+        tokens -- defect B fix: stops earlier when text EOS + audio stop
+        align).
       - ``max_len=None``: read ``model.config.max_position_embeddings``
         via ``enable_fixed_kv_buffer``; pass an int to override the buffer.
+      - ``eos_token_id`` / ``audio_stop_token`` (default None): threaded
+        into ``CudaGraphDecoder`` so graphed decode halts at content-natural
+        end (parity with eager ``BatchedThinkerRunner.step_finished``).
+        None falls back to ``model.eos_token_id_2`` /
+        ``model.audio_stop_token`` at decoder construction time.
 
     Returns ``None`` (not enabled) when CUDA is unavailable, the model
     doesn't carry the MiniMind-O freqs host-reads this integration targets,
@@ -297,7 +359,13 @@ def enable_cuda_graph(
         return None
 
     enable_fixed_kv_buffer(model, max_len)
-    decoder = CudaGraphDecoder(model=model, fwd=fwd, n_steps=n_steps)
+    decoder = CudaGraphDecoder(
+        model=model,
+        fwd=fwd,
+        n_steps=n_steps,
+        eos_token_id=eos_token_id,
+        audio_stop_token=audio_stop_token,
+    )
     if not decoder.attns:
         _log.warning("enable_cuda_graph: no attention instances buffer-ized; skipping")
         return None

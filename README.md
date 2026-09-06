@@ -8,7 +8,8 @@
 [![Models](https://img.shields.io/badge/models-4-green.svg)](.)
 
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
-- ⚡ **~177 ms total median on RTX 3050 (4 GB) with `--use-cuda-graph` opt-in** — single-prompt MiniMind-O audio (16-frame thinker decode), re-measured 2026-09 on `8f6d522` (full three-stage only; torch 2.14.0+cu130). CUDA-Graph path median 173-182 ms across the six bench prompts (20 runs each); eager default 457-553 ms (10 runs each). **Without `--use-cuda-graph`, default bench runs ~483 ms total median on the same hardware.** Numbers from `docs/perf/tk005-rtx3050.md`; the older ~320 ms / ~715 ms figures were measured on torch 2.13.0+cu130 before the collapsed pipeline was retired.
+- ⚡ **Full three-stage E2E ~0.65–1.04 s total median on RTX 3050 (4 GB)** — one prompt → thinker → talker → MTP → Mimi → WAV, real `jingyaogong/minimind-3o` + `kyutai/mimi` weights, torch 2.14.0+cu130, re-measured 2026-09 on the full-only tree. All six bench prompts, 20 runs each: **628–1038 ms total median** (short ~0.63 s, medium ~0.75 s, system ~1.04 s), p95 ≤ 1.11 s, VRAM peak ~1881 MiB. Numbers + raw CSV in `docs/perf/tk005-rtx3050.md` / `docs/perf/full-e2e-rtx3050.csv`.
+- 🔧 **Thinker-decode bench primitive (for regression, not the production path)** — `bench time` (default) measures the single-thinker decode stage only: ~177 ms total median with `--use-cuda-graph`, ~483 ms eager, on the same box. That number does **not** include the talker/MTP/Mimi stages and must not be quoted as end-to-end latency.
 - 🔁 **StagePool pattern (single-replica in-process)** — per-stage continuous batching via `RuntimeScheduler`; multi-replica + RoundRobin LB removed after measuring `num_replicas=1 == num_replicas=2` (`tests/test_batched_runner_contract.py`)
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
@@ -180,21 +181,22 @@ Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do no
 
 ### Reproducing the latency claim
 
-The ~177 ms total-median figure requires the CUDA-Graph fast path
-(`--use-cuda-graph` opt-in; CUDA-only). Without the flag, default bench
-runs ~483 ms total median on the same hardware.
+The headline full-E2E figure comes from the `--pipeline full` bench, which
+routes one prompt through `Omni.generate` end-to-end (real weights):
 
 ```bash
 # Inside the WSL box (~mcig@mcigs-wsl) — needs torch + the local weight snapshots
 python -m nanovllm_omni.optim.bench time \
-    --model ~/minimind-3o --mimi ~/mimi \
-    --max-tokens 16 --runs 20 --warmup 1 \
-    --use-cuda-graph
+    --pipeline full \
+    --max-tokens 16 --runs 20 --warmup 1
 ```
 
-Full distribution (CUDA-Graph path, kernel breakdown):
-`docs/perf/minimind-omni-under-500ms.md`. RTX-3050 re-measurement on the
-full-only tree (torch 2.14): `docs/perf/tk005-rtx3050.md`. Eager-path
+The thinker-only primitive (`bench time` without `--pipeline full`) is kept
+for stage regression, not as an E2E number.
+
+Full-E2E numbers + validation: `docs/perf/tk005-rtx3050.md` and raw CSV
+`docs/perf/full-e2e-rtx3050.csv`. Thinker CUDA-Graph kernel breakdown
+(historical): `docs/perf/minimind-omni-under-500ms.md`. Eager-path
 baseline (pre-`d2ebe56`): `docs/perf/session-1.md`.
 
 ## Configuration

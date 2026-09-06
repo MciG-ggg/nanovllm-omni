@@ -78,7 +78,29 @@ def _run_all(
 def cmd_time(args: argparse.Namespace) -> int:
     bundle = _load_bundle(args)
     prompts = _resolve_prompts(args.prompts)
-    results = _run_all(bundle, prompts, n=args.runs, warmup=args.warmup, run_kwargs=_kwargs(args))
+
+    if args.pipeline == "full":
+        from nanovllm_omni import Omni
+        from nanovllm_omni.optim.bench.runner import run_n_full
+
+        kwargs = _kwargs(args)
+        kwargs.pop("use_cuda_graph", None)  # full E2E has no graph opt-in
+        kwargs.pop("open_thinking", None)  # Omni.generate has no open-thinking switch
+        omni = Omni(
+            model=args.model,
+            device=args.device or bundle.device,
+            dtype="float16" if (args.device or bundle.device).startswith("cuda") else "float32",
+            trust_remote_code=True,
+            pipeline="minimind_o",
+        )
+        results: list[RunResult] = []
+        for prompt in prompts:
+            results.extend(run_n_full(omni, prompt, n=args.runs, warmup=args.warmup, **kwargs))
+    else:
+        results = _run_all(
+            bundle, prompts, n=args.runs, warmup=args.warmup, run_kwargs=_kwargs(args)
+        )
+
     out = write_csv(results, args.out)
     print(f"wrote {len(results)} rows to {out}")
     print()
@@ -295,6 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Route decode through the CUDA-Graph fast path (run_generate "
         "use_cuda_graph=True; opt-in, CUDA-only).",
+    )
+    common.add_argument(
+        "--pipeline",
+        choices=("thinker", "full"),
+        default="thinker",
+        help="measurement target: thinker single-stage decode (default, the "
+        "historical bench) or the full three-stage E2E through Omni.generate.",
     )
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")

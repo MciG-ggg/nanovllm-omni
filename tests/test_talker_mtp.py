@@ -75,6 +75,15 @@ def test_talker_mtp_replaces_inactive_positions_with_pad() -> None:
     assert (output[0, active_mask[0]] != 15).all()
 
 
+def test_talker_mtp_does_not_sample_pad_for_active_residuals() -> None:
+    talker = wrap_talker(make_fake_bundle(audio_pad_token=15, audio_vocab_size=16))
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 15] = 100.0
+    logits[0, 14] = 99.0
+    output = talker._sample_codebook_logits_batch([logits for _ in range(7)], do_sample=False)
+    assert torch.equal(output, torch.full((1, 7), 14, dtype=torch.long))
+
+
 def test_talker_mtp_seeded_sampling_is_reproducible() -> None:
     talker = wrap_talker(make_fake_bundle(audio_vocab_size=16))
     args = _mtp_inputs()

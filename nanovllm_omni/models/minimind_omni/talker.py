@@ -379,6 +379,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         logits = torch.stack(logits_by_layer, dim=0)
         num_layers, batch, vocab = logits.shape
         flat = logits.reshape(num_layers * batch, vocab).float()
+        if 0 <= self.audio_pad_token < vocab:
+            flat[:, self.audio_pad_token] = -float("inf")
         if not do_sample:
             sampled = flat.argmax(dim=-1)
         else:

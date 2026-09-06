@@ -49,23 +49,26 @@ def _time_generate(omni, prompt: str, runs: int) -> tuple[float, bytes]:
     return statistics.median(times), last
 
 
-def _write_deploy(use_talker_graph: bool, path: Path) -> None:
-    # Use realistic MiniMind-O defaults so stage 1 dominates. ``do_sample:
-    # false`` on the talker stage runs BOTH arms greedy: the graph arm forces
-    # greedy internally (CUDA Graphs can't capture multinomial), so making the
-    # eager arm greedy too isolates the delta to graph dispatch rather than
-    # mixing in a sampling->greedy behavior change.
+def _write_deploy(use_talker_graph: bool, path: Path, max_tokens: int) -> None:
+    # ``do_sample: false`` on the talker stage runs BOTH arms greedy: the graph
+    # arm forces greedy internally (CUDA Graphs can't capture multinomial), so
+    # making the eager arm greedy too isolates the delta to graph dispatch
+    # rather than mixing in a sampling->greedy behavior change.
+    # ``max_tokens`` is threaded through the thinker stage so ``--max-tokens``
+    # controls generation length (kept == 128 for the 512 case so a short run
+    # still stops quickly).
+    pad = 128 if max_tokens >= 128 else max_tokens
     path.write_text(
         f"max_batch: 1\n"
         f"use_cuda_graph: false\n"
         f"use_talker_cuda_graph: {str(use_talker_graph).lower()}\n"
-        f"post_eos_padding_count: 128\n"
+        f"post_eos_padding_count: {pad}\n"
         f"internal_stop_token_id: 17\n"
         f"talker_max_steps_after_last_thinker_token: 192\n"
         f"stages:\n"
         f"  - name: thinker\n"
         f"    max_num_batched_tokens: 512\n"
-        f"    default_sampling_params: {{temperature: 0.7, max_tokens: 512}}\n"
+        f"    default_sampling_params: {{temperature: 0.7, max_tokens: {max_tokens}}}\n"
         f"  - name: talker\n"
         f"    default_sampling_params: {{temperature: 0.2, watchdog_limit: 192, do_sample: false}}\n"
         f"  - name: code2wav\n"
@@ -99,7 +102,7 @@ def main() -> int:
 
     # --- Eager (use_talker_cuda_graph: false) ---
     deploy_eager = Path("/tmp/minimind_eager.yaml")
-    _write_deploy(False, deploy_eager)
+    _write_deploy(False, deploy_eager, args.max_tokens)
     omni_eager = Omni(
         args.model,
         device="cuda",
@@ -120,7 +123,7 @@ def main() -> int:
 
     # --- Graph (use_talker_cuda_graph: true) ---
     deploy_graph = Path("/tmp/minimind_graph.yaml")
-    _write_deploy(True, deploy_graph)
+    _write_deploy(True, deploy_graph, args.max_tokens)
     omni_graph = Omni(
         args.model,
         device="cuda",

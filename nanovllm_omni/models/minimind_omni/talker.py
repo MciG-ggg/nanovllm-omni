@@ -588,7 +588,12 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             if input_ids is None:
                 raise ValueError("input_ids or inputs_embeds must be provided.")
             inputs_embeds = self.embed_input_ids(input_ids)
-        hidden_states = inputs_embeds
+        # The vendored HF ``MiniMindBlock`` (and our fused attention for it)
+        # expects ``[B, T, H]``; ``preprocess`` hands us 2D ``[T, H]``. Add the
+        # batch dim for the trunk and drop it again on return so the public
+        # 2D->2D contract is preserved (3D in -> 3D out).
+        had_batch_dim = inputs_embeds.ndim >= 3
+        hidden_states = inputs_embeds if had_batch_dim else inputs_embeds.unsqueeze(0)
         # Determine start_pos for RoPE slicing.
         if positions is None:
             start_pos = 0
@@ -617,7 +622,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
                     past_key_value=None,
                     use_cache=False,
                 )
-        return self.norm(hidden_states)
+        out = self.norm(hidden_states)
+        return out if had_batch_dim else out.squeeze(0)
 
     def _slice_rope(
         self, start_pos: int, span_len: int, device: torch.device
@@ -953,7 +959,12 @@ def _drive_talker_generation(
     import torch
 
     request_id = payload.request_id or "mmo-full-talker"
-    device = payload.bridge_states.device
+    # Run on the talker's own parameter device, never the bridge's (a CPU
+    # bridge from ``extract_bridge_states`` must not force the whole talker
+    # chain onto CPU against CUDA weights -- device-mismatch crash on real
+    # MiniMind). Move the bridge to that device explicitly.
+    device = next(talker.parameters()).device
+    talker_dtype = next(talker.parameters()).dtype
     prompt_ids = list(payload.prompt_token_ids)
     output_ids = list(payload.output_token_ids)
     all_ids = list(payload.text_token_ids)
@@ -961,6 +972,9 @@ def _drive_talker_generation(
         all_ids = prompt_ids + output_ids
     prompt_len = len(prompt_ids)
     bridge = payload.bridge_states
+    if bridge.ndim == 3 and bridge.shape[0] == 1:
+        bridge = bridge[0]
+    bridge = bridge.to(device=device, dtype=talker_dtype)
     num_decode_steps = max(0, int(bridge.shape[0]) - prompt_len)
     if num_decode_steps == 0:
         # Nothing beyond the prompt span: still emit one audio row so the

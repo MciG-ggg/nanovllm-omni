@@ -61,6 +61,9 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
     ),
     default_deploy_config_name="minimind_omni.yaml",
     registration_handles=("minimind_o", "jingyaogong/minimind-3o"),
+    # The current factories intentionally remain collapsed: thinker already
+    # returns final audio and talker is a compatibility pass-through.
+    supported_pipeline_kinds=("collapsed",),
 )
 
 PIPELINE = MINIMIND_OMNI_PIPELINE

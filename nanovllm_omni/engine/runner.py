@@ -17,6 +17,7 @@ dotted-path strings on ``StageConfig``; this runner resolves them via
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from typing import Any
 
@@ -45,14 +46,40 @@ class PipelineRunner:
     ) -> None:
         self.pipeline = pipeline
         self.deploy = deploy
+        self.deploy.validate_pipeline_kind(pipeline)
         self.args = args
         self._merged = merge_pipeline_deploy(pipeline, deploy)
+        self._deploy_stages = {stage.name: stage for stage in deploy.stages}
         self._stage_instances: list[Any] | None = None
+
+    def _stage_args(self, stage_name: str) -> OmniEngineArgs:
+        """Overlay stage-local engine knobs without mutating shared args."""
+        stage_deploy = self._deploy_stages.get(stage_name)
+        if stage_deploy is None:
+            return self.args
+        args = copy.copy(self.args)
+        args.extra = dict(self.args.extra or {})
+        for field_name in (
+            "max_num_batched_tokens",
+            "max_num_seqs",
+            "gpu_memory_utilization",
+            "enforce_eager",
+            "device",
+        ):
+            value = getattr(stage_deploy, field_name)
+            if value is not None:
+                setattr(args, field_name, value)
+        if stage_deploy.devices is not None:
+            args.extra["devices"] = stage_deploy.devices
+        return args
 
     def _ensure_stages(self) -> list[Any]:
         if self._stage_instances is None:
             self._stage_instances = [
-                resolve_stage_factory(stage.factory)(self.deploy, self.args)
+                resolve_stage_factory(stage.factory)(
+                    self.deploy,
+                    self._stage_args(stage.name),
+                )
                 for stage in self.pipeline.stages
             ]
         return self._stage_instances

@@ -1,3 +1,5 @@
+# collapsed is the current safe fallback; full remains capability-gated.
+pipeline_kind: collapsed
 max_batch: 2
 use_cuda_graph: true
 # Used by the future full three-stage path; collapsed mode keeps legacy EOS behavior.
@@ -6,12 +8,25 @@ internal_stop_token_id: 17
 talker_max_steps_after_last_thinker_token: 192
 stages:
   - name: thinker
+    # Conservative metadata only; these values do not prove VRAM fit.
+    max_num_batched_tokens: 512
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.6
+    enforce_eager: false
     default_sampling_params:
       temperature: 0.7
       max_tokens: 512
   - name: talker
+    max_num_batched_tokens: 256
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.2
+    enforce_eager: false
     default_sampling_params:
       temperature: 0.2
       watchdog_limit: 192
   - name: code2wav
+    max_num_batched_tokens: 64
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.1
+    enforce_eager: true
     default_sampling_params: {}

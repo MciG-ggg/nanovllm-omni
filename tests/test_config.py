@@ -4,6 +4,7 @@ import pytest
 
 from nanovllm_omni.config import (
     DeployConfig,
+    DeployStageConfig,
     OmniEngineArgs,
     PipelineConfig,
     SamplingParams,
@@ -72,6 +73,54 @@ def test_stage_config_is_frozen():
         raise AssertionError("StageConfig must be frozen")
 
 
+def test_deploy_config_defaults_to_collapsed_and_parses_modes(tmp_path: Path):
+    assert DeployConfig().pipeline_kind == "collapsed"
+    for mode in ("collapsed", "full"):
+        path = tmp_path / f"{mode}.yaml"
+        path.write_text(f"pipeline_kind: {mode}\n", encoding="utf-8")
+        assert load_deploy_config(path).pipeline_kind == mode
+
+
+def test_deploy_config_rejects_invalid_pipeline_kind(tmp_path: Path):
+    path = tmp_path / "invalid-mode.yaml"
+    path.write_text("pipeline_kind: sideways\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="pipeline_kind"):
+        load_deploy_config(path)
+    with pytest.raises(ValueError, match="collapsed.*full"):
+        DeployConfig(pipeline_kind="sideways")
+
+
+def test_deploy_config_parses_stage_resources_and_unknown_sampling_keys(tmp_path: Path):
+    path = tmp_path / "resources.yaml"
+    path.write_text(
+        "stages:\n"
+        "  - name: thinker\n"
+        "    max_num_batched_tokens: '512'\n"
+        "    max_num_seqs: '2'\n"
+        "    gpu_memory_utilization: '0.6'\n"
+        "    enforce_eager: 'true'\n"
+        "    device: cpu\n"
+        "    devices: [cpu, cpu]\n"
+        "    default_sampling_params: {temperature: 0.7, custom_key: keep}\n",
+        encoding="utf-8",
+    )
+    stage = load_deploy_config(path).stages[0]
+    assert stage.max_num_batched_tokens == 512
+    assert stage.max_num_seqs == 2
+    assert stage.gpu_memory_utilization == 0.6
+    assert stage.enforce_eager is True
+    assert stage.device == "cpu"
+    assert stage.devices == ("cpu", "cpu")
+    assert stage.default_sampling_params["custom_key"] == "keep"
+
+
+def test_deploy_stage_config_validates_resource_values():
+    with pytest.raises(ValueError, match="max_num_seqs"):
+        DeployStageConfig(name="x", max_num_seqs=0)
+    with pytest.raises(ValueError, match="gpu_memory_utilization"):
+        DeployStageConfig(name="x", gpu_memory_utilization=1.1)
+
+
 def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     path = tmp_path / "deploy.yaml"
     path.write_text(
@@ -104,6 +153,8 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     assert by_name["talker"]["temperature"] == 0.2
     assert by_name["talker"]["watchdog_limit"] == 192
     assert by_name["code2wav"] == {}
+    thinker_deploy = next(stage for stage in deploy.stages if stage.name == "thinker")
+    assert thinker_deploy.max_num_batched_tokens is None
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+
+import pytest
+
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import (
     DeployConfig,
@@ -169,3 +173,53 @@ def test_single_stage_pipeline_supported():
     log = fac.get_diffusion_log()
     assert len(log) == 1
     assert log[0][0] == "dit"
+
+
+def test_runner_passes_mode_and_stage_resources_to_factory():
+    fac.reset_factory_observations()
+    pipeline = _make_pipeline(
+        [
+            StageConfig(
+                0,
+                "thinker",
+                StageExecutionType.LLM_AR,
+                "tests._stage_factories:observing_factory",
+                is_terminal=True,
+            )
+        ],
+    )
+    pipeline = dataclasses.replace(pipeline, supported_pipeline_kinds=("collapsed", "full"))
+    deploy = DeployConfig(
+        pipeline_kind="full",
+        stages=(
+            DeployStageConfig(
+                name="thinker",
+                max_num_batched_tokens=512,
+                max_num_seqs=2,
+                gpu_memory_utilization=0.6,
+                enforce_eager=True,
+                device="cpu",
+                devices=("cpu",),
+            ),
+        ),
+    )
+    PipelineRunner(pipeline, deploy, _make_args()).run("hello")
+    observed_deploy, observed_args = fac.get_factory_observations()[0]
+    assert observed_deploy.pipeline_kind == "full"
+    assert observed_args.max_num_batched_tokens == 512
+    assert observed_args.max_num_seqs == 2
+    assert observed_args.gpu_memory_utilization == 0.6
+    assert observed_args.enforce_eager is True
+    assert observed_args.device == "cpu"
+    assert observed_args.extra["devices"] == ("cpu",)
+
+
+def test_minimind_full_mode_fails_without_silent_collapsed_fallback():
+    from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
+
+    with pytest.raises(ValueError, match="full mode is not supported"):
+        PipelineRunner(
+            MINIMIND_OMNI_PIPELINE,
+            DeployConfig(pipeline_kind="full"),
+            _make_args(),
+        )

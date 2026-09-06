@@ -222,10 +222,9 @@ def make_full_fixtures() -> tuple[SimpleNamespace, Any, FakeMimi, FakeMiniMindOm
     return bundle, talker, mimi, model
 
 
-def _write_deploy(tmp_path: Path, pipeline_kind: str) -> Path:
-    path = tmp_path / f"{pipeline_kind}-deploy.yaml"
+def _write_deploy(tmp_path: Path) -> Path:
+    path = tmp_path / "deploy.yaml"
     path.write_text(
-        "pipeline_kind: " + pipeline_kind + "\n"
         "max_batch: 1\n"
         "use_cuda_graph: false\n"
         "post_eos_padding_count: 128\n"
@@ -243,14 +242,14 @@ def _write_deploy(tmp_path: Path, pipeline_kind: str) -> Path:
     return path
 
 
-def _new_omni(tmp_path: Path, pipeline_kind: str, fixtures: tuple) -> Omni:
+def _new_omni(tmp_path: Path, fixtures: tuple) -> Omni:
     bundle, talker, mimi, _model = fixtures
     return Omni(
         model="fake/minimind-3o",
         device="cpu",
         dtype="float32",
         pipeline="minimind_o",
-        deploy_config_path=str(_write_deploy(tmp_path, pipeline_kind)),
+        deploy_config_path=str(_write_deploy(tmp_path)),
         extra={"bundle": bundle, "talker": talker, "mimi": mimi},
     )
 
@@ -275,10 +274,9 @@ def _assert_wav(output: OmniRequestOutput, sample_rate: int = 24_000) -> bytes:
 
 def test_full_mode_is_only_supported_kind_and_is_deploy_default() -> None:
     assert MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds == ("full",)
-    from nanovllm_omni.config import DeployConfig, load_deploy_config
-
-    assert DeployConfig().pipeline_kind == "full"
     import pathlib
+
+    from nanovllm_omni.config import load_deploy_config
 
     deploy_path = (
         pathlib.Path(__file__).resolve().parent.parent
@@ -286,11 +284,11 @@ def test_full_mode_is_only_supported_kind_and_is_deploy_default() -> None:
         / "deploy"
         / "minimind_omni.yaml"
     )
-    assert load_deploy_config(deploy_path).pipeline_kind == "full"
+    assert load_deploy_config(deploy_path) is not None
 
 
 def test_full_mode_e2e_produces_decodable_wav_through_omni(tmp_path: Path) -> None:
-    omni = _new_omni(tmp_path, "full", make_full_fixtures())
+    omni = _new_omni(tmp_path, make_full_fixtures())
     outputs = omni.generate(
         ["hello"],
         SamplingParams(max_tokens=4, temperature=0.2, top_p=0.9),
@@ -301,7 +299,7 @@ def test_full_mode_e2e_produces_decodable_wav_through_omni(tmp_path: Path) -> No
 
 def test_full_mode_runner_produces_omni_request_output(tmp_path: Path) -> None:
     bundle, talker, mimi, _model = make_full_fixtures()
-    deploy = _write_deploy(tmp_path, "full")
+    deploy = _write_deploy(tmp_path)
     from nanovllm_omni.config import load_deploy_config
 
     args = OmniEngineArgs(
@@ -318,7 +316,7 @@ def test_full_mode_runner_produces_omni_request_output(tmp_path: Path) -> None:
 
 
 def test_full_mode_to_dict_emits_base64_wav(tmp_path: Path) -> None:
-    omni = _new_omni(tmp_path, "full", make_full_fixtures())
+    omni = _new_omni(tmp_path, make_full_fixtures())
     (output,) = omni.generate("hello", SamplingParams(max_tokens=4, temperature=0.2))
     d = output.to_dict()
     assert "multimodal_output" in d
@@ -334,7 +332,7 @@ def test_full_mode_no_cross_request_state_leak(tmp_path: Path) -> None:
     drops its per-request watchdog flags (no stale forced-stop)."""
     fixtures = make_full_fixtures()
     _bundle, talker, _mimi, _model = fixtures
-    omni = _new_omni(tmp_path, "full", fixtures)
+    omni = _new_omni(tmp_path, fixtures)
     sp = SamplingParams(max_tokens=4, temperature=0.2)
 
     outs = omni.generate(["first", "second"], sp)
@@ -399,7 +397,7 @@ def test_full_mode_requires_bridge_capture(tmp_path: Path) -> None:
         device="cpu",
         dtype="float32",
         pipeline="minimind_o",
-        deploy_config_path=str(_write_deploy(tmp_path, "full")),
+        deploy_config_path=str(_write_deploy(tmp_path)),
         extra={"bundle": plain_bundle, "talker": talker, "mimi": mimi},
     )
     with pytest.raises(ValueError, match="bridge"):
@@ -408,7 +406,7 @@ def test_full_mode_requires_bridge_capture(tmp_path: Path) -> None:
 
 def test_full_mode_rejects_audio_input_with_clear_message(tmp_path: Path) -> None:
     """Full mode is text-to-audio only; audio input must not silently drop."""
-    omni = _new_omni(tmp_path, "full", make_full_fixtures())
+    omni = _new_omni(tmp_path, make_full_fixtures())
     with pytest.raises(NotImplementedError, match="text-to-audio only"):
         omni.generate(
             "hello",

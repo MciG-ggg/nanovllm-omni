@@ -73,23 +73,6 @@ def test_stage_config_is_frozen():
         raise AssertionError("StageConfig must be frozen")
 
 
-def test_deploy_config_defaults_to_full_and_parses_modes(tmp_path: Path):
-    assert DeployConfig().pipeline_kind == "full"
-    for mode in ("collapsed", "full"):
-        path = tmp_path / f"{mode}.yaml"
-        path.write_text(f"pipeline_kind: {mode}\n", encoding="utf-8")
-        assert load_deploy_config(path).pipeline_kind == mode
-
-
-def test_deploy_config_rejects_invalid_pipeline_kind(tmp_path: Path):
-    path = tmp_path / "invalid-mode.yaml"
-    path.write_text("pipeline_kind: sideways\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="pipeline_kind"):
-        load_deploy_config(path)
-    with pytest.raises(ValueError, match="collapsed.*full"):
-        DeployConfig(pipeline_kind="sideways")
-
-
 def test_deploy_config_parses_stage_resources_and_unknown_sampling_keys(tmp_path: Path):
     path = tmp_path / "resources.yaml"
     path.write_text(

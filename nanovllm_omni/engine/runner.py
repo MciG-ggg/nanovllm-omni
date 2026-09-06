@@ -46,7 +46,6 @@ class PipelineRunner:
     ) -> None:
         self.pipeline = pipeline
         self.deploy = deploy
-        self.deploy.validate_pipeline_kind(pipeline)
         self.args = args
         self._merged = merge_pipeline_deploy(pipeline, deploy)
         self._deploy_stages = {stage.name: stage for stage in deploy.stages}

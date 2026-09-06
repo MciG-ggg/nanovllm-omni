@@ -1,14 +1,9 @@
 """MiniMind-O thinker stage.
 
-Owns the thinker's factory function (``_thinker_stage``) consumed by the
-pipeline runner, plus the end-to-end ``generate_audio`` wrapper and the
-two helper functions (``tokenize_for_generate`` / ``run_generate``) it
-chains. Codec decode lives in ``code2wav.py``; bundle loading lives in
-``bundle.py``.
-
-The ``_thinker_stage`` factory wraps the end-to-end call behind the
-thinker / talker / code2wav split. The correctness-side split turns this
-into a real 3-stage execution; this file is the prerequisite.
+Owns the ``_thinker_stage`` factory, the ``generate_audio`` end-to-end
+wrapper, and its ``tokenize_for_generate`` / ``run_generate`` helpers.
+Public symbols: ``_thinker_stage``, ``generate_audio``, ``run_generate``,
+``tokenize_for_generate``.
 """
 
 from __future__ import annotations
@@ -25,9 +20,7 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     """Stage 0 factory: runs the bridge-capturing thinker for the talker.
 
     Emits a ``ThinkerStageOutput`` carrying bridge hidden states + text span
-    that ``thinker2talker`` converts for the talker stage. The legacy
-    collapsed single-call path is retired (RTX-3050 validated the 3-stage
-    path end-to-end).
+    that ``thinker2talker`` converts for the talker stage.
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
@@ -45,14 +38,9 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
         if provided_bundle is not None
         else create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
     )
-    # deploy-layer default: route served requests through the CUDA-Graph
-    # fast path when the yaml enables it (report §44). generate_audio(None)
-    # resolves from bundle.use_cuda_graph.
     if bundle is not None:
         bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
 
-    # The three-stage full pipeline is the only supported runtime mode; the
-    # legacy collapsed factory is retired, so no fallback is kept.
     return _full_thinker_stage(bundle, deploy)
 
 
@@ -60,13 +48,9 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
     """Full-mode stage 0: emit a ``ThinkerStageOutput`` with bridge states.
 
     Runs the bridge-capturing generation with the deploy layer's post-EOS
-    sequence (Phase 2 opt-in) and internal-stop token, then hands the
-    aligned bridge + token ids to ``thinker2talker``. The thinker does NOT
-    decode audio here -- that is the code2wav stage's job.
-
-    Audio input (``extra["audio"]`` / ASR) is a collapsed-path feature; the
-    full path is text-to-audio only until that bridging is wired, so the
-    stage fails loud instead of silently dropping the audio side-channel.
+    sequence and internal-stop token, then hands the aligned bridge +
+    token ids to ``thinker2talker``. The thinker does NOT decode audio
+    here -- that is the code2wav stage's job.
     """
     post_eos_padding_count = int(getattr(deploy, "post_eos_padding_count", 128) or 0)
     internal_stop_token_id = getattr(deploy, "internal_stop_token_id", None)
@@ -93,7 +77,7 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
         if extra.get("audio") is not None:
             raise NotImplementedError(
                 "MiniMind full pipeline is text-to-audio only; audio input "
-                "(ASR) is not wired for the three-stage path."
+                "(ASR) is not supported on the three-stage path."
             )
         eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
         audio_special_token = getattr(
@@ -135,10 +119,9 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
         prompt_ids = (
             input_ids[0].detach().cpu().tolist() if input_ids.ndim == 2 else list(input_ids)
         )
-        # The runner predicts the first output token at prefill (its bridge
-        # row is the last prompt position), so the talker only decodes the
-        # remaining output tokens. The bridge-aligned text span is therefore
-        # prompt + output[1:], whose length matches the captured bridge rows.
+        # Bridge-aligned span: prompt + output[1:] -- the runner predicts
+        # the first output token at prefill, so the talker only decodes
+        # the remaining tokens and the span length matches the bridge rows.
         aligned_text = prompt_ids + (output_tokens[1:] if len(output_tokens) > 1 else [])
         return ThinkerStageOutput(
             bridge_states=bridge,
@@ -230,30 +213,25 @@ def run_generate(
     ``audio_inputs`` / ``audio_lens`` (when set) ride through to the batched
     runner's prefill so the thinker sees user speech (engine-native audio in).
 
-    ``use_cuda_graph=True`` (opt-in, default off — public path unchanged)
-    routes text+audio decode through the CUDA-Graph fixed-KV-buffer decoder
-    (``optim.cuda_graph``). It returns the same list-of-8-token frames; only
-    the forward path differs. Falls back to eager ``stream_generate`` when
-    CUDA is unavailable or the model isn't capture-compatible.
+    ``use_cuda_graph=True`` (opt-in, default off) routes text+audio decode
+    through the CUDA-Graph fixed-KV-buffer decoder (``optim.cuda_graph``);
+    returns the same list-of-8-token frames. Falls back to eager
+    ``stream_generate`` when CUDA is unavailable or the model isn't
+    capture-compatible.
 
     ``seed`` (default None) controls the sampling RNG for the CUDA-Graph
-    path. When None, the caller's current process seed
-    (``torch.initial_seed()``) is used — same determinism contract as the
-    eager path, whose caller seeds ``torch.manual_seed``. Previously the
-    graph path hardcoded 42 and ignored the caller's seed (determinism-
-    parity defect); now it honors it.
+    path; when None, ``torch.initial_seed()`` is used (same determinism
+    contract as the eager path).
 
     ``capture_bridge_states`` and ``bridge_state_callback`` expose the
-    additive eager capture seam used by the future talker stage. The CUDA
-    Graph path does not capture bridge states in Phase 1.
+    additive eager capture seam used by the talker stage. The CUDA Graph
+    path does not capture bridge states.
     """
     import torch
 
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
-        # Full post-EOS mode stays eager until the graph decoder accepts the
-        # internal-stop sequence and bridge capture; its current visible-EOS
-        # stop logic cannot satisfy that contract (Phase 4 integration).
+        # Graph path rejects post-EOS mode.
         if (
             use_cuda_graph
             and post_eos_padding_count == 0
@@ -264,12 +242,8 @@ def run_generate(
         ):
             # Graph fast path: joint text+audio decode, frames = transpose of
             # the 8 audio channels (Mimi codebook frames, codec-stage format).
-            # Honor the caller's seed (fall back to the process RNG) so the
-            # graph path matches eager determinism for a given manual_seed.
-            # defect B: thread eos_token_id so graphed decode halts at the
-            # content-natural end (parity with BatchedThinkerRunner.step_finished).
-            # audio_stop_token falls back to ``model.audio_stop_token`` inside
-            # ``enable_cuda_graph`` (matches eager's batched_generation.py:119).
+            # ``audio_stop_token`` falls back to ``model.audio_stop_token``
+            # inside ``enable_cuda_graph``.
             from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
 
             decoder = enable_cuda_graph(model, n_steps=max_new_tokens, eos_token_id=eos_token_id)
@@ -305,8 +279,7 @@ def run_generate(
                 internal_stop_token_id=internal_stop_token_id,
             )
         else:
-            # TODO: delete
-            # Keep lightweight/test doubles compatible with the public seam.
+            # Lightweight/test doubles path; kept for the public seam.
             stream = model.generate(
                 input_ids,
                 eos_token_id,
@@ -346,10 +319,8 @@ def generate_audio(
     so CUDA memory peaks are not doubled by intermediate allocations.
 
     ``use_cuda_graph`` (default None) routes decode through the CUDA-Graph
-    fixed-KV-buffer decoder (report §40: 3.1-3.7x generate; determinism +
-    robustness verified). None resolves from ``bundle.use_cuda_graph``
-    (set by the deploy layer, deploy/minimind_omni.yaml), else False -- so
-    the library call default stays eager while deployment opts in via yaml.
+    fixed-KV-buffer decoder. None resolves from ``bundle.use_cuda_graph``
+    (set by the deploy layer, deploy/minimind_omni.yaml), else False.
     """
     import torch
 

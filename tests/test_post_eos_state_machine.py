@@ -82,16 +82,6 @@ def test_opt_in_post_eos_sequence_executes_forced_steps() -> None:
     assert len(model.calls) == len(state.text_tokens)
 
 
-def test_collapsed_default_does_not_activate_post_eos_state_machine() -> None:
-    model, scheduler, runner, request_id = _make_eos_runner(padding_count=0)
-    _run_runner(runner, scheduler)
-
-    state = runner.states[request_id]
-    assert state.post_eos_started is False
-    assert state.internal_stop_emitted is False
-    assert state.text_tokens[1] == model.enter_token_id
-
-
 def test_post_eos_state_machine_respects_hard_token_budget() -> None:
     _model, scheduler, runner, request_id = _make_eos_runner(max_new_tokens=3, padding_count=20)
     _run_runner(runner, scheduler)

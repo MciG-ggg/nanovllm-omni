@@ -1,24 +1,19 @@
-"""Batched (continuous-batching) MiniMind-O thinker runner (Q5a/Q7/Q10a).
+"""Batched (continuous-batching) MiniMind-O thinker runner.
 
 Project-owned batched decode loop built ON TOP of the frozen model: the
 vendored ``MiniMindOmni.forward`` is called with a rectangular [B, 9, T]
 input (text row 8, 8 audio-code rows) and ``past_key_values`` whose layout
-is ``[B, seq, kv_heads, head_dim]`` (seq at dim 1 -- the vendored forward
-reads ``start_pos = past_key_values[0][0].shape[1]``). The model only
-supports ONE scalar ``start_pos`` per forward, so the scheduler groups
-requests that share the same KV length (Q8a); this runner executes those
-groups as one batched forward each.
+is ``[B, seq, kv_heads, head_dim]``. The model only supports ONE scalar
+``start_pos`` per forward, so the scheduler groups requests that share
+the same KV length and this runner executes those groups as one batched
+forward each.
 
-Per-request sampling honours Q10a with a FIXED per-request
-``torch.Generator``: batch layout never changes a request's draw order, so
-each request stays bit-reproducible from its own seed regardless of how the
-requests are grouped. The text token is sync'd once per row per step (the
-next input depends on it -- identical cost to the single path); the 8 audio
-codes are sampled on-device and moved to Python once per row.
+Per-request sampling uses a fixed per-request ``torch.Generator``: batch
+layout never changes a request's draw order, so each request stays
+bit-reproducible from its own seed regardless of grouping.
 
-Engine loop mirrors vllm-omni: ``schedule() -> execute(prefill+decode) ->
-update_from_output``, and finished thinkers drop OUT to the serial
-talker/mimi->wav chain (Q9a) via ``code2wav.decode_audio``.
+Public symbols: ``BatchedThinkerRunner``, ``BatchedThinkerState``,
+``enable_bridge_capture``, ``extract_bridge_states``.
 """
 
 from __future__ import annotations
@@ -155,11 +150,10 @@ class BatchedThinkerRunner:
             )
         self.audio_pad: int = int(getattr(self.model, "audio_pad_token", 0))
         self.audio_stop: int = int(getattr(self.model, "audio_stop_token", 0))
-        # Bridge hidden-state capture. Off by default so
-        # existing benches/tests that don't need talker handoff pay zero
-        # overhead. When on, ``prefill_group`` and ``decode_group`` stash
-        # the thinker's bridge-layer hidden state into
-        # ``state.bridge_states`` after each forward.
+        # Bridge hidden-state capture. Off by default so benches/tests that
+        # don't need talker handoff pay zero overhead. When on,
+        # ``prefill_group`` / ``decode_group`` stash the bridge-layer hidden
+        # state into ``state.bridge_states`` after each forward.
         self.capture_bridge_states: bool = bool(capture_bridge_states)
         self._bridge_capture_layer = _resolve_bridge_layer(self.model)
         if self.capture_bridge_states:
@@ -176,10 +170,9 @@ class BatchedThinkerRunner:
         num_talker_layers = len(getattr(getattr(self.model, "talker", None), "layers", []) or [])
         self.num_layers = num_thinker_layers + num_talker_layers
         # Fixed-slot KV pool. Budget the slot length explicitly: the model's
-        # ``max_position_embeddings`` (MiniMind-O: 32768) is far larger than any
-        # practical single generation, and a full-size slot per request OOMs a
-        # 4 GB card at max_batch>=2 (fixed-slot teaching shape; paged
-        # KV is the deferred upgrade this knob approximates).
+        # ``max_position_embeddings`` (MiniMind-O: 32768) is far larger than
+        # any practical single generation, and a full-size slot per request
+        # OOMs a 4 GB card at max_batch>=2. paged KV is the upgrade path.
         max_embeddings = int(getattr(config, "max_position_embeddings", 4096))
         self.kv_max_sequence_len = kv_max_sequence_len or min(max_embeddings, 1024 + max_new_tokens)
         self.kv_pool = FixedKvSlotPool(max_sequence_len=self.kv_max_sequence_len)
@@ -295,11 +288,11 @@ class BatchedThinkerRunner:
         """Audio column index for active-layer gating.
 
         Without ``open_thinking``: ``audio_step = st.step - 1`` (audio lags
-        text by one position, matches generation.py L129).
+        text by one position).
 
         With ``open_thinking``: ``audio_step = -1`` until the trailing text
         tokens match ``think_end_ids``; once detected at step ``D``, audio
-        starts at ``D + 2`` (matches generation.py L130-137).
+        starts at ``D + 2``.
         """
         base = st.step - 1
         if not self.open_thinking or not self.think_end_ids:
@@ -314,9 +307,8 @@ class BatchedThinkerRunner:
         """Gather per-request audio into one batched ``audio_inputs`` tensor.
 
         Returns ``{}`` when no request in the group carries audio. Rows for
-        audio-free requests are zero-filled; the model's ``encode_audio_inputs``
-        batch-mask drops them (``audio_inputs.flatten(1).any(1)``), so mixed
-        groups stay supported.
+        audio-free requests are zero-filled; the model's
+        ``encode_audio_inputs`` batch-mask drops them.
         """
         import torch
 
@@ -354,8 +346,8 @@ class BatchedThinkerRunner:
         """One rectangular [B, 9, P] forward over the group's prompt chunks."""
         import torch
 
-        # RuntimeGroup.items is list[PrefillChunk] for a prefill group; the
-        # rid is on each chunk's ``seq.request_id`` (Sequence per-stage).
+        # RuntimeGroup.items is list[PrefillChunk] for a prefill group; rid
+        # is on each chunk's ``seq.request_id``.
         chunks: list[PrefillChunk] = group.items
         req_ids = [chunk.sequence.request_id for chunk in chunks]
         num_requests = len(req_ids)
@@ -394,7 +386,7 @@ class BatchedThinkerRunner:
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
             token = self._sample_text(st, text_logits[r, 0, :])
-            if st.text_finished:  # unreachable on first token, kept for symmetry
+            if st.text_finished:  # unreachable on first token; kept for symmetry
                 token = self._next_post_eos_token(st)
             st.text_tokens.append(token)
             self._note_audio(st, [self.audio_pad] * 8)
@@ -424,15 +416,13 @@ class BatchedThinkerRunner:
 
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
-            # generation.py order: sample, then override with enter/pad when
-            # text already finished, then append, then flip finished on EOS.
             token = self._sample_text(st, text_logits[r, 0, :])
             if st.text_finished:
                 token = self._next_post_eos_token(st)
             st.text_tokens.append(token)
             # Detect think_end (open_thinking audio gating). Detection must
-            # happen before ``st.step += 1`` so the +2 offset uses the current
-            # pre-increment step value, matching generation.py L135.
+            # happen before ``st.step += 1`` so the +2 offset uses the
+            # current pre-increment step value.
             if (
                 self.open_thinking
                 and self.think_end_ids
@@ -448,16 +438,7 @@ class BatchedThinkerRunner:
                 st.text_finished = True
 
     def _next_post_eos_token(self, st: BatchedThinkerState) -> int:
-        """Return the next token after EOS for the selected pipeline mode.
-
-        ``post_eos_padding_count == 0`` preserves the collapsed pipeline's
-        legacy enter/pad behavior. Full stage execution opts into the
-        reference sequence: enter, a bounded PAD tail, then internal stop.
-        """
-        if self.post_eos_padding_count == 0:
-            token = self.sampling["enter"] if st.first_finished else self.sampling["pad"]
-            st.first_finished = False
-            return token
+        """Return the next token after EOS: enter, bounded PAD tail, internal stop."""
         if not st.post_eos_started:
             st.post_eos_started = True
             st.post_eos_remaining = self.post_eos_padding_count
@@ -472,16 +453,15 @@ class BatchedThinkerRunner:
         """Append one step of audio codes, track stop positions, emit frames.
 
         Port of generation.py's exact indexing: ``step`` here is ``st.step``
-        after the increment, matching ``step = current_len - start_pos`` there;
-        frame index is ``step - 7 + i`` and the gate is ``active >= 8``.
+        after the increment, matching ``step = current_len - start_pos``
+        there; frame index is ``step - 7 + i`` and the gate is ``active >= 8``.
 
         CRITICAL: ``audio_stop_pos`` is only recorded for layers that were
-        actually sampled this step (``i in sampled`` in generation.py). The pad
-        token is ``audio_pad >= AUDIO_VOCAB_BOUNDARY``, so applying the ``>=``
-        test to inactive (pad) rows would mark every layer stopped at step 0
+        actually sampled this step. The pad token is
+        ``audio_pad >= AUDIO_VOCAB_BOUNDARY``, so applying the ``>=`` test
+        to inactive (pad) rows would mark every layer stopped at step 0
         and starve the ``active >= 8`` frame gate.
         """
-        # which layers are being sampled this step = active set (i <= audio_step)
         active_here = {i for i in range(8) if st.step - 1 >= i}
         for i, code in enumerate(codes):
             st.audio_codes[i].append(code)
@@ -522,8 +502,8 @@ class BatchedThinkerRunner:
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
             # captured shape: [B, num_positions, hidden_size]. Append each
-            # prompt position so the bridge sequence lines up with the talker's
-            # span alignment (``prompt_len`` bridge rows before the decode rows).
+            # prompt position so the bridge sequence lines up with the
+            # talker's span alignment.
             for row in captured[r].detach():
                 st.bridge_states.append(row)
 
@@ -534,7 +514,6 @@ class BatchedThinkerRunner:
             return
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
-            # captured shape: [B, 1, hidden_size]. Squeeze to [hidden_size].
             per_request = captured[r, 0, :].detach()
             st.bridge_states.append(per_request)
 
@@ -553,10 +532,9 @@ _BRIDGE_PATCH_MARKER = "_nanovllm_bridge_patched"
 def _resolve_bridge_layer(model: Any) -> int:
     """Pick the thinker's bridge-layer index for ``model``.
 
-    Defaults to ``num_hidden_layers // 2 - 1`` (matches vendored
-    ``OmniConfig.bridge_layer`` and vllm-omni's MiniMindModel forward
-    loop). Returns -1 when the model exposes neither ``num_hidden_layers``
-    nor ``bridge_layer`` -- the caller treats -1 as "do not capture".
+    Defaults to ``num_hidden_layers // 2 - 1``. Returns -1 when the model
+    exposes neither ``num_hidden_layers`` nor ``bridge_layer`` -- the
+    caller treats -1 as "do not capture".
     """
     config = getattr(model, "config", None)
     configs = [config, getattr(config, "text_config", None), getattr(model, "thinker", None)]
@@ -586,13 +564,10 @@ def enable_bridge_capture(model: Any, bridge_layer: int | None = None) -> int:
     Returns the patched layer's index (or -1 when no patch was applied).
     Idempotent: re-patching the same layer is a no-op.
 
-    # Monkey-patching the joint model's bridge layer avoids the
-    # alternative of running the thinker alone (which would duplicate work
-    # every step) at the cost of coupling to the vendored block signature.
-    # If the vendored model ever changes block signature, this patch fails
-    # loud (the forward call inside the wrapper will raise), keeping the
-    # regression visible at first run instead of producing stale bridge
-    # states silently.
+    If the vendored model ever changes block signature, this patch fails
+    loud (the forward call inside the wrapper will raise), keeping the
+    regression visible at first run instead of producing stale bridge
+    states silently.
     """
     thinker = getattr(model, "thinker", None)
     if thinker is None:
@@ -631,9 +606,9 @@ def enable_bridge_capture(model: Any, bridge_layer: int | None = None) -> int:
 def _read_bridge_capture(model: Any, bridge_layer: int) -> Any:
     """Read the most recent ``_bridge_capture`` from the bridge layer.
 
-    Returns ``None`` when capture is not installed (so callers can no-op).
-    The returned tensor is the raw captured tensor (shape ``[B, T, hidden]``);
-    per-request slicing happens in the runner.
+    Returns ``None`` when capture is not installed. The returned tensor
+    is the raw captured tensor (shape ``[B, T, hidden]``); per-request
+    slicing happens in the runner.
     """
     if bridge_layer < 0:
         return None
@@ -648,11 +623,10 @@ def extract_bridge_states(state: BatchedThinkerState) -> Any:
     """Stack the per-step bridge hidden states for one request.
 
     Returns a ``[num_positions + num_steps, hidden_size]`` tensor (CPU clone
-    so the caller can mutate without affecting the runner's buffer): one row
-    per prompt position captured at prefill plus one row per decode step.
-    Returns an empty ``[0, hidden_size]`` tensor when the runner was not
-    constructed with ``capture_bridge_states=True``; consumers must guard
-    against the empty shape or enable capture explicitly.
+    so the caller can mutate without affecting the runner's buffer): one
+    row per prompt position captured at prefill plus one row per decode
+    step. Returns an empty ``[0, hidden_size]`` tensor when the runner
+    was not constructed with ``capture_bridge_states=True``.
     """
     import torch
 

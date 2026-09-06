@@ -1,4 +1,8 @@
-"""MiniMind-O Code2Wav stage and Mimi codec helpers."""
+"""MiniMind-O Code2Wav stage and Mimi codec helpers.
+
+Public symbols: ``MiniMindOmniCode2Wav``, ``load_mimi_codec``,
+``decode_audio``, ``encode_wav``.
+"""
 
 from __future__ import annotations
 

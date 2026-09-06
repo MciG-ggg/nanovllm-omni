@@ -1,15 +1,11 @@
-# full is the only supported runtime mode: 3-stage thinker -> talker ->
-# code2wav, validated against real MiniMind-3o / Mimi weights on RTX 3050.
-pipeline_kind: full
+# Three-stage thinker -> talker -> code2wav pipeline (RTX 3050 validated).
 max_batch: 2
 use_cuda_graph: true
-# Used by the future full three-stage path; collapsed mode keeps legacy EOS behavior.
 post_eos_padding_count: 128
 internal_stop_token_id: 17
 talker_max_steps_after_last_thinker_token: 192
 stages:
   - name: thinker
-    # Conservative metadata only; these values do not prove VRAM fit.
     max_num_batched_tokens: 512
     max_num_seqs: 1
     gpu_memory_utilization: 0.6

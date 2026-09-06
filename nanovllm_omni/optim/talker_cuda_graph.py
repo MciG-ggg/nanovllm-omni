@@ -201,7 +201,11 @@ class TalkerMtpCudaGraph:
         with torch.cuda.stream(warmup_stream), torch.inference_mode():
             self._invoke(buffers, do_sample=False, generator=None)
         current_stream.wait_stream(warmup_stream)
-        with torch.cuda.graph(graph, stream=current_stream), torch.inference_mode():
+        # No ``stream=`` arg: PyTorch allocates an internal capture stream and
+        # joins back, which works whether the caller is on the default stream
+        # or a side stream. Passing ``stream=current_stream`` would fail when
+        # current_stream IS the default stream.
+        with torch.cuda.graph(graph), torch.inference_mode():
             output = self._invoke(buffers, do_sample=False, generator=None)
         current_stream.synchronize()
         if not isinstance(output, torch.Tensor):

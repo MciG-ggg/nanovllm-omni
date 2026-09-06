@@ -1,15 +1,10 @@
 """Project-owned streaming MiniMind-O generation loop.
 
-The single-request path (``stream_generate``) is a thin wrapper that drives a
-``BatchedThinkerRunner`` with a 1-slot ``RuntimeScheduler`` and yields one
-``(text_chunk, audio_frame)`` pair per decode step. All per-step work
-(forward, sampling, EOS bookkeeping, frame emission, open_thinking audio
-gating) is shared with the batched engine path used by
-``engine.run_batched_generate``.
-
-The earlier hand-rolled ``stream_generate_optimized`` was retired because it
-duplicated ~120 lines of per-step logic with ``BatchedThinkerRunner``; now
-both paths route through one MiniMind generation loop.
+``stream_generate`` is a thin wrapper that drives a ``BatchedThinkerRunner``
+with a 1-slot ``RuntimeScheduler`` and yields one ``(text_chunk,
+audio_frame)`` pair per decode step. All per-step work (forward, sampling,
+EOS bookkeeping, frame emission, open_thinking audio gating) is shared
+with the batched engine path used by ``engine.run_batched_generate``.
 """
 
 from __future__ import annotations
@@ -105,7 +100,7 @@ def stream_generate(
                 device=input_ids.device,
             ).unsqueeze(
                 0
-            )  # [1, N], matches the old text_buffer[:, start_pos:current_len]
+            )  # [1, N]
             audio_frame = st.frames[seen_frames] if len(st.frames) > seen_frames else None
             seen_frames = len(st.frames)
             if st.text_finished:

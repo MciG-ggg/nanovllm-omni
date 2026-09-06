@@ -1,18 +1,17 @@
 """Pure MiniMind-O payload processors for the full three-stage pipeline.
 
-The processors only reshape and validate stage handoff data. They never call a
-model.
+Reshape and validate stage handoff data; never call a model. Public
+symbols: ``ThinkerStageOutput``, ``TalkerInputPayload``,
+``Code2WavInputPayload``, ``thinker2talker``, ``talker2code2wav``,
+``AUDIO_PAD_TOKEN_ID``.
 
 Contracts:
-
-* ``ThinkerStageOutput.bridge_states`` is ``[T, H]`` (``[B, T, H]`` is
-  accepted and flattened for a single request). ``T`` is aligned with the
-  prompt plus generated text state. ``prompt_token_ids`` and
-  ``output_token_ids`` are one-dimensional token sequences.
-* ``TalkerInputPayload.input_ids`` is ``[T_prompt]`` placeholder audio-pad
-  IDs, while ``text_token_ids`` retains the aligned thinker text IDs.
-* ``Code2WavInputPayload.audio_codes`` is frame-major ``[F, C]`` with one
-  column per codec codebook. Device and request metadata are retained.
+* ``ThinkerStageOutput.bridge_states``: ``[T, H]`` (or ``[B, T, H]``
+  flattened). ``prompt_token_ids`` / ``output_token_ids`` are 1-D.
+* ``TalkerInputPayload.input_ids``: ``[T_prompt]`` placeholder audio-pad
+  IDs; ``text_token_ids`` retains the aligned thinker text IDs.
+* ``Code2WavInputPayload.audio_codes``: frame-major ``[F, C]`` with one
+  column per codec codebook.
 """
 
 from __future__ import annotations
@@ -206,9 +205,9 @@ def _speaker_embedding(payload: Any) -> torch.Tensor | None:
 def thinker2talker(payload: Any, prompt: str = "") -> Any:
     """Convert one thinker result into a talker input.
 
-    ``prompt`` is part of the local runner hook signature. Full-mode payloads
-    carry token IDs from the thinker; tokenizing here would violate the pure
-    processor boundary, so the prompt is intentionally unused.
+    ``prompt`` is part of the local runner hook signature. Full-mode
+    payloads carry token IDs from the thinker; tokenizing here would
+    violate the pure processor boundary, so the prompt is unused.
     """
     del prompt
     if isinstance(payload, TalkerInputPayload):

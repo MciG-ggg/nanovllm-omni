@@ -1,27 +1,8 @@
-"""MiniMind-O pipeline topology (frozen, fully declarative).
+"""MiniMind-O pipeline topology: thinker -> talker -> code2wav.
 
-Stage 0: thinker  — kind=LLM_AR    (text multimodal understanding + generation)
-Stage 1: talker   — kind=LLM_AR    (thinker hidden state -> Mimi codec codes)
-Stage 2: code2wav — kind=CODEC     (Mimi codec codes -> 24 kHz mono PCM)
-
-This file contains NO static imports from per-stage modules: factory and
-process_input are dotted-path strings resolved by
-``nanovllm_omni.config.registry.resolve_stage_factory`` at construction
-(``StageConfig.__post_init__``). The pipeline topology file is the
-declarative contract; per-stage implementation lives in
-``thinker.py`` / ``talker.py`` / ``code2wav.py``.
-
-The thinker factory emits a ``ThinkerStageOutput`` with bridge hidden
-states, ``thinker2talker`` turns that into a ``TalkerInputPayload``, the
-talker stage drives the talker wrapper + ``talker_mtp`` over the bridge to
-produce code rows, ``talker2code2wav`` turns them into a
-``Code2WavInputPayload``, and the code2wav stage decodes them to 24 kHz
-mono WAV.
-
-Full is the only supported pipeline kind: the three-stage path executes
-end-to-end and was validated against real MiniMind-3o / Mimi weights on
-RTX 3050 (see ``tests/test_full_pipeline.py``). The legacy collapsed
-(single-thinker) pipeline is retired.
+Stage factories are dotted-path strings resolved at construction;
+per-stage implementation lives in ``thinker.py`` / ``talker.py`` /
+``code2wav.py``. Public symbol: ``MINIMIND_OMNI_PIPELINE``.
 """
 
 from __future__ import annotations
@@ -67,8 +48,6 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
     ),
     default_deploy_config_name="minimind_omni.yaml",
     registration_handles=("minimind_o", "jingyaogong/minimind-3o"),
-    # The three-stage thinker -> talker -> code2wav path is the only runtime
-    # mode; the legacy collapsed pipeline is retired.
     supported_pipeline_kinds=("full",),
 )
 

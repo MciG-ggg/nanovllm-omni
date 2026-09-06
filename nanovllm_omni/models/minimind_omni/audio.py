@@ -1,21 +1,14 @@
-"""MiniMind-O audio input + ASR helpers (double-track, half-duplex).
+"""MiniMind-O audio input + ASR helpers.
 
-Two SenseVoice-backed capabilities for the ``minimind_o`` family:
+Two SenseVoice-backed capabilities: (1) audio understanding via the
+thinker's ``forward(audio_inputs=..., audio_lens=...)`` prefill path,
+and (2) ASR transcript surfaced as ``custom_output["transcript"]`` on
+the ``OmniRequestOutput``. Everything funasr-related is imported lazily
+inside ``SenseVoice.load`` so a venv without funasr (CI) can import this
+module and execute all audio-free paths.
 
-1. **Audio understanding** (Q1/Q4): user speech is fbank-processed and fed to
-   the thinker through the model's own ``forward(audio_inputs=...,
-   audio_lens=...)`` prefill path (``start_pos == 0`` only). The checkpoint
-   already carries ``audio_proj``; only the SenseVoice encoder + funasr
-   frontend ship separately, so they are loaded lazily on the first audio
-   request.
-
-2. **ASR transcript** (Q2, double-track): the same funasr SenseVoice model
-   transcribes the speech, surfaced as ``custom_output["transcript"]`` on the
-   ``OmniRequestOutput``.
-
-Everything funasr-related is imported lazily inside ``SenseVoice.load`` so a
-venv without funasr (CI) can import this module and even execute all
-audio-free paths.
+Public symbols: ``SenseVoice``, ``attach_audio_encoder``, ``load_audio``,
+``SENSEVOICE_SAMPLE_RATE``, ``AUDIO_MARKER_TOKEN``.
 """
 
 from __future__ import annotations
@@ -44,9 +37,8 @@ class SenseVoice:
     def load(cls, model_path: str, device: str = "cpu") -> SenseVoice:
         """Build a SenseVoice handle from a local checkpoint directory.
 
-        Mirrors the checkpoint's ``MiniMindOmni.load_sensevoice`` loader
-        (same funasr ``AutoModel`` kwargs) but keeps the full funasr model
-        alive so the same handle can also transcribe (double-track ASR).
+        Keeps the full funasr model alive so the same handle can also
+        transcribe (double-track ASR).
         """
         import contextlib
 
@@ -85,7 +77,7 @@ class SenseVoice:
         return fbank, audio_lens, n_frames
 
     def transcribe(self, samples: Any) -> str:
-        """ASR the speech to text (double-track); '' on failure/empty."""
+        """ASR the speech to text; ``''`` on failure or empty input."""
         if self.asr is None:
             return ""
         try:
@@ -107,7 +99,7 @@ def attach_audio_encoder(bundle: Any, audio_encoder_path: str | None) -> Any:
 
     The loaded encoder is wired as ``bundle.model.audio_encoder`` so the
     model's own ``encode_audio_inputs`` / ``inject_audio_features`` prefill
-    path (inside ``MiniMindOmni.forward``) can consume it. Idempotent.
+    path can consume it. Idempotent.
     """
     sv = getattr(bundle, "audio_sensevoice", None)
     if sv is not None:

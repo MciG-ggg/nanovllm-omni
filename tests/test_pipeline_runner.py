@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 
-import pytest
-
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import (
     DeployConfig,
@@ -190,7 +188,6 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
     )
     pipeline = dataclasses.replace(pipeline, supported_pipeline_kinds=("collapsed", "full"))
     deploy = DeployConfig(
-        pipeline_kind="full",
         stages=(
             DeployStageConfig(
                 name="thinker",
@@ -205,7 +202,6 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
     )
     PipelineRunner(pipeline, deploy, _make_args()).run("hello")
     observed_deploy, observed_args = fac.get_factory_observations()[0]
-    assert observed_deploy.pipeline_kind == "full"
     assert observed_args.max_num_batched_tokens == 512
     assert observed_args.max_num_seqs == 2
     assert observed_args.gpu_memory_utilization == 0.6
@@ -215,31 +211,7 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
 
 
 def test_minimind_full_mode_is_only_supported_kind():
-    """Full is the only executable MiniMind mode (collapsed retired).
-
-    Construction succeeds (no raise), and the topology declares ``full`` so
-    drift back to a gate can never silently degrade into collapsed output.
-    """
+    """Full is the only executable MiniMind mode (collapsed retired)."""
     from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
 
     assert MINIMIND_OMNI_PIPELINE.supported_pipeline_kinds == ("full",)
-    # Constructing the runner validates the kind without loading any model
-    # (stage instances are built lazily on the first ``run``).
-    PipelineRunner(
-        MINIMIND_OMNI_PIPELINE,
-        DeployConfig(pipeline_kind="full"),
-        _make_args(),
-    )
-
-
-def test_undeclared_mode_still_fails_without_silent_fallback():
-    """Pipelines that never declared a requested mode keep the hard gate."""
-    import dataclasses
-
-    from nanovllm_omni.models.minimind_omni.pipeline import MINIMIND_OMNI_PIPELINE
-
-    # A pipeline that only declares the retired collapsed kind cannot run full.
-    pipeline = dataclasses.replace(MINIMIND_OMNI_PIPELINE, supported_pipeline_kinds=("collapsed",))
-
-    with pytest.raises(ValueError, match="pipeline_kind 'full' is not supported"):
-        PipelineRunner(pipeline, DeployConfig(pipeline_kind="full"), _make_args())

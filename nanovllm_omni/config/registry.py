@@ -198,32 +198,13 @@ class DeployConfig:
 
     stages: tuple[DeployStageConfig, ...] = ()
     max_batch: int = 2
-    #: Route generate through the CUDA-Graph fixed-KV-buffer decoder by
-    #: default at deploy time (report §40: 3.1-3.7x generate, determinism
-    #: + robustness verified). Deploy/runtime knob — the library Python
-    #: default for generate_audio() stays False; serving reads this flag.
     use_cuda_graph: bool = True
     # Full three-stage MiniMind-O mode: post-EOS bridge sequence + watchdog.
     post_eos_padding_count: int = 128
     internal_stop_token_id: int = 17
     talker_max_steps_after_last_thinker_token: int = 192
-    pipeline_kind: str = "full"
-
-    def validate_pipeline_kind(self, pipeline_cfg: PipelineConfig) -> None:
-        """Reject a selected mode when the topology has not declared support."""
-        supported = set(pipeline_cfg.supported_pipeline_kinds)
-        if self.pipeline_kind not in supported:
-            names = ", ".join(sorted(supported)) or "none"
-            raise ValueError(
-                f"pipeline_kind {self.pipeline_kind!r} is not supported by "
-                f"pipeline {pipeline_cfg.name!r}; supported kinds: {names}."
-            )
 
     def __post_init__(self) -> None:
-        if self.pipeline_kind not in {"collapsed", "full"}:
-            raise ValueError(
-                "pipeline_kind must be one of 'collapsed' or 'full', " f"got {self.pipeline_kind!r}"
-            )
         _validate_runtime_int("post_eos_padding_count", self.post_eos_padding_count, minimum=0)
         _validate_runtime_int("internal_stop_token_id", self.internal_stop_token_id)
         _validate_runtime_int(
@@ -364,7 +345,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
     data = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(data, Mapping):
         raise ValueError("deploy YAML must contain a mapping at the top level")
-    pipeline_kind = data.get("pipeline_kind", "full")
     max_batch = int(data.get("max_batch", 2))
     if max_batch < 1:
         raise ValueError(f"max_batch must be >= 1, got {max_batch}")
@@ -374,7 +354,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
         "talker_max_steps_after_last_thinker_token", 192
     )
     return DeployConfig(
-        pipeline_kind=pipeline_kind,
         stages=tuple(
             DeployStageConfig(
                 name=str(s.get("name", "")),

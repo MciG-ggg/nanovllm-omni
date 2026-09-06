@@ -1,29 +1,9 @@
-"""Project-owned attention runtime tweaks for MiniMind-O.
+"""MiniMind-O attention runtime tweaks.
 
-Four monkey-patches applied at model load via ``bundle.load_minimind_omni_bundle``:
-
-  1. ``enable_sdpa_decode``    -- replace manual attention with
-     ``F.scaled_dot_product_attention``; decode branch uses
-     ``is_causal=False`` (Q length=1 + K/V past => causal mask would
-     collapse attention to K[0]).
-  2. ``enable_fused_projections`` -- 3 matmuls -> 1 for attention QKV,
-     2 -> 1 for MLP gate-up.
-  3. ``enable_fused_rmsnorm``  -- ``aten._fused_rms_norm`` with the
-     upstream fp32-in / fp32-weight / fp16-out precision pattern.
-  4. ``enable_fused_rope``     -- algebraic-identity rotate-half +
-     ``torch.compile(dynamic=True)``.
-
-A fifth, opt-in patch (NOT auto-applied by the bundle -- the CUDA Graph
-pillar): ``enable_fixed_kv_buffer`` swaps the per-step ``torch.cat`` KV
-update for a preallocated fixed buffer (section 5). It is numerically
-bit-exact to the cat path (verified real-model, report §23) and is what a
-CUDA Graph capture integration would run on.
-
-All patches are zero-dep, zero vendor; the upstream model code is
-unchanged. Critical fix: ``enable_fused_projections`` patches every
-*instance*, not just the first per class -- the earlier
-``seen_attn``/``seen_mlp`` dedupe left 11 of 12 attention layers
-un-fused, masking much of the stack's claimed wall-clock benefit.
+Five monkey-patches (see ``__all__``); four are auto-applied at bundle load,
+``enable_fixed_kv_buffer`` is opt-in for the CUDA-Graph capture pillar.
+All zero-dep, zero vendor; ``enable_fused_projections`` patches every
+instance (per-class dedupe would leave most layers un-fused).
 """
 
 from __future__ import annotations
@@ -48,9 +28,9 @@ _log = logging.getLogger(__name__)
 def _import_upstream(module_name: str) -> Any:
     """Resolve the vendored upstream module by dotted name.
 
-    Uses ``__import__`` (not a static import) so this module never couples
-    to the vendored model code at import time; we only touch it when a
-    monkey-patch is applied at model load.
+    Uses ``__import__`` (not a static import) so this module never
+    couples to the vendored model code at import time; we only touch it
+    when a monkey-patch is applied at model load.
     """
     return __import__(module_name, fromlist=["apply_rotary_pos_emb"])
 
@@ -75,13 +55,10 @@ def _attention_forward(
     fused-qkv proj path).
 
     The decode branch (Q length=1 plus the full K/V past) uses
-    ``is_causal=False``. PyTorch SDPA's ``is_causal=True`` is only valid
-    when Q, K, V share one sequence length; for Q length=1 it builds a
+    ``is_causal=False``: SDPA's ``is_causal=True`` is only valid when Q,
+    K, V share one sequence length; for Q length=1 it builds a
     ``[1, N]`` lower-triangular mask that attends only to K[0] (the BOS
-    position). That collapses decode logits onto a single token and turns
-    the subsequent multinomial sampling into noise -- the "garbled
-    MiniMind-O audio" bug. With Q length=1 the current token genuinely
-    attends to all past positions, so ``is_causal=False`` is correct.
+    position), collapsing decode logits onto a single token.
     """
     import math
 
@@ -259,7 +236,7 @@ def _fuse_mlp_gate_up(mlp: Any) -> None:
 def enable_fused_projections(model: Any) -> None:
     """Fuse QKV in attention and gate-up in MLP. Skips MoE MLPs.
 
-    Patches every *instance* (not just the first one per class).
+    Patches every instance (not just the first one per class).
     """
     for module in model.modules():
         cls_name = type(module).__name__
@@ -351,16 +328,15 @@ def enable_fused_rope(model: Any) -> None:
     try:
         fn = torch.compile(_fused_apply_rotary_pos_emb, dynamic=True)
     except Exception:
-        # torch.compile can fail on first import (no inductor
-        # backend, no CUDA, etc.). Fall back to the eager fused form --
-        # still saves the cat launch.
+        # Fall back to the eager fused form when torch.compile is unavailable
+        # (no inductor backend, no CUDA, etc.) -- still saves the cat launch.
         fn = _fused_apply_rotary_pos_emb
     module.apply_rotary_pos_emb = fn
     setattr(module, _FUSED_ROPE_MARKER, True)
 
 
 # ---------------------------------------------------------------------------
-# 5. Fixed KV buffer (CUDA Graph pillar, plan §3.1/§3.2)
+# 5. Fixed KV buffer (CUDA Graph pillar)
 # ---------------------------------------------------------------------------
 
 #: Instance marker: attention has a fixed KV buffer + buffered forward.
@@ -383,11 +359,8 @@ def _attention_forward_buffered(
     preallocated fixed buffer (``self._kv_past_key/value``) instead of a
     per-step ``torch.cat``.
 
-    The new token's key/value are written into the buffer at
-    ``self._kv_pos``, then the whole ``[0 : ppos+sequence_len]`` span is
-    read back. This keeps tensor shapes static across AR steps (CUDA Graph
-    requirement) with zero arithmetic change -- #19 verified buffer-slice
-    vs cat is bit-identical on the real model.
+    Keeps tensor shapes static across AR steps (CUDA Graph requirement)
+    with zero arithmetic change.
     """
     import math
 
@@ -457,11 +430,10 @@ def _kv_buffer_forward(
     separate QKV) but history comes from the fixed buffer.
 
     Keeps the projection arithmetic bit-identical to whatever path the
-    bundle enabled (enable_fused_projections sets ``qkv_proj``): routing
+    bundle enabled (enable_fused_projections sets ``qkv_proj``); routing
     through a differently-ordered projection would change fp rounding and
-    break the determinism contract (report §19/§21 relies on bit-exact).
-    ``past_key_value`` is accepted for API parity with the upstream block
-    call but ignored -- the buffer holds the authoritative history.
+    break determinism. ``past_key_value`` is accepted for API parity but
+    ignored -- the buffer holds the authoritative history.
     """
     import torch
 
@@ -495,10 +467,9 @@ def _kv_buffer_forward(
 def _attach_kv_buffer(attn: Any, max_len: int) -> None:
     """Allocate fixed KV buffers on the attention instance + bind forward.
 
-    Per-instance (E24 lesson: class-level dedupe breaks per-instance
-    patches). Idempotent: re-attach only resets buffer capacity, never
-    double-binds. Buffer seq axis is dim 1 (KV layout (B, seq, n_kv, d)
-    -- verified in report §19 / upstream repeat_kv signature).
+    Per-instance (class-level dedupe would break per-instance patches).
+    Idempotent: re-attach only resets buffer capacity, never double-binds.
+    Buffer seq axis is dim 1 (KV layout (B, seq, n_kv, d)).
     """
     import torch
 
@@ -519,11 +490,11 @@ def _attach_kv_buffer(attn: Any, max_len: int) -> None:
 
 
 def enable_fixed_kv_buffer(model: Any, max_len: int | None = None) -> None:
-    """Install fixed-KV-buffer attention on every instance (plan §3.1/§3.2).
+    """Install fixed-KV-buffer attention on every instance.
 
-    ``max_len`` defaults to the model's max_position_embeddings. The buffer
-    must cover prompt_len + max_new_tokens; callers should validate before
-    generating (plan §4 shape-drift mitigation).
+    ``max_len`` defaults to the model's max_position_embeddings. The
+    buffer must cover prompt_len + max_new_tokens; callers should validate
+    before generating.
     """
     if max_len is None:
         max_len = int(getattr(model.config, "max_position_embeddings", 2048))

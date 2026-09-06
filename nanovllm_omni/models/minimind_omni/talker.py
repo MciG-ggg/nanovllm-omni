@@ -1,54 +1,13 @@
-"""MiniMind-Omni talker stage.
+"""MiniMind-O talker stage.
 
-Stage 1 of the 3-stage pipeline. This module ports the vllm-omni
-``MiniMindOmniTalkerForConditionalGeneration`` (PR #3796, commit
-341c5b4635c5) and wraps the vendored HF ``TalkerModule`` exposed as
-``model.talker`` by the ``MiniMindOmni`` checkpoint
-(``trust_remote_code=True``).
+Wraps the vendored HF ``TalkerModule`` (``model.talker``) into an
+LLM_AR-shaped class for the 3-stage pipeline. Public symbols:
+``MiniMindOmniTalkerForConditionalGeneration``, ``TalkerOutput``,
+``wrap_talker``, ``_drive_talker_generation``, ``_talker_stage``.
 
-What's ported verbatim from vllm-omni (vLLM-specific infrastructure stripped):
-  * ``_audio_ids_from_layer0``           -- audio-row split
-  * ``_select_bridge_states``            -- thinker->talker span selection
-  * ``_make_inputs_embeds``              -- bridge + audio embedding fusion
-  * ``_sample_codebook_logits_batch``    -- per-codebook multinomial
-  * ``preprocess / forward / compute_logits / sample / postprocess``
-  * ``talker_mtp`` and delayed diagonal frame alignment
-  * ``on_requests_finished``             -- per-request state cleanup
-  * ``make_omni_output``                 -- output envelope
-  * ``load_weights``                     -- HF ``model.talker.*`` -> our ``self.*``
-
-What's stripped (and how we replace it):
-  * ``VllmConfig`` / ``SamplerOutput`` / ``IntermediateTensors`` /
-    ``OmniOutput`` template -- replaced with torch.Tensor returns and a
-    local :class:`TalkerOutput` dataclass.
-  * ``MULTIMODAL_REGISTRY.register_processor`` decorator -- not needed.
-  * ``init_vllm_registered_model`` / ``maybe_prefix`` -- direct attribute refs.
-  * vLLM ``RMSNorm`` / parallel linear / vocab-parallel-embedding —
-    vendored HF ``TalkerModule`` already uses plain ``nn.Linear`` /
-    ``nn.Embedding`` (no sharding needed for single-GPU local serving).
-
-Naming: ``n_*`` -> ``num_*``, ``seq_*`` -> ``sequence_*``, ``tok_*`` ->
-``token_*`` per AGENTS.md. vllm-omni's read-only exception list
-(``n_rep`` / ``n_local_heads`` on the vendored HF Attention) is preserved
--- we never mutate those attributes, only the wrapper's own identifiers.
-
-Phase 1 scope:
-  * Construct from ``MinimindBundle`` or directly from an HF ``TalkerModule``.
-  * Eager forward path (no CUDA graph, no PP).
-  * Bridge hidden states consumed from ``info_dict['hidden_states']['bridge']``
-    (captured upstream by ``BatchedThinkerRunner`` -- commit 2).
-
-Out of scope:
-  * Pipeline stage processor for thinker->talker handoff             -- Phase 4
-  * Talker CUDA graph                                               -- Phase 7
-
-# Bridge hidden states are consumed on whatever device the
-# thinker left them on; Phase 1 assumes the same device as the talker
-# parameters (joint forward materialises bridge there). A separate
-# device-mismatch path is added when the pipeline runner routes
-# thinker/talker across stages (Phase 4).
-# The collapsed eager runner remains separate; the MTP seam is
-# local and explicit until the pipeline runner owns stage handoff (Phase 4).
+Naming follows AGENTS.md (``num_*`` / ``sequence_*`` / ``token_*``);
+vendored HF Attention's ``n_rep`` / ``n_local_heads`` are read-only
+external-contract attributes and stay as-is.
 """
 
 from __future__ import annotations
@@ -74,10 +33,7 @@ class TalkerOutput:
     """Output envelope returned by :meth:`MiniMindOmniTalkerForConditionalGeneration.make_omni_output`.
 
     Mirrors the consumer-visible fields of vllm-omni's ``OmniOutput``:
-    text-style hidden states plus multimodal (codec) outputs. Phase 1 only
-    populates ``text_hidden_states`` + ``multimodal_outputs['codes']['audio']``;
-    other keys (``audio_values`` etc.) are added when the code2wav stage
-    becomes a real per-stage module (Phase 5).
+    text-style hidden states plus multimodal (codec) outputs.
     """
 
     text_hidden_states: torch.Tensor | None = None
@@ -122,13 +78,9 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             hf_talker = getattr(bundle.model, "talker", None)
             if hf_talker is None:
                 raise ValueError("bundle.model.talker is missing; HF TalkerModule not loaded.")
-        # Stash the inner module without registering it as a submodule.
-        # ``self.layers / / self.norm / / ...`` are the registered submodules
-        # (shared references below); registering ``self._inner`` too would
-        # produce duplicate parameters with both ``layers.0.proj.weight`` and
-        # ``_inner.layers.0.proj.weight`` paths in ``named_parameters()``.
         # ``object.__setattr__`` bypasses ``nn.Module.__setattr__`` so the
-        # inner module is reachable but invisible to the module tree walk.
+        # inner module is reachable but invisible to the module tree walk
+        # (avoids duplicate parameter paths in ``named_parameters()``).
         object.__setattr__(self, "_inner", hf_talker)
         self._bundle = bundle
         self._config = getattr(bundle.model, "config", None) if bundle is not None else None
@@ -146,9 +98,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         self.audio_spk_token: int = int(
             getattr(self._config, "audio_spk_token", 2051) if self._config else 2051
         )
-        # vllm-omni uses an explicit ``internal_stop_token_id``; the vendored
-        # HF OmniConfig does not expose one, so default to ``audio_stop_token``
-        # so the Phase 2 watchdog can be wired without a config bump.
+        # Default ``internal_stop_token_id`` to ``audio_stop_token`` (vendored
+        # HF OmniConfig does not expose one).
         self.internal_stop_token_id: int = (
             getattr(self._config, "internal_stop_token_id", self.audio_stop_token)
             if self._config
@@ -163,12 +114,10 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         self.audio_vocab_size: int = int(
             getattr(self._config, "audio_vocab_size", 2112) if self._config else 2112
         )
-        # MiniMind-O publishes 8 audio codebook layers; surface as ``num_code_layers``.
         self.num_code_layers: int = int(
             getattr(self._config, "num_code_layers", 8) if self._config else 8
         )
-        # Watchdog length. vllm-omni publishes 192; vendored HF has no knob, so
-        # default to the same value to keep the Phase 2 watchdog contract.
+        # Watchdog length (vllm-omni publishes 192; vendored HF has no knob).
         self.max_steps_after_last_thinker_token: int = (
             getattr(self._config, "talker_max_steps_after_last_thinker_token", 192)
             if self._config
@@ -204,12 +153,10 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         )
 
         # Re-expose inner-module attributes so callers reaching
-        # ``talker.layers`` / ``talker.lm_head`` (e.g. the kv-pool
-        # bookkeeping) keep working without a wrapper-aware rewrite.
-        # We DELIBERATELY do not copy these into new Module sub-attributes:
-        # the inner module is the source of truth and parameter fusion in
-        # ``attention.enable_fused_projections`` mutates those same
-        # attributes in place.
+        # ``talker.layers`` / ``talker.lm_head`` keep working without a
+        # wrapper-aware rewrite. Inner module is the source of truth --
+        # parameter fusion in ``attention.enable_fused_projections``
+        # mutates these same attributes in place.
         self.layers = hf_talker.layers
         self.norm = hf_talker.norm
         self.lm_head = hf_talker.lm_head
@@ -237,9 +184,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
 
         ``step_ids = [-1, 0, 1, ..., num_code_layers-1]`` vs
         ``layer_ids = [0, 1, ..., num_code_layers-1]``; entry ``step_id``
-        is True for layers ``<= step_id``. Phase 3 MTP uses it more
-        heavily; Phase 1 only reads ``mask_idx = step+1`` to gate
-        ``mtp_inputs`` updates.
+        is True for layers ``<= step_id``.
         """
         layer_ids = torch.arange(self.num_code_layers)
         step_ids = torch.arange(self.num_code_layers + 1) - 1
@@ -496,8 +441,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         """Pre-thinker-vllm helper: text-style embed for codec tokens.
 
         Mirrors vllm-omni's ``embed_input_ids`` shape: returns the
-        ``[span, hidden_size]`` audio-side embedding, used when the engine
-        wants to skip the bridge path (Phase 4 stage processors).
+        ``[span, hidden_size]`` audio-side embedding.
         """
         audio_ids = self._audio_ids_from_layer0(input_ids)
         return self.codec_proj(self.embed_tokens(audio_ids)).reshape(-1, self.hidden_size)
@@ -511,9 +455,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         """Pre-forward bridge: pull bridge states from ``info_dict``, build embeds.
 
         Returns ``(input_ids, embeds, update)`` where ``update`` carries
-        prefill padding + MTP inputs (Phase 3). Watchdog bookkeeping
-        (``_stop_pending_by_req``) is recorded here for Phase 2; Phase 1
-        only populates the field, ``sample`` reads it.
+        prefill padding + MTP inputs.
         """
         span_len = int(input_ids.shape[0])
         bridge_states, is_prefill, prompt_len, num_computed, bridge_len = (
@@ -574,24 +516,20 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     ) -> torch.Tensor:
         """Run the talker trunk and return the final hidden state.
 
-        Phase 1: no CUDA graph, no PP. ``positions`` is accepted for API
-        parity with vllm-omni but unused (RoPE buffers on the inner
-        module are precomputed once at construction; per-step RoPE
-        slicing is added in Phase 2 when the talker becomes a real
-        per-stage module that needs the same start_pos as the thinker).
-        The vendored HF :class:`MiniMindBlock` (used in test stubs) takes
-        ``(hidden_states, position_embeddings)`` where ``position_embeddings``
-        is ``(cos, sin)``; we pass the freqs_cos/sin buffers sliced by
-        the current ``positions`` (or all of them when positions is None).
+        ``positions`` is accepted for API parity. The vendored HF
+        :class:`MiniMindBlock` takes ``(hidden_states, position_embeddings)``
+        where ``position_embeddings`` is ``(cos, sin)``; we pass the
+        freqs_cos/sin buffers sliced by the current ``positions`` (or all
+        of them when positions is None).
         """
         if inputs_embeds is None:
             if input_ids is None:
                 raise ValueError("input_ids or inputs_embeds must be provided.")
             inputs_embeds = self.embed_input_ids(input_ids)
-        # The vendored HF ``MiniMindBlock`` (and our fused attention for it)
-        # expects ``[B, T, H]``; ``preprocess`` hands us 2D ``[T, H]``. Add the
-        # batch dim for the trunk and drop it again on return so the public
-        # 2D->2D contract is preserved (3D in -> 3D out).
+        # The vendored HF ``MiniMindBlock`` expects ``[B, T, H]``;
+        # ``preprocess`` hands us 2D ``[T, H]``. Add the batch dim for the
+        # trunk and drop it again on return so the public 2D->2D contract
+        # is preserved (3D in -> 3D out).
         had_batch_dim = inputs_embeds.ndim >= 3
         hidden_states = inputs_embeds if had_batch_dim else inputs_embeds.unsqueeze(0)
         # Determine start_pos for RoPE slicing.
@@ -640,8 +578,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor | TalkerOutput) -> torch.Tensor | None:
         """Project the talker hidden state to layer-0 audio logits.
 
-        vllm-omni samples one token stream; residual adapter heads are
-        consumed by ``talker_mtp`` for delayed full-code output.
+        Residual adapter heads are consumed by ``talker_mtp`` for delayed
+        full-code output.
         """
         if isinstance(hidden_states, TalkerOutput):
             hidden_states = hidden_states.text_hidden_states
@@ -658,7 +596,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
 
         Uses simple multinomial sampling with the metadata's ``temperature`` /
         ``top_k`` / ``generator`` (when supplied). ``internal_stop_token_id``
-        is force-masked to ``-inf`` so the watchdog can force-stop on it.
+        is force-masked to ``-inf``.
         """
         if logits is None:
             return None
@@ -689,7 +627,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
                 )
         sampled = sampled.reshape(-1, 1)
 
-        # Apply forced internal-stop rows (Phase 2 watchdog hook).
+        # Apply forced internal-stop rows.
         for row in range(sampled.shape[0]):
             request_id = request_ids[row] if row < len(request_ids) else None
             if request_id is None or not self._stop_pending_by_req.get(request_id):
@@ -699,7 +637,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         return sampled
 
     # ------------------------------------------------------------------
-    # Frame alignment (Phase 3 MTP -- mark-only here)
+    # Frame alignment (delayed diagonal MTP)
     # ------------------------------------------------------------------
 
     def _normalise_audio_code_rows(
@@ -709,9 +647,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     ) -> torch.Tensor | None:
         """Coerce ``audio`` to ``[num_rows, num_code_layers]`` long tensor.
 
-        Returns ``None`` for empty / wrong-rank inputs. Phase 3 MTP needs
-        this for the diagonal frame extraction; Phase 1 keeps the helper
-        because ``postprocess`` + ``make_omni_output`` already call it.
+        Returns ``None`` for empty / wrong-rank inputs.
         """
         if not isinstance(audio, torch.Tensor) or audio.numel() == 0:
             return None
@@ -730,9 +666,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     ) -> torch.Tensor | None:
         """Extract the diagonal MTP-ready frames from the concatenated code rows.
 
-        Kept verbatim from vllm-omni (mark-only for Phase 3); Phase 1
-        coverage is the unit test that the helper returns the expected
-        shape + skips frames whose last layer hit the stop boundary
+        Skips frames whose last layer hit the stop boundary
         (``code >= audio_vocab_size``).
         """
         if history is not None:
@@ -771,7 +705,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         Returns an ``info_dict``-shaped update. ``hidden_states['last']``
         is the per-row last-position hidden state (consumed by the next
         call's ``mtp_inputs``). ``codes['history']`` is the cumulative
-        ``[num_rows, num_code_layers]`` table consumed by code2wav (Phase 5).
+        ``[num_rows, num_code_layers]`` table consumed by code2wav.
         """
         if hidden_states.numel() == 0:
             return {}
@@ -802,9 +736,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         """Drop per-request state on request completion.
 
         Called by the engine when a request leaves the running set (EOS,
-        max-tokens, or explicit abort). Frees ``_stop_pending_by_req``
-        entries so a future request with a recycled id does not inherit
-        a stale forced-stop flag.
+        max-tokens, or explicit abort).
         """
         for req_id in finished_req_ids:
             self._stop_pending_by_req.pop(req_id, None)
@@ -860,11 +792,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         any iterable with the same shape). Strips the ``model.talker.``
         prefix and the prefix-mapped equivalents; skips keys that belong
         to the thinker / audio_proj / vision_proj / rotary buffers.
-
-        For Phase 1 the stacked-projection (qkv_proj / gate_up_proj) and
-        MoE-expert mappings are NOT handled -- they belong to the
-        post-fusion state and are added in Phase 2 when the real HF
-        checkpoint round-trip is wired up.
 
         Returns the set of wrapper-local parameter names that were loaded.
         """
@@ -946,13 +873,10 @@ def _drive_talker_generation(
     ``forward`` / ``postprocess`` / ``compute_logits`` / ``sample`` /
     ``talker_mtp``) with the reference delayed-diagonal MTP alignment:
     prefill over the bridge prompt span, then one decode step per output
-    bridge row, layer-0 sampled per step and the residual codebook layers
-    predicted by ``talker_mtp`` from the previous step's hidden state.
+    bridge row.
 
-    Returns a frame-major ``[frames, num_code_layers]`` long tensor -- the
-    Code2Wav stage's input contract. Per-request watchdog state on the
-    wrapper is cleared before returning so sequential requests never inherit
-    a stale forced-stop flag.
+    Returns a frame-major ``[frames, num_code_layers]`` long tensor --
+    the Code2Wav stage's input contract.
     """
     from types import SimpleNamespace
 
@@ -960,9 +884,8 @@ def _drive_talker_generation(
 
     request_id = payload.request_id or "mmo-full-talker"
     # Run on the talker's own parameter device, never the bridge's (a CPU
-    # bridge from ``extract_bridge_states`` must not force the whole talker
-    # chain onto CPU against CUDA weights -- device-mismatch crash on real
-    # MiniMind). Move the bridge to that device explicitly.
+    # bridge must not force the whole talker chain onto CPU against CUDA
+    # weights). Move the bridge to that device explicitly.
     device = next(talker.parameters()).device
     talker_dtype = next(talker.parameters()).dtype
     prompt_ids = list(payload.prompt_token_ids)
@@ -977,8 +900,7 @@ def _drive_talker_generation(
     bridge = bridge.to(device=device, dtype=talker_dtype)
     num_decode_steps = max(0, int(bridge.shape[0]) - prompt_len)
     if num_decode_steps == 0:
-        # Nothing beyond the prompt span: still emit one audio row so the
-        # stage hands the code2wav stage a non-empty frame table.
+        # Still emit one audio row so the stage hands code2wav a non-empty frame table.
         num_decode_steps = 1
 
     info: dict[str, Any] = {
@@ -1054,8 +976,8 @@ def _drive_talker_generation(
             if int(row[0, -1].item()) == talker.audio_stop_token:
                 break
     finally:
-        # Drop per-request flags so a recycled request id never inherits a
-        # stale forced-stop (no cross-request state leak).
+        # Drop per-request flags so a recycled request id never inherits
+        # a stale forced-stop.
         talker.on_requests_finished([request_id])
 
     if not rows:
@@ -1136,8 +1058,8 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
 def _identity_process_input(payload: Any, prompt: str) -> Any:
     """Default ``process_input``: pass the previous stage's output through unchanged.
 
-    Used by the happy-path glue layer; the MiniMind pipeline binds its real
-    stage processors (``thinker2talker`` / ``talker2code2wav``) instead.
+    The MiniMind pipeline binds its real stage processors
+    (``thinker2talker`` / ``talker2code2wav``) instead.
     """
     del prompt
     return payload

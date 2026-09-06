@@ -1,39 +1,26 @@
 """Stateless sampling primitives shared by MiniMind-O's generation paths.
 
-Both ``models/minimind_omni/generation.py`` (``stream_generate``, the
-single-request wrapper) and ``models/minimind_omni/batched_generation.py``
-(``BatchedThinkerRunner``, the underlying batched runner) need to:
+Shared by ``generation.stream_generate`` (single-request) and
+``batched_generation.BatchedThinkerRunner`` (batched runner) -- the only
+piece they share; per-request state (buffers, RNG, frame emission, EOS
+bookkeeping) stays with the caller. Constants match the vendored upstream
+model exactly so we stay bit-exact across both paths.
 
-  - sample one text token from logits with temperature / top_p / repetition
-    penalty
-  - sample one audio codebook code for one layer at one step with the
-    per-layer temperature / penalty / top_k recipe
-
-These helpers are the only piece they share; per-request state (buffers,
-RNG, frame emission, EOS bookkeeping) stays with the caller. Constants
-match the vendored upstream model exactly so we stay bit-exact across
-both paths.
-
-The earlier hand-rolled ``stream_generate_optimized`` used a *batched*
-multinomial across active layers (one Philox call) for single-request
-audio. That path is now retired; ``BatchedThinkerRunner`` (used by both
-``stream_generate`` and ``run_batched_generate``) loops per layer per
-request, calling this helper once per active layer.
+Public symbols: ``sample_text_token``, ``sample_one_audio_layer``, the
+``AUDIO_VOCAB_BOUNDARY`` / ``NUM_AUDIO_LAYERS`` constants, and the
+``DEFAULT_*`` recipe constants.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# Audio codebook boundary: codes >= this are stop tokens. Matches the literal
-# 2048 used in generation.py and ``_AUDIO_VOCAB_BOUNDARY`` in
-# batched_generation.py. The two were duplicated across files before this
-# extraction.
+# Audio codebook boundary: codes >= this are stop tokens.
 AUDIO_VOCAB_BOUNDARY = 2048
 NUM_AUDIO_LAYERS = 8
 
-# Default MiniMind-O sampling recipe. Vendored model uses these values;
-# callers can override per-stage if a deploy YAML asks for it.
+# Default MiniMind-O sampling recipe. Callers can override per-stage via
+# deploy YAML.
 DEFAULT_TEXT_TEMPERATURE = 0.75
 DEFAULT_TEXT_TOP_P = 0.90
 DEFAULT_AUDIO_TEMPERATURE = 0.2
@@ -56,7 +43,7 @@ def sample_text_token(
     ``history_ids`` may be any on-device tensor or a Python list of ints;
     it is moved to ``logits_row.device`` once via ``torch.as_tensor``.
     ``gen=None`` uses the process-default RNG; pass a ``torch.Generator``
-    for per-request determinism (Q10a).
+    for per-request determinism.
     """
     import torch
     import torch.nn.functional as functional
@@ -64,7 +51,6 @@ def sample_text_token(
     logits = logits_row.clone() / (temperature + 1e-9)
     if rp != 1.0:
         # Keep the penalty on-device; .tolist() here would force a sync.
-        # Skip when rp == 1.0 (no-op) to avoid torch.unique + index overhead.
         uniq = torch.unique(torch.as_tensor(history_ids, device=logits.device))
         logits[uniq] /= rp
     if top_p and top_p < 1.0:

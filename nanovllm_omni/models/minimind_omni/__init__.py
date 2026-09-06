@@ -18,6 +18,7 @@ from .bundle import (
 )
 from .code2wav import decode_audio, encode_wav
 from .pipeline import MINIMIND_OMNI_PIPELINE, PIPELINE
+from .talker import MiniMindOmniTalkerForConditionalGeneration, TalkerOutput, wrap_talker
 from .thinker import generate_audio, run_generate, tokenize_for_generate
 
 __all__ = [
@@ -33,6 +34,9 @@ __all__ = [
     "encode_wav",
     "generate_audio",
     "load_minimind_omni_bundle",
+    "MiniMindOmniTalkerForConditionalGeneration",
+    "TalkerOutput",
+    "wrap_talker",
     "run_generate",
     "tokenize_for_generate",
 ]

@@ -14,7 +14,7 @@ both paths route through one MiniMind generation loop.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,6 +37,8 @@ def stream_generate(
     open_thinking: bool = False,
     audio_inputs: Any = None,
     audio_lens: Any = None,
+    capture_bridge_states: bool = False,
+    bridge_state_callback: Callable[[Any], None] | None = None,
     **_kwargs: Any,
 ) -> Iterator[tuple[Any, Any]]:
     """Stream MiniMind-O output one decode step at a time.
@@ -47,6 +49,10 @@ def stream_generate(
     list of 8 ints (Mimi codebook frame) or ``None`` until the 8th decode
     step. The generator terminates once ``BatchedThinkerRunner.step_finished``
     flips True (text EOS + last audio layer stopped, or ``max_new_tokens``).
+
+    When ``capture_bridge_states`` is true, the runner captures one bridge
+    hidden state per prefill/decode step. ``bridge_state_callback`` receives
+    the stacked CPU tensor before the generator returns.
     """
     import torch
 
@@ -62,6 +68,7 @@ def stream_generate(
         max_new_tokens=max_new_tokens,
         eos_token_id=eos_token_id if eos_token_id is not None else 2,
         open_thinking=open_thinking,
+        capture_bridge_states=capture_bridge_states,
     )
     rid = runner.add_request(
         input_ids[0].tolist(), audio_inputs=audio_inputs, audio_lens=audio_lens
@@ -102,4 +109,8 @@ def stream_generate(
                 finished.add(rid)
         sched.update_from_output(prefilled=prefilled, finished=finished)
         if finished:
+            if bridge_state_callback is not None:
+                from .batched_generation import extract_bridge_states
+
+                bridge_state_callback(extract_bridge_states(runner.states[rid]))
             return

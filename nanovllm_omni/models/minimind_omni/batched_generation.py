@@ -23,6 +23,7 @@ talker/mimi->wav chain (Q9a) via ``code2wav.decode_audio``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass, field
 from typing import Any
@@ -80,6 +81,13 @@ class BatchedThinkerState:
     audio_inputs: Any = None
     audio_lens: Any = None
 
+    # Bridge hidden states (TICKET-05 phase 1): one ``[hidden_size]`` tensor
+    # per step the runner completes (prefill = 1 entry for the last prompt
+    # position; each decode = 1 entry). Populated only when the runner was
+    # constructed with ``capture_bridge_states=True``. The talker stage
+    # consumes this list via ``extract_bridge_states(state)``.
+    bridge_states: list[Any] = field(default_factory=list)
+
 
 class BatchedThinkerRunner:
     """Execute scheduler groups as one rectangular forward per group.
@@ -101,6 +109,7 @@ class BatchedThinkerRunner:
         open_thinking: bool = False,
         base_seed: int = 42,
         kv_max_sequence_len: int | None = None,
+        capture_bridge_states: bool = False,
     ) -> None:
         self.bundle = bundle
         self.sched = sched
@@ -117,6 +126,15 @@ class BatchedThinkerRunner:
         }
         self.audio_pad: int = int(getattr(self.model, "audio_pad_token", 0))
         self.audio_stop: int = int(getattr(self.model, "audio_stop_token", 0))
+        # Bridge hidden-state capture (TICKET-05 phase 1). Off by default so
+        # existing benches/tests that don't need talker handoff pay zero
+        # overhead. When on, ``prefill_group`` and ``decode_group`` stash
+        # the thinker's bridge-layer hidden state into
+        # ``state.bridge_states`` after each forward.
+        self.capture_bridge_states: bool = bool(capture_bridge_states)
+        self._bridge_capture_layer = _resolve_bridge_layer(self.model)
+        if self.capture_bridge_states:
+            enable_bridge_capture(self.model, self._bridge_capture_layer)
         self.think_end_ids = list(
             getattr(getattr(self.model, "config", None), "think_end_ids", []) or []
         )
@@ -336,6 +354,14 @@ class BatchedThinkerRunner:
             for r, rid in enumerate(req_ids):
                 self.kv_pool.write(rid, layer, key=k, value=v, row=r)
 
+        # Bridge capture: stash the thinker's bridge-layer hidden state at
+        # the LAST prompt position for each request (the position that
+        # produced the predicted next-text token). Phase 1 stores only the
+        # final-prompt-position row; multi-step bridge history is added when
+        # the talker MTP path becomes a real per-stage module (Phase 3).
+        if self.capture_bridge_states:
+            self._capture_prefill_bridge(req_ids)
+
         # first token predicted by the prompt's last position; no audio yet
         text_logits = out.logits  # [B, 1, V]
         for r, rid in enumerate(req_ids):
@@ -362,6 +388,13 @@ class BatchedThinkerRunner:
 
         text_logits = out.logits  # [B, 1, V]
         audio_logits = out.audio_logits  # list of 8 × [B, 1, V]
+
+        # Bridge capture: stash the thinker's bridge-layer hidden state for
+        # each request at this decode step (position 0 of the [B, 1, hidden]
+        # captured tensor). One entry per step per request.
+        if self.capture_bridge_states:
+            self._capture_decode_bridge(req_ids)
+
         for r, rid in enumerate(req_ids):
             st = self.states[rid]
             # generation.py order: sample, then override with enter/pad when
@@ -434,5 +467,163 @@ class BatchedThinkerRunner:
             return True
         return bool(st.text_finished and st.audio_codes[7][-1] == self.audio_stop)
 
+    # -- bridge capture (TICKET-05 phase 1) ---------------------------------
+
+    def _capture_prefill_bridge(self, req_ids: list[str]) -> None:
+        """Stash per-request last-position bridge state after prefill."""
+        captured = _read_bridge_capture(self.model, self._bridge_capture_layer)
+        if captured is None:
+            return  # capture not installed / layer not monkey-patched
+        for r, rid in enumerate(req_ids):
+            st = self.states[rid]
+            # captured shape: [B, num_positions, hidden_size]. Take the last
+            # position (the one whose next-text token was predicted).
+            per_request = captured[r, -1, :].detach()
+            st.bridge_states.append(per_request)
+
+    def _capture_decode_bridge(self, req_ids: list[str]) -> None:
+        """Stash per-request bridge state for each decode step."""
+        captured = _read_bridge_capture(self.model, self._bridge_capture_layer)
+        if captured is None:
+            return
+        for r, rid in enumerate(req_ids):
+            st = self.states[rid]
+            # captured shape: [B, 1, hidden_size]. Squeeze to [hidden_size].
+            per_request = captured[r, 0, :].detach()
+            st.bridge_states.append(per_request)
+
 
 __all__ = ["BatchedThinkerRunner", "BatchedThinkerState"]
+
+
+# ---------------------------------------------------------------------------
+# Bridge-state capture helpers (TICKET-05 phase 1)
+# ---------------------------------------------------------------------------
+
+_BRIDGE_CAPTURE_ATTR = "_bridge_capture"
+_BRIDGE_PATCH_MARKER = "_nanovllm_bridge_patched"
+
+
+def _resolve_bridge_layer(model: Any) -> int:
+    """Pick the thinker's bridge-layer index for ``model``.
+
+    Defaults to ``num_hidden_layers // 2 - 1`` (matches vendored
+    ``OmniConfig.bridge_layer`` and vllm-omni's MiniMindModel forward
+    loop). Returns -1 when the model exposes neither ``num_hidden_layers``
+    nor ``bridge_layer`` -- the caller treats -1 as "do not capture".
+    """
+    config = getattr(model, "config", None)
+    configs = [config, getattr(config, "text_config", None), getattr(model, "thinker", None)]
+    thinker_config = getattr(getattr(model, "thinker", None), "config", None)
+    configs.append(thinker_config)
+    for candidate in configs:
+        explicit = getattr(candidate, "bridge_layer", None)
+        if explicit is not None:
+            return int(explicit)
+    for candidate in configs:
+        num_hidden = int(getattr(candidate, "num_hidden_layers", 0) or 0)
+        if num_hidden > 0:
+            return num_hidden // 2 - 1
+    return -1
+
+
+def enable_bridge_capture(model: Any, bridge_layer: int | None = None) -> int:
+    """Monkey-patch ``model.thinker.layers[bridge_layer].forward`` to capture its output.
+
+    The vendored joint model (``MiniMindOmni.forward``) routes through the
+    thinker's ``MiniMindBlock`` instances and reads
+    ``hidden_states[bridge_layer]`` as the talker's bridge hidden state
+    *after* the layer's MLP+attention runs. We wrap the bridge layer's
+    ``forward`` so its post-MLP output is stashed in
+    ``block._bridge_capture``; the joint forward is otherwise unchanged.
+
+    Returns the patched layer's index (or -1 when no patch was applied).
+    Idempotent: re-patching the same layer is a no-op.
+
+    # ponytail: monkey-patching the joint model's bridge layer avoids the
+    # alternative of running the thinker alone (which would duplicate work
+    # every step) at the cost of coupling to the vendored block signature.
+    # If the vendored model ever changes block signature, this patch fails
+    # loud (the forward call inside the wrapper will raise), keeping the
+    # regression visible at first run instead of producing stale bridge
+    # states silently.
+    """
+    thinker = getattr(model, "thinker", None)
+    if thinker is None:
+        return -1
+    if bridge_layer is None or bridge_layer < 0:
+        bridge_layer = _resolve_bridge_layer(model)
+    if bridge_layer < 0:
+        return -1
+    layers = getattr(thinker, "layers", None)
+    if layers is None or bridge_layer >= len(layers):
+        return -1
+    block = layers[bridge_layer]
+    if getattr(block, _BRIDGE_PATCH_MARKER, False):
+        return bridge_layer
+
+    original_forward = block.forward
+
+    def _wrapped_forward(self, hidden_states, *args, **kwargs):  # type: ignore[no-untyped-def]
+        out = original_forward(hidden_states, *args, **kwargs)
+        # The vendored HF ``MiniMindBlock.forward`` returns
+        # ``(hidden_states, present_key_value)``. Capture the post-MLP
+        # hidden state as the bridge hidden state. Test doubles that
+        # return a single tensor are also accepted.
+        captured = out[0] if isinstance(out, tuple) else out
+        with contextlib.suppress(Exception):
+            self._bridge_capture = captured
+        return out
+
+    import types
+
+    block.forward = types.MethodType(_wrapped_forward, block)
+    setattr(block, _BRIDGE_PATCH_MARKER, True)
+    return bridge_layer
+
+
+def _read_bridge_capture(model: Any, bridge_layer: int) -> Any:
+    """Read the most recent ``_bridge_capture`` from the bridge layer.
+
+    Returns ``None`` when capture is not installed (so callers can no-op).
+    The returned tensor is the raw captured tensor (shape ``[B, T, hidden]``);
+    per-request slicing happens in the runner.
+    """
+    if bridge_layer < 0:
+        return None
+    thinker = getattr(model, "thinker", None)
+    layers = getattr(thinker, "layers", None) if thinker is not None else None
+    if layers is None or bridge_layer >= len(layers):
+        return None
+    return getattr(layers[bridge_layer], _BRIDGE_CAPTURE_ATTR, None)
+
+
+def extract_bridge_states(state: BatchedThinkerState) -> Any:
+    """Stack the per-step bridge hidden states for one request.
+
+    Returns a ``[num_steps, hidden_size]`` tensor (CPU clone so the
+    caller can mutate without affecting the runner's buffer). Returns
+    an empty ``[0, hidden_size]`` tensor when the runner was not
+    constructed with ``capture_bridge_states=True``; consumers must
+    guard against the empty shape or enable capture explicitly.
+    """
+    import torch
+
+    if not state.bridge_states:
+        return torch.zeros((0, 0), dtype=torch.float32)
+    hidden_size = int(state.bridge_states[0].shape[-1])
+    stacked = torch.stack(
+        [t.detach().to(device="cpu", dtype=torch.float32) for t in state.bridge_states],
+        dim=0,
+    )
+    if stacked.numel() == 0:
+        return torch.zeros((0, hidden_size), dtype=torch.float32)
+    return stacked  # [num_steps, hidden_size]
+
+
+__all__ = [
+    "BatchedThinkerRunner",
+    "BatchedThinkerState",
+    "enable_bridge_capture",
+    "extract_bridge_states",
+]

@@ -158,6 +158,29 @@ def load_minimind_omni_bundle(
     # Official eval_omni attaches mimi on the model for decode convenience.
     model.mimi_model = mimi
 
+    # Wrap the vendored HF ``TalkerModule`` (option (a) from TICKET-05):
+    # consumers reading ``bundle.talker`` get our LLM_AR-shaped class
+    # instead of the raw HF module. ``bundle.model.talker`` still exposes
+    # the raw module for callers that need it. The wrapper is built from
+    # a temporary MinimalBundle so it can read ``bundle.model.config``
+    # without the recursive dataclass cycle this would create if we built
+    # the bundle first.
+    talker_wrapped = None
+    if getattr(model, "talker", None) is not None:
+        from .talker import wrap_talker
+
+        talker_wrapped = wrap_talker(
+            MinimindBundle(
+                model=model,
+                tokenizer=tokenizer,
+                mimi=mimi,
+                device=device,
+                model_id=model_id,
+                thinker=model,
+                talker=getattr(model, "talker", None),
+                code2wav=mimi,
+            )
+        )
     return MinimindBundle(
         model=model,
         tokenizer=tokenizer,
@@ -165,7 +188,7 @@ def load_minimind_omni_bundle(
         device=device,
         model_id=model_id,
         thinker=model,
-        talker=getattr(model, "talker", None),
+        talker=talker_wrapped,
         code2wav=mimi,
     )
 

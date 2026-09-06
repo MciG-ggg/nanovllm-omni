@@ -13,6 +13,7 @@ that turns this into a real 3-stage execution; this file is the prerequisite.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
@@ -149,6 +150,8 @@ def run_generate(
     audio_lens: Any = None,
     use_cuda_graph: bool = False,
     seed: int | None = None,
+    capture_bridge_states: bool = False,
+    bridge_state_callback: Callable[[Any], None] | None = None,
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
@@ -169,6 +172,10 @@ def run_generate(
     eager path, whose caller seeds ``torch.manual_seed``. Previously the
     graph path hardcoded 42 and ignored the caller's seed (determinism-
     parity defect); now it honors it.
+
+    ``capture_bridge_states`` and ``bridge_state_callback`` expose the
+    additive eager capture seam used by the future talker stage. The CUDA
+    Graph path does not capture bridge states in Phase 1.
     """
     import torch
 
@@ -215,6 +222,8 @@ def run_generate(
                 open_thinking=open_thinking,
                 audio_inputs=audio_inputs,
                 audio_lens=audio_lens,
+                capture_bridge_states=capture_bridge_states,
+                bridge_state_callback=bridge_state_callback,
             )
         else:
             # TODO: delete

@@ -156,7 +156,7 @@ def load_audio(audio: Any) -> Any:
 
 
 def _resample(x: Any, src_rate: int, dst_rate: int) -> Any:
-    """Naive linear resample. ponytail: fine for a demo; swap in torchaudio
+    """Naive linear resample. Fine for a demo; swap in torchaudio
     (clean up-sample) if quality ever matters."""
     import numpy as np
 

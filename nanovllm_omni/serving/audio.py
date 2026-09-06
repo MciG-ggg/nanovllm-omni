@@ -23,7 +23,7 @@ def register(demo: Any) -> None:
         """Lazy-build the Omni engine. Never reload within the session."""
         if state_val is not None and state_val[1] == model_id and state_val[2] == mimi_id:
             return state_val
-        # ponytail: lazy import keeps `import nanovllm_omni.serving.app` working
+        # Lazy import keeps `import nanovllm_omni.serving.app` working
         # even when the user only installed the SD-Turbo extras.
         from nanovllm_omni import Omni  # noqa: PLC0415 -- lazy by design
 

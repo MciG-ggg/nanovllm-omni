@@ -86,7 +86,7 @@ class BatchedThinkerState:
     audio_inputs: Any = None
     audio_lens: Any = None
 
-    # Bridge hidden states (TICKET-05 phase 1): one ``[hidden_size]`` tensor
+    # Bridge hidden states: one ``[hidden_size]`` tensor
     # per step the runner completes (prefill = 1 entry for the last prompt
     # position; each decode = 1 entry). Populated only when the runner was
     # constructed with ``capture_bridge_states=True``. The talker stage
@@ -155,7 +155,7 @@ class BatchedThinkerRunner:
             )
         self.audio_pad: int = int(getattr(self.model, "audio_pad_token", 0))
         self.audio_stop: int = int(getattr(self.model, "audio_stop_token", 0))
-        # Bridge hidden-state capture (TICKET-05 phase 1). Off by default so
+        # Bridge hidden-state capture. Off by default so
         # existing benches/tests that don't need talker handoff pay zero
         # overhead. When on, ``prefill_group`` and ``decode_group`` stash
         # the thinker's bridge-layer hidden state into
@@ -178,7 +178,7 @@ class BatchedThinkerRunner:
         # Fixed-slot KV pool. Budget the slot length explicitly: the model's
         # ``max_position_embeddings`` (MiniMind-O: 32768) is far larger than any
         # practical single generation, and a full-size slot per request OOMs a
-        # 4 GB card at max_batch>=2 (ponytail: fixed-slot teaching shape; paged
+        # 4 GB card at max_batch>=2 (fixed-slot teaching shape; paged
         # KV is the deferred upgrade this knob approximates).
         max_embeddings = int(getattr(config, "max_position_embeddings", 4096))
         self.kv_max_sequence_len = kv_max_sequence_len or min(max_embeddings, 1024 + max_new_tokens)
@@ -196,8 +196,7 @@ class BatchedThinkerRunner:
         audio_inputs: Any = None,
         audio_lens: Any = None,
     ) -> str:
-        # Build the per-stage Sequence first (TK-004 spec data structure),
-        # then submit it to the scheduler. ``request_id`` defaults to a
+        # Build the per-stage Sequence first, then submit it to the scheduler. ``request_id`` defaults to a
         # scheduler-assigned id; we read it back via ``seq.request_id``
         # so callers can index ``self.states`` by the same key.
         rid = request_id or f"req-{len(self.sched.running) + len(self.sched.waiting)}"
@@ -356,7 +355,7 @@ class BatchedThinkerRunner:
         import torch
 
         # RuntimeGroup.items is list[PrefillChunk] for a prefill group; the
-        # rid is on each chunk's ``seq.request_id`` (Sequence per TK-004).
+        # rid is on each chunk's ``seq.request_id`` (Sequence per-stage).
         chunks: list[PrefillChunk] = group.items
         req_ids = [chunk.sequence.request_id for chunk in chunks]
         num_requests = len(req_ids)
@@ -514,7 +513,7 @@ class BatchedThinkerRunner:
             return st.internal_stop_emitted
         return bool(st.text_finished and st.audio_codes[7][-1] == self.audio_stop)
 
-    # -- bridge capture (TICKET-05 phase 1) ---------------------------------
+    # -- bridge capture ---------------------------------
 
     def _capture_prefill_bridge(self, req_ids: list[str]) -> None:
         """Stash per-request last-position bridge state after prefill."""
@@ -544,7 +543,7 @@ __all__ = ["BatchedThinkerRunner", "BatchedThinkerState"]
 
 
 # ---------------------------------------------------------------------------
-# Bridge-state capture helpers (TICKET-05 phase 1)
+# Bridge-state capture helpers
 # ---------------------------------------------------------------------------
 
 _BRIDGE_CAPTURE_ATTR = "_bridge_capture"
@@ -587,7 +586,7 @@ def enable_bridge_capture(model: Any, bridge_layer: int | None = None) -> int:
     Returns the patched layer's index (or -1 when no patch was applied).
     Idempotent: re-patching the same layer is a no-op.
 
-    # ponytail: monkey-patching the joint model's bridge layer avoids the
+    # Monkey-patching the joint model's bridge layer avoids the
     # alternative of running the thinker alone (which would duplicate work
     # every step) at the cost of coupling to the vendored block signature.
     # If the vendored model ever changes block signature, this patch fails

@@ -1,4 +1,4 @@
-"""MiniMind-Omni talker stage (TICKET-05 phase 1).
+"""MiniMind-Omni talker stage.
 
 Stage 1 of the 3-stage pipeline. This module ports the vllm-omni
 ``MiniMindOmniTalkerForConditionalGeneration`` (PR #3796, commit
@@ -32,7 +32,7 @@ Naming: ``n_*`` -> ``num_*``, ``seq_*`` -> ``sequence_*``, ``tok_*`` ->
 (``n_rep`` / ``n_local_heads`` on the vendored HF Attention) is preserved
 -- we never mutate those attributes, only the wrapper's own identifiers.
 
-Phase 1 scope (TICKET-05 / commit 1):
+Phase 1 scope:
   * Construct from ``MinimindBundle`` or directly from an HF ``TalkerModule``.
   * Eager forward path (no CUDA graph, no PP).
   * Bridge hidden states consumed from ``info_dict['hidden_states']['bridge']``
@@ -42,12 +42,12 @@ Out of scope:
   * Pipeline stage processor for thinker->talker handoff             -- Phase 4
   * Talker CUDA graph                                               -- Phase 7
 
-# ponytail: bridge hidden states are consumed on whatever device the
+# Bridge hidden states are consumed on whatever device the
 # thinker left them on; Phase 1 assumes the same device as the talker
 # parameters (joint forward materialises bridge there). A separate
 # device-mismatch path is added when the pipeline runner routes
 # thinker/talker across stages (Phase 4).
-# ponytail: the collapsed eager runner remains separate; the MTP seam is
+# The collapsed eager runner remains separate; the MTP seam is
 # local and explicit until the pipeline runner owns stage handoff (Phase 4).
 """
 
@@ -134,7 +134,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         self._config = getattr(bundle.model, "config", None) if bundle is not None else None
 
         # Mirror config fields the talker needs at runtime.
-        # ponytail: read from the OmniConfig (or a duck-typed object); defaults
+        # Read from the OmniConfig (or a duck-typed object); defaults
         # match MiniMind-O's published values so a fake config in tests still
         # constructs without a real checkpoint.
         self.audio_pad_token: int = int(
@@ -896,7 +896,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Bundle wiring (option (a) from TICKET-05)
+# Bundle wiring
 # ---------------------------------------------------------------------------
 
 
@@ -920,20 +920,20 @@ def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline factory / process_input shims (TICKET-02 glue layer preserved)
+# Pipeline factory / process_input shims (glue layer preserved)
 # ---------------------------------------------------------------------------
 
 
 def _talker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory: identity pass-through for TICKET-02.
+    """Stage 1 factory: identity pass-through.
 
-    TICKET-05 phase 1 wires this to the wrapped talker, but the actual
+    Wires this to the wrapped talker, but the actual
     ``forward / postprocess`` plumbing is added by the pipeline runner
     in Phase 4 (per-stage ``process_input`` hookup). Until then, the
     stage factory still returns an identity callable so existing field
     topology / pipeline runner tests stay green.
 
-    # ponytail: identity pass-through is the minimum that exercises the
+    # Identity pass-through is the minimum that exercises the
     # pipeline registry's dotted-path resolution + StageConfig.__post_init__
     # validation without requiring the runner to know about LLM_AR
     # per-stage forward; swap for a real runner-bound callable in Phase 4.
@@ -948,7 +948,7 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
 def _identity_process_input(payload: Any, prompt: str) -> Any:
     """Default ``process_input``: pass the previous stage's output through unchanged.
 
-    Used by TICKET-02's happy-path glue layer; TICKET-05 phase 4 will
+    Used by the happy-path glue layer; Phase 4 will
     replace this with a real bridge hidden-state extraction + talker
     forward call.
     """

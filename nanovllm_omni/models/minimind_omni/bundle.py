@@ -158,7 +158,7 @@ def load_minimind_omni_bundle(
     # Official eval_omni attaches mimi on the model for decode convenience.
     model.mimi_model = mimi
 
-    # Wrap the vendored HF ``TalkerModule`` (option (a) from TICKET-05):
+    # Wrap the vendored HF ``TalkerModule``:
     # consumers reading ``bundle.talker`` get our LLM_AR-shaped class
     # instead of the raw HF module. ``bundle.model.talker`` still exposes
     # the raw module for callers that need it. The wrapper is built from

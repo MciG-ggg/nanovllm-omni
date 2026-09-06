@@ -1,4 +1,4 @@
-"""MiniMind-Omni talker weight-loading tests (TICKET-05 phase 1).
+"""MiniMind-Omni talker weight-loading tests.
 
 The wrapper's ``load_weights`` walks an iterable of ``(name, tensor)``
 pairs, strips the ``model.talker.`` prefix, and copies tensors into the

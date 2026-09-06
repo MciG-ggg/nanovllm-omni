@@ -1,4 +1,4 @@
-"""MiniMind-Omni bridge hidden-state capture tests (TICKET-05 phase 1).
+"""MiniMind-Omni bridge hidden-state capture tests.
 
 The thinker's bridge-layer hidden state is the conditioning signal the
 talker consumes to generate Mimi codec codes. This test pins the

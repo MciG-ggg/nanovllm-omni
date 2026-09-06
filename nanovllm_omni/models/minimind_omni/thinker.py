@@ -7,8 +7,8 @@ chains. Codec decode lives in ``code2wav.py``; bundle loading lives in
 ``bundle.py``.
 
 The ``_thinker_stage`` factory wraps the end-to-end call behind the
-thinker / talker / code2wav split. TICKET-05 is the correctness-side split
-that turns this into a real 3-stage execution; this file is the prerequisite.
+thinker / talker / code2wav split. The correctness-side split turns this
+into a real 3-stage execution; this file is the prerequisite.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 def _thinker_stage(deploy: Any, args: Any) -> Any:
     """Stage 0 factory: returns a callable that runs the thinker.
 
-    For TICKET 02, the "thinker" invokes the entire end-to-end pipeline via
+    The "thinker" invokes the entire end-to-end pipeline via
     ``generate_audio`` so that the field topology is exercised without
-    requiring the 3-stage split (TICKET 05).
+    requiring a 3-stage split.
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)

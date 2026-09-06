@@ -1,4 +1,4 @@
-"""MiniMind-Omni talker config-field tests (TICKET-05 phase 1).
+"""MiniMind-Omni talker config-field tests.
 
 The wrapper class reads audio / talker config fields from the loaded
 HF ``OmniConfig`` (``bundle.model.config``) and exposes them as plain

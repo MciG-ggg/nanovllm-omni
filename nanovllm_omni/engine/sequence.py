@@ -1,12 +1,12 @@
 """Per-request sequence state for the per-stage continuous-batching scheduler.
 
-Data structures lifted from vllm-omni's ``Sequence`` / ``PrefillChunk`` shape
-(TK-004). ``Sequence`` is the per-request mutable state a stage's scheduler
+Data structures lifted from vllm-omni's ``Sequence`` / ``PrefillChunk`` shape.
+``Sequence`` is the per-request mutable state a stage's scheduler
 owns; ``PrefillChunk`` marks a sub-range of a prompt being prefilled this
 round so the same scheduler can interleave prefill with decode (Q8a).
 
 The fields are deliberately minimal -- PagedAttention, prefix caching, and
-speculative decoding are out of scope per TK-004.
+speculative decoding are out of scope.
 """
 
 from __future__ import annotations

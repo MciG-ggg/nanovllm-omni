@@ -1,4 +1,4 @@
-"""MiniMind-Omni talker forward + sample + postprocess tests (TICKET-05 phase 1).
+"""MiniMind-Omni talker forward + sample + postprocess tests.
 
 The wrapper class exposes the LLM_AR stage contract (preprocess /
 forward / compute_logits / sample / postprocess / make_omni_output) and

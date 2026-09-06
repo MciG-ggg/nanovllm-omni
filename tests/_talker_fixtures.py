@@ -1,4 +1,4 @@
-"""Shared test fixtures for the MiniMind-Omni talker (TICKET-05 phase 1).
+"""Shared test fixtures for the MiniMind-Omni talker.
 
 The real ``TalkerModule`` lives in the vendored HF cache and depends on
 the full ``MiniMindOmni`` checkpoint (no offline-friendly mock). The

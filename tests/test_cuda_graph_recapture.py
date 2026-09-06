@@ -68,6 +68,7 @@ def _make_decoder() -> object:
     decoder.steps = []
     decoder._captured = False
     decoder._captured_len = -1
+    decoder._captured_n_steps = -1
     decoder._prefill_len = -1
     decoder.temperature = 0.75
     decoder.top_p = 0.9
@@ -107,12 +108,28 @@ def test_prefill_records_length_and_resets() -> None:
 
 def test_capture_invalidates_on_length_change() -> None:
     dec = _make_decoder()
-    # simulate: captured at len 2, now a len-7 prompt arrives
+    # simulate: captured at len 2 + n_steps 4, now a len-7 prompt arrives
     dec._captured = True
     dec._captured_len = 2
+    dec._captured_n_steps = 4
     dec._prefill_len = 7
     _apply_invalidation(dec)
     assert dec._captured is False, "different prompt length must invalidate"
+    assert dec.steps == [], "stale graphs must be dropped"
+
+
+def test_capture_invalidates_on_budget_change() -> None:
+    """Per-step graph COUNT is baked at the first-requested ``n_steps``;
+    a later request with a different budget must invalidate so the new
+    step count replaces the stale one."""
+    dec = _make_decoder()
+    dec._captured = True
+    dec._captured_len = 2
+    dec._captured_n_steps = 4
+    dec._prefill_len = 2  # same length, OK
+    dec.n_steps = 8  # different budget -> must invalidate
+    _apply_invalidation(dec)
+    assert dec._captured is False, "different budget must invalidate"
     assert dec.steps == [], "stale graphs must be dropped"
 
 
@@ -120,10 +137,11 @@ def test_capture_reuses_on_same_length() -> None:
     dec = _make_decoder()
     dec._captured = True
     dec._captured_len = 2
+    dec._captured_n_steps = 4
     dec._prefill_len = 2
     dec.steps = [_StubAttn()]  # non-empty fake graph list
     _apply_invalidation(dec)
-    assert dec._captured is True, "same length may reuse"
+    assert dec._captured is True, "same length + same budget may reuse"
     assert len(dec.steps) == 1, "must not drop cached graphs"
 
 
@@ -133,10 +151,12 @@ def test_capture_reinit_after_invalidation() -> None:
     dec = _make_decoder()
     dec._captured = True
     dec._captured_len = 2
+    dec._captured_n_steps = 4
     dec._prefill_len = 5
     _apply_invalidation(dec)  # invalidate (len changed)
     dec.steps = [_StubAttn()]  # pretend re-capture produced 1 graph
     dec._captured = True
+    dec._captured_n_steps = 4
     dec._prefill_len = 5
     _apply_invalidation(dec)  # same len now -> reuse
     assert dec._captured is True

@@ -130,7 +130,7 @@ def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     # constructing directly (the module's enable_cuda_graph already guarded).
     # Verify via the decode helper only, plus that buffer-ization marks land.
 
-    from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
+    from nanovllm_omni.optim.attention import enable_fixed_kv_buffer
 
     model = _StubModel()
     enable_fixed_kv_buffer(model, max_len=32)

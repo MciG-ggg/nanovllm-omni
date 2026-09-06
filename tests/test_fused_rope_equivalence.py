@@ -25,7 +25,7 @@ torch = pytest.importorskip("torch")
 import torch.nn.functional as functional  # noqa: E402,F401 -- after importorskip, kept for readability
 
 # Reuse the live implementation — the thing under test.
-from nanovllm_omni.models.minimind_omni.attention import (  # noqa: E402 -- after importorskip
+from nanovllm_omni.optim.attention import (  # noqa: E402 -- after importorskip
     _fused_apply_rotary_pos_emb,
 )
 

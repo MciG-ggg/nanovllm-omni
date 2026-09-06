@@ -115,7 +115,7 @@ def test_attention_decode_uses_is_causal_false():
     """
     import inspect
 
-    from nanovllm_omni.models.minimind_omni import attention as attn_mod
+    from nanovllm_omni.optim import attention as attn_mod
 
     src = inspect.getsource(attn_mod._attention_forward)
     # The decode branch is the only ``if sequence_len == 1 ...`` block; its
@@ -152,7 +152,7 @@ class _UpstreamRMSNorm(torch.nn.Module):
 
 def test_fused_rmsnorm_matches_upstream_within_fp16_ulp():
     """The fused op must match the upstream fp32-cast reference in fp16 precision."""
-    from nanovllm_omni.models.minimind_omni.attention import _fused_rms_forward
+    from nanovllm_omni.optim.attention import _fused_rms_forward
 
     torch.manual_seed(0)
     dim = 64
@@ -176,7 +176,7 @@ def test_fused_rmsnorm_does_not_quantize_to_zero():
     Catches a future regression where the upcast is dropped and the reduction
     collapses to zero on near-zero inputs.
     """
-    from nanovllm_omni.models.minimind_omni.attention import _fused_rms_forward
+    from nanovllm_omni.optim.attention import _fused_rms_forward
 
     class _R(torch.nn.Module):
         def __init__(self) -> None:

@@ -20,13 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-ATTENTION_PY = (
-    Path(__file__).resolve().parents[1]
-    / "nanovllm_omni"
-    / "models"
-    / "minimind_omni"
-    / "attention.py"
-)
+ATTENTION_PY = Path(__file__).resolve().parents[1] / "nanovllm_omni" / "optim" / "attention.py"
 
 # Locked counts from the model architecture (config.json):
 THINKER_LAYERS = 8

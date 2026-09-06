@@ -118,7 +118,7 @@ def load_minimind_omni_bundle(
     ).eval()
     model = _cast_model_dtype(model, dtype, device)
     model = model.to(device)
-    from .attention import (
+    from nanovllm_omni.optim.attention import (
         enable_fused_projections,
         enable_fused_rmsnorm,
         enable_fused_rope,

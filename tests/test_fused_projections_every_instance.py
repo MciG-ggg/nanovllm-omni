@@ -18,7 +18,7 @@ import pytest
 torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402 -- after importorskip
 
-from nanovllm_omni.models.minimind_omni.attention import (  # noqa: E402 -- after importorskip
+from nanovllm_omni.optim.attention import (  # noqa: E402 -- after importorskip
     enable_fused_projections,
 )
 

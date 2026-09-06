@@ -20,9 +20,7 @@ import pytest
 torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402 -- after importorskip
 
-from nanovllm_omni.models.minimind_omni import (  # noqa: E402 -- after importorskip
-    attention as attn_mod,
-)
+from nanovllm_omni.optim import attention as attn_mod  # noqa: E402 -- after importorskip
 
 
 class _RMSNorm(nn.Module):
@@ -70,7 +68,7 @@ def _rotary_identity(q, k, cos, sin):
 def _run_forward(attn, x, past_key_value, sequence_len):
     """Run the attention forward with the shared tail on CPU. Both fused and
     unfused paths delegate the tail to `_attention_forward`."""
-    from nanovllm_omni.models.minimind_omni.attention import (
+    from nanovllm_omni.optim.attention import (
         _fused_attention_forward,
         _sdpa_forward,
     )
@@ -129,7 +127,7 @@ def test_fused_matches_unfused_decode_q1() -> None:
     # Copy weights so the two are bit-identical before fusion.
     for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
         getattr(fused, name).weight.data.copy_(getattr(unfused, name).weight.data)
-    from nanovllm_omni.models.minimind_omni.attention import _fuse_attention_qkv
+    from nanovllm_omni.optim.attention import _fuse_attention_qkv
 
     _fuse_attention_qkv(fused)  # installs qkv_proj + fused forward
 
@@ -153,7 +151,7 @@ def test_fused_matches_unfused_prefill() -> None:
     fused = _make_stub_attention(n_heads, n_kv_heads, head_dim, feat_dim)
     for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
         getattr(fused, name).weight.data.copy_(getattr(unfused, name).weight.data)
-    from nanovllm_omni.models.minimind_omni.attention import _fuse_attention_qkv
+    from nanovllm_omni.optim.attention import _fuse_attention_qkv
 
     _fuse_attention_qkv(fused)
 
@@ -169,7 +167,7 @@ def test_fused_forward_selected_by_install() -> None:
     makes the E24 dedupe fix observable at runtime)."""
     feat_dim, n_heads, n_kv_heads, head_dim = 32, 2, 1, 16
     stub = _make_stub_attention(n_heads, n_kv_heads, head_dim, feat_dim)
-    from nanovllm_omni.models.minimind_omni.attention import (
+    from nanovllm_omni.optim.attention import (
         _fuse_attention_qkv,
         _fused_attention_forward,
     )

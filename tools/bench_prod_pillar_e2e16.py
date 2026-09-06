@@ -30,7 +30,7 @@ sys.path.insert(0, "/home/mcig/nanovllm-omni")
 from transformers import AutoTokenizer
 
 from nanovllm_omni.models.minimind_omni import create_bundle
-from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
+from nanovllm_omni.optim.attention import enable_fixed_kv_buffer
 from nanovllm_omni.optim.cuda_graph import _build_omni_input, _patched_forward
 
 MODEL = "/home/mcig/minimind-3o"

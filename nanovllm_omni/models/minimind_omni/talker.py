@@ -866,6 +866,7 @@ def _drive_talker_generation(
     temperature: float = 0.2,
     top_k: int = 50,
     do_sample: bool = True,
+    mtp_runner: Any = None,
 ) -> Any:
     """Run the talker wrapper over a ``TalkerInputPayload``; return code rows.
 
@@ -874,6 +875,10 @@ def _drive_talker_generation(
     ``talker_mtp``) with the reference delayed-diagonal MTP alignment:
     prefill over the bridge prompt span, then one decode step per output
     bridge row.
+
+    ``mtp_runner`` defaults to ``talker`` (eager ``talker.talker_mtp``); when
+    a ``TalkerMtpCudaGraph`` is supplied, the per-step MTP call is routed
+    through ``graph.decode(...)`` (graph forces ``do_sample=False``).
 
     Returns a frame-major ``[frames, num_code_layers]`` long tensor --
     the Code2Wav stage's input contract.
@@ -888,6 +893,7 @@ def _drive_talker_generation(
     # weights). Move the bridge to that device explicitly.
     device = next(talker.parameters()).device
     talker_dtype = next(talker.parameters()).dtype
+    mtp_runner = talker if mtp_runner is None else mtp_runner
     prompt_ids = list(payload.prompt_token_ids)
     output_ids = list(payload.output_token_ids)
     all_ids = list(payload.text_token_ids)
@@ -961,16 +967,27 @@ def _drive_talker_generation(
                 last_hidden_for_mtp, text_step, active_mask = mtp_inputs[:3]
             else:
                 last_hidden_for_mtp, text_step, active_mask = last_hidden, None, None
-            row = talker.talker_mtp(
-                input_ids=layer0,
-                input_embeds=embeds,
-                last_talker_hidden=last_hidden_for_mtp,
-                text_step=text_step,
-                active_mask=active_mask,
-                temperature=temperature,
-                top_k=top_k,
-                do_sample=do_sample,
-            )
+            mtp_decode = getattr(mtp_runner, "decode", None)
+            if mtp_decode is not None:
+                row = mtp_decode(
+                    input_ids=layer0,
+                    input_embeds=embeds,
+                    last_talker_hidden=last_hidden_for_mtp,
+                    text_step=text_step,
+                    active_mask=active_mask,
+                    do_sample=do_sample,
+                )
+            else:
+                row = mtp_runner.talker_mtp(
+                    input_ids=layer0,
+                    input_embeds=embeds,
+                    last_talker_hidden=last_hidden_for_mtp,
+                    text_step=text_step,
+                    active_mask=active_mask,
+                    temperature=temperature,
+                    top_k=top_k,
+                    do_sample=do_sample,
+                )
             rows.append(row[0])
             last_hidden = hidden[-1:]
             if int(row[0, -1].item()) == talker.audio_stop_token:
@@ -998,6 +1015,7 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
     injected_talker = extra.get("talker")
     injected_bundle = extra.get("bundle")
     stage_cache: dict[str, Any] = {}
+    use_talker_graph = bool(getattr(deploy, "use_talker_cuda_graph", False))
 
     def _resolve_talker() -> Any:
         if "talker" in stage_cache:
@@ -1021,6 +1039,35 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
         stage_cache["talker"] = talker
         return talker
 
+    def _resolve_mtp_runner() -> tuple[Any, bool]:
+        """Return ``(runner, graph_engaged)``.
+
+        When ``use_talker_graph`` is true and CUDA is available, ``runner``
+        is a ``TalkerMtpCudaGraph`` wrapping ``talker.talker_mtp``; otherwise
+        it is the raw talker and ``graph_engaged`` is false. Cached per-stage.
+        """
+        if "mtp_runner" in stage_cache:
+            return stage_cache["mtp_runner"]
+        talker = _resolve_talker()
+        runner = talker
+        if use_talker_graph:
+            from nanovllm_omni.optim.talker_cuda_graph import (
+                enable_talker_mtp_cuda_graph,
+            )
+
+            graph_runner = enable_talker_mtp_cuda_graph(
+                talker,
+                batch_sizes=(1,),
+                temperature=0.2,
+                top_k=50,
+            )
+            if graph_runner is not None:
+                runner = graph_runner
+        engaged = runner is not talker
+        cached = (runner, engaged)
+        stage_cache["mtp_runner"] = cached
+        return cached
+
     def talker_forward_full(payload: Any, sampling: Any) -> Any:
         from .stage_processors import TalkerInputPayload
 
@@ -1033,17 +1080,23 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
             float(getattr(sampling, "temperature", 0.2) or 0.2) if sampling is not None else 0.2
         )
         top_k = int((sampling.extra or {}).get("top_k", 50)) if sampling is not None else 50
-        do_sample = (
+        do_sample_user = (
             bool(getattr(sampling, "do_sample", True))
             if sampling is not None and hasattr(sampling, "do_sample")
             else True
         )
+        mtp_runner, graph_engaged = _resolve_mtp_runner()
+        # Graph module routes ``do_sample=True`` to eager (CUDA Graphs can't
+        # capture stochastic multinomial). Force greedy when the graph is
+        # engaged so the graph actually fires.
+        do_sample = do_sample_user and not graph_engaged
         codes = _drive_talker_generation(
             _resolve_talker(),
             payload,
             temperature=temperature,
             top_k=top_k,
             do_sample=do_sample,
+            mtp_runner=mtp_runner,
         )
         if codes.shape[0] == 0:
             return TalkerOutput(text_hidden_states=None, multimodal_outputs={})

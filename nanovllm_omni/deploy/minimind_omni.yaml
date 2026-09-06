@@ -1,6 +1,11 @@
 # Three-stage thinker -> talker -> code2wav pipeline (RTX 3050 validated).
 max_batch: 2
 use_cuda_graph: true
+# Stage-1 talker CUDA Graph. Engages enable_talker_mtp_cuda_graph; forces
+# ``do_sample=False`` at the talker call site (graph module routes
+# stochastic calls to eager, so the graph only fires on greedy).
+# Set to false to keep eager + sampling.
+use_talker_cuda_graph: true
 post_eos_padding_count: 128
 internal_stop_token_id: 17
 talker_max_steps_after_last_thinker_token: 192

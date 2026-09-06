@@ -429,3 +429,77 @@ def test_codec_helpers_roundtrip_full_codes(tmp_path: Path) -> None:
     with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
         assert wav.getnchannels() == 1
         assert wav.getframerate() == 24_000
+
+
+# ---------------------------------------------------------------------------
+# Stage-1 talker CUDA Graph integration
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_yaml_parses_use_talker_cuda_graph(tmp_path: Path) -> None:
+    """The deploy YAML default enables talker CUDA Graph; toggle is parsed."""
+    from nanovllm_omni.config import load_deploy_config
+
+    deploy_path = (
+        Path(__file__).resolve().parent.parent / "nanovllm_omni" / "deploy" / "minimind_omni.yaml"
+    )
+    cfg = load_deploy_config(deploy_path)
+    assert cfg.use_talker_cuda_graph is True
+
+    # Toggle off via YAML override
+    custom = tmp_path / "off.yaml"
+    custom.write_text("use_talker_cuda_graph: false\n", encoding="utf-8")
+    assert load_deploy_config(custom).use_talker_cuda_graph is False
+
+
+def test_talker_stage_runs_eager_when_no_cuda(tmp_path: Path) -> None:
+    """Without CUDA, the talker stage falls back to eager and produces a WAV."""
+    fixtures = make_full_fixtures()
+    omni = _new_omni(tmp_path, fixtures)
+    outputs = omni.generate(
+        "hello",
+        SamplingParams(max_tokens=4, temperature=0.2, top_p=0.9),
+    )
+    assert len(outputs) == 1
+    _assert_wav(outputs[0])
+
+
+def test_talker_mtp_runner_dispatch_picks_eager_when_no_cuda(
+    tmp_path: Path,
+) -> None:
+    """Direct call to _drive_talker_generation with mtp_runner=None stays eager."""
+    from nanovllm_omni.models.minimind_omni.stage_processors import (
+        TalkerInputPayload,
+    )
+    from nanovllm_omni.models.minimind_omni.talker import (
+        _drive_talker_generation,
+        wrap_talker,
+    )
+
+    fixtures = make_full_fixtures()
+    bundle, _talker, mimi, _model = fixtures
+    talker = wrap_talker(bundle)
+    hidden_size = talker.text_hidden_size
+    prompt_len = 4
+    num_decode_steps = 4
+    bridge = torch.randn(prompt_len + num_decode_steps - 1, hidden_size, dtype=torch.float32)
+    payload = TalkerInputPayload(
+        input_ids=torch.full((prompt_len,), 9, dtype=torch.long),
+        bridge_states=bridge,
+        text_token_ids=tuple(range(prompt_len + num_decode_steps)),
+        prompt_token_ids=tuple(range(prompt_len)),
+        output_token_ids=tuple(range(prompt_len, prompt_len + num_decode_steps)),
+        request_id="runner-dispatch-test",
+        metadata={},
+    )
+    # mtp_runner=None -> falls back to talker.talker_mtp (no graph attribute)
+    rows = _drive_talker_generation(
+        talker,
+        payload,
+        temperature=0.2,
+        top_k=50,
+        do_sample=True,
+        mtp_runner=None,
+    )
+    assert rows.shape[0] > 0
+    assert rows.shape[1] == 8

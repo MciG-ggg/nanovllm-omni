@@ -83,6 +83,24 @@ def bridge_process_input(payload: Any, prompt: str) -> Any:
 # ---------------------------------------------------------------------------
 
 _captures: list[Any] = []
+_factory_observations: list[tuple[Any, Any]] = []
+
+
+def reset_factory_observations() -> None:
+    _factory_observations.clear()
+
+
+def get_factory_observations() -> list[tuple[Any, Any]]:
+    return list(_factory_observations)
+
+
+def observing_factory(deploy: Any, args: Any) -> Any:
+    _factory_observations.append((deploy, args))
+
+    def forward(payload: Any, sampling: Any) -> Any:
+        return payload
+
+    return forward
 
 
 def reset_captures() -> None:

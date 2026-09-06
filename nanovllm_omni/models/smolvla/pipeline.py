@@ -2,7 +2,7 @@
 
 Single terminal stage: the LeRobot SmolVLA policy is one checkpoint
 (SigLIP + SmolVLM + action expert). Splitting vision / language / action
-into separate engine stages needs TensorHandle (TICKET-05) and is not
+into separate engine stages needs TensorHandle and is not
 faked here.
 
 kind=LLM_GENERATION -- closest existing StageExecutionType; the vllm-omni

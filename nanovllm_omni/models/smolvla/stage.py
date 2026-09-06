@@ -88,7 +88,7 @@ def _make_processors(policy: Any, model_path: str) -> tuple[Any, Any]:
 def _maybe_quantize(policy: Any, dtype: str | None, device: Any) -> Any:
     """int8 for the 4GB card.
 
-    ponytail: torch's ``quantize_dynamic`` only runs on CPU. For CUDA int8
+    torch's ``quantize_dynamic`` only runs on CPU. For CUDA int8
     we rely on bitsandbytes (HfTokenizer4bit etc.); if bitsandbytes is
     missing, leave the policy untouched -- the caller still has its original
     precision.

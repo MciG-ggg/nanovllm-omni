@@ -1,6 +1,6 @@
 """Test: Omni/AsyncOmni generate() signature parity with vllm-omni.
 
-``generate`` keeps its locked SPEC shape (``sampling_params`` single value,
+``generate`` keeps its locked public shape (``sampling_params`` single value,
 returns ``list``) and gains a backward-compatible ``py_generator`` keyword
 (vllm-omni parity) and per-request ``sampling_params_list`` input.
 """
@@ -108,7 +108,7 @@ def test_generate_sampling_params_list_per_request() -> None:
 
 
 def test_async_generate_unchanged_shape() -> None:
-    """AsyncOmni still yields an async iterator (SPEC L85)."""
+    """AsyncOmni still yields an async iterator."""
     from nanovllm_omni.entrypoints.async_omni import AsyncOmni
 
     runner = _RunnerStub()

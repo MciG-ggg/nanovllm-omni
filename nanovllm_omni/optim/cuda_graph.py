@@ -123,6 +123,11 @@ class CudaGraphDecoder:
         self.steps: list[tuple[Any, torch.Tensor, Any]] = []
         self._captured = False
         self._captured_len = -1
+        # The per-step graph COUNT is also baked at the first-requested
+        # ``n_steps`` (one graph per decode step). A different
+        # ``max_tokens`` budget on a later request must rebuild the step
+        # set; the fixed-budget serve path captures exactly once.
+        self._captured_n_steps = -1
         self._prefill_len = -1
         self._last_input_ids = None
         # defect B: text EOS state flag, flips on first sampled EOS token.
@@ -161,11 +166,18 @@ class CudaGraphDecoder:
 
         True when not yet captured OR the current prompt length differs from
         the length the existing graphs were captured at (defect #5: offsets
-        are baked at that length; a different-length prompt must rebuild).
+        are baked at that length; a different-length prompt must rebuild)
+        OR the requested generation budget differs from the budget the
+        graphs were captured at (the per-step graph COUNT is baked at the
+        first-requested ``n_steps``; a changed ``max_tokens`` must rebuild).
         Kept as its own method so the CPU contract test exercises the REAL
         code path (not a hand-replicated copy).
         """
-        return not (self._captured and self._captured_len == self._prefill_len)
+        return not (
+            self._captured
+            and self._captured_len == self._prefill_len
+            and self._captured_n_steps == self.n_steps
+        )
 
     def _capture(self, next_token: torch.Tensor) -> None:
         """Capture one graph per AR step over the (prefill-loaded) KV buffers.
@@ -206,6 +218,10 @@ class CudaGraphDecoder:
         torch.cuda.synchronize()
         self._captured = True
         self._captured_len = self._prefill_len
+        # Bake the budget the graphs were captured at so a later request
+        # with a different ``n_steps`` (per-request ``max_tokens``) forces
+        # a rebuild instead of replaying a stale step set.
+        self._captured_n_steps = self.n_steps
 
     # -- programmatic API -------------------------------------------------
     def _should_stop(self, tok: int, audio_codes: list[list[int]]) -> bool:
@@ -344,8 +360,22 @@ def enable_cuda_graph(
     if not hasattr(model.config, "audio_pad_token"):
         _log.warning("enable_cuda_graph: no audio_pad_token; skipping")
         return None
+
+    # A previously-captured decoder's step set is baked at the first-requested
+    # ``n_steps``; if a later request asks for a different budget, update the
+    # decoder's budget so the next ``generate_tokens`` triggers a re-capture
+    # via ``_needs_recapture``. Fixed-budget serve path (same ``n_steps``
+    # every request) leaves the decoder unchanged and stays in capture-once
+    # mode.
     existing = getattr(model, "_nanovllm_graph_decoder", None)
     if existing is not None:
+        if existing.n_steps != n_steps:
+            _log.info(
+                "enable_cuda_graph: budget %d -> %d (re-capture on next generate)",
+                existing.n_steps,
+                n_steps,
+            )
+            existing.n_steps = n_steps
         return existing
 
     cls = type(model)

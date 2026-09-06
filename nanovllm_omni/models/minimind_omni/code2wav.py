@@ -1,15 +1,4 @@
-"""MiniMind-O code2wav (Mimi codec) stage.
-
-Stage 2 of the 3-stage pipeline. Owns the codec-decode path
-(``decode_audio`` → Mimi → float numpy) and the WAV byte serializer
-(``encode_wav`` → stdlib ``wave``).
-
-For TICKET-02 this is an identity pass-through because the thinker's
-end-to-end ``generate_audio`` already produces an ``AudioPayload`` and
-the codec decode happens inside the thinker glue layer via the helpers
-exported below. TICKET-05 / TK-005 may move the actual decode here once
-the 3-stage split is real.
-"""
+"""MiniMind-O Code2Wav stage and Mimi codec helpers."""
 
 from __future__ import annotations
 
@@ -17,20 +6,119 @@ import io
 import wave
 from typing import Any
 
-from .bundle import MIMI_CODE_VOCAB_LIMIT
+from nanovllm_omni.outputs import AudioPayload
+
+from .bundle import (
+    DEFAULT_MIMI_MODEL_ID,
+    MIMI_CODE_VOCAB_LIMIT,
+)
+
+MIMI_NUM_CODEBOOKS = 8
 
 
-def _code2wav_stage(deploy: Any, args: Any) -> Any:
-    """Stage 2 factory: identity pass-through for TICKET-02.
+def load_mimi_codec(
+    model_id: str = DEFAULT_MIMI_MODEL_ID,
+    device: str | None = None,
+    dtype: str | None = None,
+    trust_remote_code: bool = True,
+) -> Any:
+    """Load only the Mimi codec used by the Code2Wav stage."""
+    from transformers import MimiModel
 
-    The end-to-end ``generate_audio`` already returns ``AudioPayload``; the
-    codec decode happened inside the thinker glue layer.
-    """
+    from .bundle import _cast_model_dtype, _pick_device, _resolve_snapshot
 
-    def code2wav_forward(payload: Any, sampling: Any) -> Any:
-        return payload
+    device = _pick_device(device)
+    mimi = MimiModel.from_pretrained(
+        _resolve_snapshot(model_id),
+        trust_remote_code=trust_remote_code,
+    ).eval()
+    return _cast_model_dtype(mimi, dtype, device).to(device)
 
-    return code2wav_forward
+
+def _is_code2wav_payload(payload: Any) -> bool:
+    from .stage_processors import Code2WavInputPayload
+
+    return isinstance(payload, Code2WavInputPayload)
+
+
+class MiniMindOmniCode2Wav:
+    """Decode one full-mode ``Code2WavInputPayload`` into ``AudioPayload``."""
+
+    def __init__(self, mimi: Any, device: str | Any) -> None:
+        self.mimi = mimi
+        self.device = device
+
+    def __call__(self, payload: Any, sampling: Any = None) -> Any:
+        del sampling
+        from .stage_processors import Code2WavInputPayload
+
+        if not isinstance(payload, Code2WavInputPayload):
+            raise TypeError(
+                "MiniMind Code2Wav expected Code2WavInputPayload, " f"got {type(payload).__name__}."
+            )
+        import torch
+
+        audio_codes = payload.audio_codes
+        if not isinstance(audio_codes, torch.Tensor):
+            raise TypeError(
+                "MiniMind Code2Wav audio_codes must be a torch.Tensor, "
+                f"got {type(audio_codes).__name__}."
+            )
+        if audio_codes.ndim != 2:
+            raise ValueError(
+                "MiniMind Code2Wav audio_codes must have shape [frames, codebooks], "
+                f"got {tuple(audio_codes.shape)}."
+            )
+        if audio_codes.shape[1] != MIMI_NUM_CODEBOOKS:
+            raise ValueError(
+                "MiniMind Code2Wav audio_codes must have 8 codebooks, "
+                f"got width {audio_codes.shape[1]}."
+            )
+        if audio_codes.shape[0] == 0:
+            raise ValueError("MiniMind Code2Wav audio_codes must contain at least one frame.")
+        if isinstance(payload.sample_rate, bool) or not isinstance(payload.sample_rate, int):
+            raise ValueError(
+                "MiniMind Code2Wav sample_rate must be a positive integer, "
+                f"got {payload.sample_rate!r}."
+            )
+        if payload.sample_rate <= 0:
+            raise ValueError(
+                "MiniMind Code2Wav sample_rate must be a positive integer, "
+                f"got {payload.sample_rate!r}."
+            )
+
+        # decode_audio owns the Mimi convention: frame-major [F, C] becomes
+        # decoder input [1, C, F] before invalid vocabulary ids are filtered.
+        audio_frames = audio_codes.detach().to(dtype=torch.long).cpu().tolist()
+        samples = decode_audio(self.mimi, audio_frames, self.device)
+        return AudioPayload(
+            data=encode_wav(samples, sample_rate=payload.sample_rate),
+            sample_rate=payload.sample_rate,
+        )
+
+
+def _code2wav_stage(deploy: Any, args: Any) -> MiniMindOmniCode2Wav:
+    """Construct the local Code2Wav stage without loading the full model."""
+    del deploy
+    from .bundle import _cast_model_dtype, _pick_device
+
+    extra = dict(getattr(args, "extra", None) or {})
+    supplied_mimi = extra.get("mimi")
+    device = _pick_device(getattr(args, "device", None))
+    dtype = getattr(args, "dtype", None)
+    if supplied_mimi is None or isinstance(supplied_mimi, str):
+        model_id = extra.get("mimi_model_id") or supplied_mimi or DEFAULT_MIMI_MODEL_ID
+        mimi = load_mimi_codec(
+            model_id=model_id,
+            device=device,
+            dtype=dtype,
+            trust_remote_code=getattr(args, "trust_remote_code", True),
+        )
+    else:
+        mimi = supplied_mimi.eval() if hasattr(supplied_mimi, "eval") else supplied_mimi
+        mimi = _cast_model_dtype(mimi, dtype, device)
+        mimi = mimi.to(device) if hasattr(mimi, "to") else mimi
+    return MiniMindOmniCode2Wav(mimi, device)
 
 
 def decode_audio(
@@ -75,4 +163,10 @@ def encode_wav(samples: Any, sample_rate: int = 24_000) -> bytes:
         return out.getvalue()
 
 
-__all__ = ["_code2wav_stage", "decode_audio", "encode_wav"]
+__all__ = [
+    "MiniMindOmniCode2Wav",
+    "_code2wav_stage",
+    "decode_audio",
+    "encode_wav",
+    "load_mimi_codec",
+]

@@ -241,6 +241,88 @@ def run_one(
     )
 
 
+def run_one_full(
+    omni: Any,
+    prompt: BenchPrompt | str,
+    *,
+    seed: int = 42,
+    max_tokens: int = 16,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    run_idx: int = 0,
+) -> RunResult:
+    """Time the full three-stage E2E through ``Omni.generate`` (real weights).
+
+    The whole pipeline (thinker -> talker -> MTP -> code2wav) is one timed
+    unit; wall time goes into ``StageTimes.generate_ms`` (the per-stage
+    tokenize/decode split is thinker-bench-only). ``frames`` is derived from
+    the emitted WAV length (Mimi is 12.5 Hz, 24 kHz mono -> 1920 samples /
+    16-bit frame). CPU fallback: returns a well-formed zero-ish row.
+    """
+    import torch
+
+    from nanovllm_omni import SamplingParams
+
+    p = _normalize_prompt(prompt)
+    torch.manual_seed(seed)
+    _maybe_reset_cuda_peak()
+
+    gen_start, gen_end = _cuda_event_pair()
+    if gen_start is not None:
+        gen_start.record()
+    t0 = time.perf_counter()
+    try:
+        outs = omni.generate(
+            p.text,
+            SamplingParams(
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            ),
+        )
+        t_generate_ms = _ms_since(t0)
+    except Exception:
+        t_generate_ms = _ms_since(t0)
+        return RunResult(
+            prompt_id=p.id,
+            seed=seed,
+            run_idx=run_idx,
+            times=StageTimes(generate_ms=t_generate_ms),
+            frames=0,
+            vram_peak_mb=_vram_peak_mb(),
+        )
+    if gen_end is not None:
+        gen_end.record()
+    t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
+
+    out = outs[0] if isinstance(outs, list) else outs
+    mm = getattr(out, "multimodal_output", None) or {}
+    try:
+        audio = mm["audio"] if isinstance(mm, dict) else mm.get("audio")
+    except (KeyError, AttributeError):
+        audio = getattr(mm, "audio", None)
+    wav_bytes: bytes = b""
+    frames = 0
+    if audio is not None and getattr(audio, "data", None):
+        wav_bytes = bytes(audio.data)
+        # WAV header is 44 bytes; mono 16-bit PCM -> bytes_per_frame = 1920 * 2.
+        data_bytes = max(len(wav_bytes) - 44, 0)
+        frames = data_bytes // (1920 * 2)
+
+    return RunResult(
+        prompt_id=p.id,
+        seed=seed,
+        run_idx=run_idx,
+        times=StageTimes(
+            generate_ms=t_generate_ms,
+            generate_cuda_ms=t_generate_cuda_ms,
+        ),
+        frames=frames,
+        vram_peak_mb=_vram_peak_mb(),
+        audio_bytes=wav_bytes,
+    )
+
+
 def run_n(
     bundle: Any,
     prompt: BenchPrompt | str,
@@ -253,3 +335,17 @@ def run_n(
     for _ in range(max(warmup, 0)):
         run_one(bundle, prompt, **kwargs)
     return [run_one(bundle, prompt, run_idx=i, **kwargs) for i in range(n)]
+
+
+def run_n_full(
+    omni: Any,
+    prompt: BenchPrompt | str,
+    *,
+    n: int = 5,
+    warmup: int = 1,
+    **kwargs: Any,
+) -> list[RunResult]:
+    """Full-E2E analogue of ``run_n``: warmup then n timed ``Omni.generate``."""
+    for _ in range(max(warmup, 0)):
+        run_one_full(omni, prompt, **kwargs)
+    return [run_one_full(omni, prompt, run_idx=i, **kwargs) for i in range(n)]

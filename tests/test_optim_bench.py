@@ -161,6 +161,46 @@ def test_run_one_returns_valid_wav():
         assert fh.getnframes() > 0
 
 
+def test_run_one_full_times_e2e_and_derives_frames():
+    """``run_one_full`` routes through ``Omni.generate`` and derives frames from the WAV.
+
+    Uses a stub ``omni`` so CI does not need the MiniMind-O weights.
+    """
+    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
+
+    # 2400 16-bit samples @ 24 kHz -> 0.1 s (4800 bytes raw PCM; header added
+    # by AudioPayload.wav_bytes). 4800 / 3840 bytes-per-frame = 1 Mimi frame.
+    raw_pcm = b"\x00\x00" * 2400
+    wav = AudioPayload(data=raw_pcm, sample_rate=24000).wav_bytes()
+
+    class _FakeOmni:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _text, _sampling_params):
+            self.calls += 1
+            out = type(
+                "Out",
+                (),
+                {
+                    "multimodal_output": MultimodalPayload.from_dict(
+                        {"audio": AudioPayload(data=wav, sample_rate=24000)}
+                    )
+                },
+            )()
+            return [out]
+
+    omni = _FakeOmni()
+    r = run_one_full(omni, _short_prompt(), max_tokens=4)
+    assert omni.calls == 1
+    assert r.times.generate_ms > 0.0
+    assert r.times.total_ms == r.times.generate_ms  # E2E is the only timed stage
+    assert r.audio_bytes[:4] == b"RIFF"
+    # 2400 samples / 1920 samples-per-frame = 1 frame (Mimi 24 kHz mono).
+    assert r.frames >= 1
+
+
 def test_stage_times_has_cuda_fields_and_overhead():
     """StageTimes tracks per-stage GPU time and derives CPU dispatch overhead."""
     from nanovllm_omni.optim.bench import StageTimes, run_one

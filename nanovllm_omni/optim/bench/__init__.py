@@ -19,7 +19,7 @@ from .report import (
     markdown_table_detail,
     write_csv,
 )
-from .runner import RunResult, StageTimes, run_n, run_one
+from .runner import RunResult, StageTimes, run_n, run_n_full, run_one, run_one_full
 from .trace import (
     KernelStat,
     StageProfile,
@@ -42,7 +42,9 @@ __all__ = [
     "markdown_table_detail",
     "parse_kineto_trace",
     "run_n",
+    "run_n_full",
     "run_one",
+    "run_one_full",
     "trace_profile_markdown",
     "trace_profile_top_kernels",
     "write_csv",

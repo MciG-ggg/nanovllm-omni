@@ -1,6 +1,6 @@
-"""Focused tests for the per-stage RuntimeScheduler (TK-004).
+"""Focused tests for the per-stage RuntimeScheduler.
 
-The SPEC requires a per-stage scheduler shaped like vLLM's: one instance per
+The design requires a per-stage scheduler shaped like vLLM's: one instance per
 LLM stage, Sequence-shaped state, chunked prefill + decode groups. These
 tests pin the data structure and the basic lifecycle transitions; the
 real-needle test (driving a forward through the scheduler) lives in
@@ -35,7 +35,7 @@ def test_sequence_defaults_to_waiting_with_empty_state() -> None:
 
 
 def test_sequence_status_enum_has_four_states() -> None:
-    """Per SPEC: WAITING -> PREFILL -> DECODE -> FINISHED.
+    """Per the design: WAITING -> PREFILL -> DECODE -> FINISHED.
 
     If a new state is added (e.g. ABORTED), the scheduler's branching needs
     to grow with it -- catch the drift here.

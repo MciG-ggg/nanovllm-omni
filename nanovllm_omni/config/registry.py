@@ -21,7 +21,7 @@ pipeline topology file is now fully declarative.
 from __future__ import annotations
 
 import importlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -142,6 +142,10 @@ class PipelineConfig:
     # whose ``hf_config_predicate`` (if any) accepts the loaded config.
     hf_architectures: tuple[str, ...] = ()
     hf_config_predicate: Callable[[Any], bool] | None = None
+    # The full three-stage pipeline is the only supported runtime mode; the
+    # legacy collapsed (single-thinker end-to-end) path was retired after
+    # RTX-3050 real-weight validation.
+    supported_pipeline_kinds: tuple[str, ...] = ("full",)
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,37 @@ class DeployStageConfig:
 
     name: str
     default_sampling_params: dict[str, Any] = field(default_factory=dict)
+    max_num_batched_tokens: int | None = None
+    max_num_seqs: int | None = None
+    gpu_memory_utilization: float | None = None
+    enforce_eager: bool | None = None
+    device: str | None = None
+    devices: str | tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.default_sampling_params, dict):
+            raise ValueError("default_sampling_params must be a mapping")
+        _validate_optional_runtime_int("max_num_batched_tokens", self.max_num_batched_tokens)
+        _validate_optional_runtime_int("max_num_seqs", self.max_num_seqs)
+        if self.gpu_memory_utilization is not None and not (
+            isinstance(self.gpu_memory_utilization, (int, float))
+            and not isinstance(self.gpu_memory_utilization, bool)
+            and 0 < self.gpu_memory_utilization <= 1
+        ):
+            raise ValueError(
+                "gpu_memory_utilization must be a number in (0, 1], "
+                f"got {self.gpu_memory_utilization!r}"
+            )
+        if self.enforce_eager is not None and not isinstance(self.enforce_eager, bool):
+            raise ValueError(f"enforce_eager must be a boolean, got {self.enforce_eager!r}")
+        if self.device is not None and not isinstance(self.device, str):
+            raise ValueError(f"device must be a string or null, got {self.device!r}")
+        if self.devices is not None and not isinstance(self.devices, (str, tuple)):
+            raise ValueError(f"devices must be a string, sequence, or null, got {self.devices!r}")
+        if isinstance(self.devices, tuple) and not all(
+            isinstance(device, str) for device in self.devices
+        ):
+            raise ValueError(f"devices must contain only strings, got {self.devices!r}")
 
 
 @dataclass(frozen=True)
@@ -168,6 +203,93 @@ class DeployConfig:
     #: + robustness verified). Deploy/runtime knob — the library Python
     #: default for generate_audio() stays False; serving reads this flag.
     use_cuda_graph: bool = True
+    # Full three-stage MiniMind-O mode: post-EOS bridge sequence + watchdog.
+    post_eos_padding_count: int = 128
+    internal_stop_token_id: int = 17
+    talker_max_steps_after_last_thinker_token: int = 192
+    pipeline_kind: str = "full"
+
+    def validate_pipeline_kind(self, pipeline_cfg: PipelineConfig) -> None:
+        """Reject a selected mode when the topology has not declared support."""
+        supported = set(pipeline_cfg.supported_pipeline_kinds)
+        if self.pipeline_kind not in supported:
+            names = ", ".join(sorted(supported)) or "none"
+            raise ValueError(
+                f"pipeline_kind {self.pipeline_kind!r} is not supported by "
+                f"pipeline {pipeline_cfg.name!r}; supported kinds: {names}."
+            )
+
+    def __post_init__(self) -> None:
+        if self.pipeline_kind not in {"collapsed", "full"}:
+            raise ValueError(
+                "pipeline_kind must be one of 'collapsed' or 'full', " f"got {self.pipeline_kind!r}"
+            )
+        _validate_runtime_int("post_eos_padding_count", self.post_eos_padding_count, minimum=0)
+        _validate_runtime_int("internal_stop_token_id", self.internal_stop_token_id)
+        _validate_runtime_int(
+            "talker_max_steps_after_last_thinker_token",
+            self.talker_max_steps_after_last_thinker_token,
+        )
+
+
+def _validate_runtime_int(name: str, value: Any, minimum: int | None = None) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+
+
+def _validate_optional_runtime_int(name: str, value: Any) -> None:
+    if value is not None:
+        _validate_runtime_int(name, value, minimum=1)
+
+
+def _parse_optional_int(data: Mapping[str, Any], key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    _validate_optional_runtime_int(key, parsed)
+    return parsed
+
+
+def _parse_optional_float(data: Mapping[str, Any], key: str) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a number, got {value!r}")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a number, got {value!r}") from exc
+
+
+def _parse_optional_bool(data: Mapping[str, Any], key: str) -> bool | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    raise ValueError(f"{key} must be a boolean, got {value!r}")
+
+
+def _parse_devices(data: Mapping[str, Any]) -> str | tuple[str, ...] | None:
+    value = data.get("devices")
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)) and all(isinstance(device, str) for device in value):
+        return tuple(value)
+    raise ValueError(f"devices must be a string, sequence of strings, or null, got {value!r}")
 
 
 OMNI_PIPELINES: dict[str, PipelineConfig | Callable[[Any], PipelineConfig | None]] = {}
@@ -240,19 +362,37 @@ def resolve_pipeline_config(model_type: str, hf_config: Any | None = None) -> Pi
 def load_deploy_config(path: str | Path) -> DeployConfig:
     """Parse a deploy YAML into a DeployConfig."""
     data = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(data, Mapping):
+        raise ValueError("deploy YAML must contain a mapping at the top level")
+    pipeline_kind = data.get("pipeline_kind", "full")
     max_batch = int(data.get("max_batch", 2))
     if max_batch < 1:
         raise ValueError(f"max_batch must be >= 1, got {max_batch}")
+    post_eos_padding_count = data.get("post_eos_padding_count", 128)
+    internal_stop_token_id = data.get("internal_stop_token_id", 17)
+    talker_max_steps_after_last_thinker_token = data.get(
+        "talker_max_steps_after_last_thinker_token", 192
+    )
     return DeployConfig(
+        pipeline_kind=pipeline_kind,
         stages=tuple(
             DeployStageConfig(
                 name=str(s.get("name", "")),
                 default_sampling_params=dict(s.get("default_sampling_params", {}) or {}),
+                max_num_batched_tokens=_parse_optional_int(s, "max_num_batched_tokens"),
+                max_num_seqs=_parse_optional_int(s, "max_num_seqs"),
+                gpu_memory_utilization=_parse_optional_float(s, "gpu_memory_utilization"),
+                enforce_eager=_parse_optional_bool(s, "enforce_eager"),
+                device=s.get("device"),
+                devices=_parse_devices(s),
             )
             for s in data.get("stages", [])
         ),
         max_batch=max_batch,
         use_cuda_graph=bool(data.get("use_cuda_graph", True)),
+        post_eos_padding_count=post_eos_padding_count,
+        internal_stop_token_id=internal_stop_token_id,
+        talker_max_steps_after_last_thinker_token=talker_max_steps_after_last_thinker_token,
     )
 
 

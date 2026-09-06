@@ -7,84 +7,153 @@ chains. Codec decode lives in ``code2wav.py``; bundle loading lives in
 ``bundle.py``.
 
 The ``_thinker_stage`` factory wraps the end-to-end call behind the
-thinker / talker / code2wav split. TICKET-05 is the correctness-side split
-that turns this into a real 3-stage execution; this file is the prerequisite.
+thinker / talker / code2wav split. The correctness-side split turns this
+into a real 3-stage execution; this file is the prerequisite.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
 
-from .audio import attach_audio_encoder, load_audio
 from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 
 
 def _thinker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: returns a callable that runs the thinker.
+    """Stage 0 factory: runs the bridge-capturing thinker for the talker.
 
-    For TICKET 02, the "thinker" invokes the entire end-to-end pipeline via
-    ``generate_audio`` so that the field topology is exercised without
-    requiring the 3-stage split (TICKET 05).
+    Emits a ``ThinkerStageOutput`` carrying bridge hidden states + text span
+    that ``thinker2talker`` converts for the talker stage. The legacy
+    collapsed single-call path is retired (RTX-3050 validated the 3-stage
+    path end-to-end).
     """
     extra_args = dict(getattr(args, "extra", None) or {})
     mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
-    audio_encoder_path = extra_args.pop("audio_encoder_path", None) or extra_args.pop(
-        "audio_encoder", None
-    )
+    provided_bundle = extra_args.pop("bundle", None)
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
         "dtype": getattr(args, "dtype", None),
     }
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id
-    bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    # ``extra["bundle"]`` lets offline tests / bench harnesses inject a
+    # prebuilt bundle so the factory never touches the network.
+    bundle = (
+        provided_bundle
+        if provided_bundle is not None
+        else create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    )
     # deploy-layer default: route served requests through the CUDA-Graph
     # fast path when the yaml enables it (report §44). generate_audio(None)
     # resolves from bundle.use_cuda_graph.
     if bundle is not None:
         bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
 
-    def thinker_forward(payload: Any, sampling: Any) -> Any:
-        prompt = payload if isinstance(payload, str) else payload.get("prompt", "")
+    # The three-stage full pipeline is the only supported runtime mode; the
+    # legacy collapsed factory is retired, so no fallback is kept.
+    return _full_thinker_stage(bundle, deploy)
+
+
+def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
+    """Full-mode stage 0: emit a ``ThinkerStageOutput`` with bridge states.
+
+    Runs the bridge-capturing generation with the deploy layer's post-EOS
+    sequence (Phase 2 opt-in) and internal-stop token, then hands the
+    aligned bridge + token ids to ``thinker2talker``. The thinker does NOT
+    decode audio here -- that is the code2wav stage's job.
+
+    Audio input (``extra["audio"]`` / ASR) is a collapsed-path feature; the
+    full path is text-to-audio only until that bridging is wired, so the
+    stage fails loud instead of silently dropping the audio side-channel.
+    """
+    post_eos_padding_count = int(getattr(deploy, "post_eos_padding_count", 128) or 0)
+    internal_stop_token_id = getattr(deploy, "internal_stop_token_id", None)
+
+    def thinker_forward_full(payload: Any, sampling: Any) -> Any:
+        import uuid
+
+        import torch
+
+        from .generation import stream_generate
+        from .stage_processors import ThinkerStageOutput
+
+        if isinstance(payload, str):
+            prompt = payload
+        elif isinstance(payload, dict):
+            prompt = payload.get("prompt", "")
+        else:
+            prompt = str(payload)
         extra = (
-            (sampling.extra or {}) if sampling is not None and hasattr(sampling, "extra") else {}
+            dict(getattr(sampling, "extra", None) or {})
+            if sampling is not None and hasattr(sampling, "extra")
+            else {}
         )
-        audio_inputs = audio_lens = None
-        transcript = None
-        n_markers = 0
-        audio = extra.get("audio")
-        if audio is not None:
-            # Q1/Q4: SenseVoice fbank -> engine-native prefill injection.
-            # Q2: same model transcribes the speech (double-track ASR).
-            sv = attach_audio_encoder(bundle, audio_encoder_path)
-            samples = load_audio(audio)
-            audio_inputs, audio_lens, n_markers = sv.fbank(samples)
-            audio_inputs = audio_inputs.to(getattr(bundle, "device", "cpu"))
-            audio_lens = audio_lens.to(getattr(bundle, "device", "cpu"))
-            transcript = sv.transcribe(samples)
-        out = generate_audio(
-            bundle,
-            prompt,
-            max_tokens=int(sampling.max_tokens) if sampling is not None else 16,
-            temperature=float(sampling.temperature) if sampling is not None else 0.7,
-            top_p=float(sampling.top_p) if sampling is not None else 1.0,
-            open_thinking=bool(extra.get("open_thinking", False)),
-            audio_inputs=audio_inputs,
-            audio_lens=audio_lens,
-            audio_markers=n_markers,
+        if extra.get("audio") is not None:
+            raise NotImplementedError(
+                "MiniMind full pipeline is text-to-audio only; audio input "
+                "(ASR) is not wired for the three-stage path."
+            )
+        eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
+        audio_special_token = getattr(
+            getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
         )
-        if transcript:
-            # AudioPayload is frozen; carry the double-track ASR transcript
-            # on a thin wrapper so ``from_pipeline`` can surface it without
-            # mutating the modal payload.
-            from types import SimpleNamespace
+        request_id = f"mmo-full-{uuid.uuid4().hex[:12]}"
+        with torch.no_grad():
+            input_ids = tokenize_for_generate(
+                bundle.tokenizer,
+                prompt,
+                bool(extra.get("open_thinking", False)),
+                audio_special_token=audio_special_token,
+            ).to(bundle.device)
+            captured_bridge: list[torch.Tensor] = []
+            output_tokens: list[int] = []
+            stream = stream_generate(
+                bundle.model,
+                input_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
+                temperature=float(sampling.temperature) if sampling is not None else 0.7,
+                top_p=float(sampling.top_p) if sampling is not None else 0.9,
+                open_thinking=bool(extra.get("open_thinking", False)),
+                capture_bridge_states=True,
+                bridge_state_callback=captured_bridge.append,
+                post_eos_padding_count=post_eos_padding_count,
+                internal_stop_token_id=internal_stop_token_id,
+            )
+            for text_chunk, _audio_frame in stream:
+                if text_chunk is not None:
+                    output_tokens = [
+                        int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
+                    ]
+        bridge = (
+            captured_bridge[0]
+            if captured_bridge and captured_bridge[0].numel() > 0
+            else torch.empty(0, 0, dtype=torch.float32)
+        )
+        prompt_ids = (
+            input_ids[0].detach().cpu().tolist() if input_ids.ndim == 2 else list(input_ids)
+        )
+        # The runner predicts the first output token at prefill (its bridge
+        # row is the last prompt position), so the talker only decodes the
+        # remaining output tokens. The bridge-aligned text span is therefore
+        # prompt + output[1:], whose length matches the captured bridge rows.
+        aligned_text = prompt_ids + (output_tokens[1:] if len(output_tokens) > 1 else [])
+        return ThinkerStageOutput(
+            bridge_states=bridge,
+            prompt_token_ids=prompt_ids,
+            output_token_ids=output_tokens,
+            text_token_ids=aligned_text,
+            input_ids=input_ids,
+            request_id=request_id,
+            metadata={
+                "pipeline_kind": "full",
+                "post_eos_padding_count": post_eos_padding_count,
+            },
+        )
 
-            out = SimpleNamespace(audio=out, transcript=transcript)
-        return out
-
-    return thinker_forward
+    return thinker_forward_full
 
 
 def tokenize_for_generate(
@@ -149,6 +218,10 @@ def run_generate(
     audio_lens: Any = None,
     use_cuda_graph: bool = False,
     seed: int | None = None,
+    capture_bridge_states: bool = False,
+    bridge_state_callback: Callable[[Any], None] | None = None,
+    post_eos_padding_count: int = 0,
+    internal_stop_token_id: int | None = None,
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
@@ -169,14 +242,25 @@ def run_generate(
     eager path, whose caller seeds ``torch.manual_seed``. Previously the
     graph path hardcoded 42 and ignored the caller's seed (determinism-
     parity defect); now it honors it.
+
+    ``capture_bridge_states`` and ``bridge_state_callback`` expose the
+    additive eager capture seam used by the future talker stage. The CUDA
+    Graph path does not capture bridge states in Phase 1.
     """
     import torch
 
     with torch.profiler.record_function("generate"):
         frames: list[list[int]] = []
-        if use_cuda_graph and all(
-            hasattr(model, name)
-            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+        # Full post-EOS mode stays eager until the graph decoder accepts the
+        # internal-stop sequence and bridge capture; its current visible-EOS
+        # stop logic cannot satisfy that contract (Phase 4 integration).
+        if (
+            use_cuda_graph
+            and post_eos_padding_count == 0
+            and all(
+                hasattr(model, name)
+                for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
+            )
         ):
             # Graph fast path: joint text+audio decode, frames = transpose of
             # the 8 audio channels (Mimi codebook frames, codec-stage format).
@@ -215,6 +299,10 @@ def run_generate(
                 open_thinking=open_thinking,
                 audio_inputs=audio_inputs,
                 audio_lens=audio_lens,
+                capture_bridge_states=capture_bridge_states,
+                bridge_state_callback=bridge_state_callback,
+                post_eos_padding_count=post_eos_padding_count,
+                internal_stop_token_id=internal_stop_token_id,
             )
         else:
             # TODO: delete

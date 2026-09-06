@@ -11,11 +11,17 @@ process_input are dotted-path strings resolved by
 declarative contract; per-stage implementation lives in
 ``thinker.py`` / ``talker.py`` / ``code2wav.py``.
 
-For TICKET-02, the three stage factories are a happy-path glue layer that
-invokes the existing ``generate_audio`` end-to-end wrapper via the
-thinker. The post-EOS state machine, talker watchdog, and bridge
-hidden-state conversion are deferred to TICKET-05; field set / topology
-shape match vllm-omni's pipeline-registry pattern.
+The thinker factory emits a ``ThinkerStageOutput`` with bridge hidden
+states, ``thinker2talker`` turns that into a ``TalkerInputPayload``, the
+talker stage drives the talker wrapper + ``talker_mtp`` over the bridge to
+produce code rows, ``talker2code2wav`` turns them into a
+``Code2WavInputPayload``, and the code2wav stage decodes them to 24 kHz
+mono WAV.
+
+Full is the only supported pipeline kind: the three-stage path executes
+end-to-end and was validated against real MiniMind-3o / Mimi weights on
+RTX 3050 (see ``tests/test_full_pipeline.py``). The legacy collapsed
+(single-thinker) pipeline is retired.
 """
 
 from __future__ import annotations
@@ -45,7 +51,7 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
             name="talker",
             kind=StageExecutionType.LLM_AR,
             factory=f"{_MINIMIND_OMNI_FAMILY}.talker:_talker_stage",
-            process_input=f"{_MINIMIND_OMNI_FAMILY}.talker:_identity_process_input",
+            process_input=f"{_MINIMIND_OMNI_FAMILY}.stage_processors:thinker2talker",
             input_sources=(0,),
         ),
         StageConfig(
@@ -53,7 +59,7 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
             name="code2wav",
             kind=StageExecutionType.CODEC,
             factory=f"{_MINIMIND_OMNI_FAMILY}.code2wav:_code2wav_stage",
-            process_input=f"{_MINIMIND_OMNI_FAMILY}.talker:_identity_process_input",
+            process_input=f"{_MINIMIND_OMNI_FAMILY}.stage_processors:talker2code2wav",
             input_sources=(1,),
             is_terminal=True,
             final_output_type="audio",
@@ -61,6 +67,9 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
     ),
     default_deploy_config_name="minimind_omni.yaml",
     registration_handles=("minimind_o", "jingyaogong/minimind-3o"),
+    # The three-stage thinker -> talker -> code2wav path is the only runtime
+    # mode; the legacy collapsed pipeline is retired.
+    supported_pipeline_kinds=("full",),
 )
 
 PIPELINE = MINIMIND_OMNI_PIPELINE

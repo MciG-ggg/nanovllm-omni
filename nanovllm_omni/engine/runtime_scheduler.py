@@ -1,4 +1,4 @@
-"""Per-stage runtime scheduler (TK-004).
+"""Per-stage runtime scheduler.
 
 Mirrors the reference's per-stage ``Scheduler`` shape:
 
@@ -14,11 +14,11 @@ shaping). Each LLM-style stage factory instantiates one scheduler when
 constructed.
 
 Deliberately not a subclass of ``OmniScheduler`` (which is the global
-mini-mind-specific scheduler in ``sched.py``); the SPEC's TK-004 calls
-for a per-stage model with ``Sequence``-shaped state, and ``OmniScheduler``
-is the request-grouping + FSM convenience used by
+mini-mind-specific scheduler in ``sched.py``); the design calls for a
+per-stage model with ``Sequence``-shaped state, and ``OmniScheduler`` is
+the request-grouping + FSM convenience used by
 ``BatchedThinkerRunner``. The two are linked: ``OmniRequest`` carries a
-``Sequence`` for SPEC compliance; ``RuntimeScheduler`` operates on the
+``Sequence`` in vLLM's shape; ``RuntimeScheduler`` operates on the
 ``Sequence`` directly.
 """
 
@@ -59,7 +59,7 @@ class RuntimeSchedulerOutput:
 
 
 class RuntimeScheduler:
-    """Per-stage scheduler with SPEC-style Sequence state.
+    """Per-stage scheduler with Sequence state.
 
     Lifecycle for a single sequence: WAITING -> (admit) -> PREFILL ->
     (prefill round done) -> DECODE -> (decode round done) -> DECODE -> ...

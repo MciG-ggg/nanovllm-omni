@@ -1,13 +1,13 @@
 """Per-request fixed-slot KV pool (engine/kv_pool.py).
 
-After TK-004 the request lifecycle + group formation moved to
+After the design split, the request lifecycle + group formation moved to
 ``engine.runtime_scheduler.RuntimeScheduler``. This module keeps only the
 KV-cache memory manager (``FixedKvSlotPool``) which is orthogonal to the
 scheduler -- it owns the per-request fixed-size KV buffers that
 ``BatchedThinkerRunner`` writes into during ``prefill_group`` /
 ``decode_group``.
 
-Scope notes locked in the TICKET design session:
+Scope notes:
 
 - Q4b/Q6a  real concurrency with fixed-slot KV: each running request owns
   one preallocated [layers, 2, kv_heads, max_seq, head_dim] slot written in
@@ -15,7 +15,7 @@ Scope notes locked in the TICKET design session:
   into one [B, ...] tensor for a batched forward.
 - No preemption / no paged blocks: admission is capped by ``max_num_seqs``
   on the scheduler; this pool just hands out slots sized to whatever
-  ``max_seq`` the runner was constructed with (ponytail: fixed-slot budgets;
+  ``max_seq`` the runner was constructed with (fixed-slot budgets;
   add preemption when a 4 GB card OOMs, and paged KV only if you outgrow
   this teaching shape).
 """

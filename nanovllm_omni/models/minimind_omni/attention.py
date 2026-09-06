@@ -263,7 +263,7 @@ def enable_fused_projections(model: Any) -> None:
     """
     for module in model.modules():
         cls_name = type(module).__name__
-        # ponytail: monkey-patching heterogeneous upstream code needs a
+        # Monkey-patching heterogeneous upstream code needs a
         # defensive skip; narrower than bare ``Exception`` so shape / dtype
         # errors still surface.
         if cls_name == "Attention":
@@ -351,7 +351,7 @@ def enable_fused_rope(model: Any) -> None:
     try:
         fn = torch.compile(_fused_apply_rotary_pos_emb, dynamic=True)
     except Exception:
-        # ponytail: torch.compile can fail on first import (no inductor
+        # torch.compile can fail on first import (no inductor
         # backend, no CUDA, etc.). Fall back to the eager fused form --
         # still saves the cat launch.
         fn = _fused_apply_rotary_pos_emb

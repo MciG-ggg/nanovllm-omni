@@ -108,11 +108,21 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
                 post_eos_padding_count=post_eos_padding_count,
                 internal_stop_token_id=internal_stop_token_id,
             )
+            # ``stream_generate`` yields a growing prefix each step. The
+            # original code rebuilt the whole Python int list (and forced
+            # a host sync) every iteration. Defer the single
+            # ``detach().cpu().tolist()`` until after the stream so the
+            # per-step host sync disappears. Audio numerics are unchanged
+            # because the final prefix is identical to the last yielded
+            # ``text_chunk``.
+            final_text_chunk: Any = None
             for text_chunk, _audio_frame in stream:
                 if text_chunk is not None:
-                    output_tokens = [
-                        int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
-                    ]
+                    final_text_chunk = text_chunk
+            if final_text_chunk is not None:
+                output_tokens = [
+                    int(token) for token in final_text_chunk.detach().cpu().reshape(-1).tolist()
+                ]
         bridge = (
             captured_bridge[0]
             if captured_bridge and captured_bridge[0].numel() > 0

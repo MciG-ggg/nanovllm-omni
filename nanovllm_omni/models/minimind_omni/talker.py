@@ -940,6 +940,11 @@ def _drive_talker_generation(
 
         # Decode: one step per output bridge row; residuals from the previous
         # step's hidden state (delayed diagonal MTP).
+        # The original code did ``int(row[0, -1].item()) == talker.audio_stop_token``
+        # every step, forcing a host sync per AR step. Collect the boolean
+        # on-device and do a single ``.tolist()`` after the loop, then trim.
+        # Audio numerics are unchanged because trimming the same first-stop
+        # index produces the same final ``rows`` table.
         for step in range(num_decode_steps):
             num_computed = prompt_len + step
             prev_code = int(rows[-1][0]) if rows else talker.audio_pad_token
@@ -990,8 +995,17 @@ def _drive_talker_generation(
                 )
             rows.append(row[0])
             last_hidden = hidden[-1:]
-            if int(row[0, -1].item()) == talker.audio_stop_token:
-                break
+        if rows:
+            # ``rows`` holds ``row[0]`` slices (1-D per AR step) so that
+            # the final ``torch.stack(rows, dim=0)`` keeps the
+            # ``[frames, num_code_layers]`` contract. The original stop
+            # check used ``row[0, -1]`` on the full 2-D ``row``; that
+            # maps to ``r[-1]`` once the batch dim is sliced away.
+            last_codes = torch.stack([r[-1] for r in rows])
+            stop_matches = (last_codes == talker.audio_stop_token).tolist()
+            if any(stop_matches):
+                first_stop = stop_matches.index(True)
+                rows = rows[: first_stop + 1]
     finally:
         # Drop per-request flags so a recycled request id never inherits
         # a stale forced-stop.

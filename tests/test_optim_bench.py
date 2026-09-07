@@ -201,6 +201,111 @@ def test_run_one_full_times_e2e_and_derives_frames():
     assert r.frames >= 1
 
 
+def test_run_one_full_records_per_stage_breakdown():
+    """``run_one_full`` reads ``PipelineRunner._last_stage_timings`` into ``stage_ms``.
+
+    The fake omni carries an executor -> runner chain that exposes a
+    populated ``_last_stage_timings``; ``run_one_full`` must extract it,
+    map ``thinker`` onto ``generate_ms`` and ``code2wav`` onto
+    ``decode_ms``, and surface the full breakdown via ``stage_ms``.
+    """
+    import json
+
+    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
+
+    raw_pcm = b"\x00\x00" * 2400
+    wav = AudioPayload(data=raw_pcm, sample_rate=24000).wav_bytes()
+
+    class _FakeRunner:
+        _last_stage_timings: list[tuple[str, float]] = [
+            ("thinker", 100.5),
+            ("talker", 200.25),
+            ("code2wav", 50.125),
+        ]
+
+    class _FakeExecutor:
+        _runner = _FakeRunner()
+
+    class _FakeOmni:
+        def __init__(self) -> None:
+            self._executor = _FakeExecutor()
+
+        def generate(self, _text, _sampling_params):
+            out = type(
+                "Out",
+                (),
+                {
+                    "multimodal_output": MultimodalPayload.from_dict(
+                        {"audio": AudioPayload(data=wav, sample_rate=24000)}
+                    )
+                },
+            )()
+            return [out]
+
+    omni = _FakeOmni()
+    r = run_one_full(omni, _short_prompt(), max_tokens=4)
+
+    # Full breakdown surfaced as a dict.
+    assert r.stage_ms == {"thinker": 100.5, "talker": 200.25, "code2wav": 50.125}
+    # Per-stage mapping onto existing StageTimes fields.
+    assert r.times.generate_ms == 100.5
+    assert r.times.decode_ms == 50.125
+    assert r.times.wav_ms == 0.0
+    # CSV row carries the new column; round-trips through json.
+    row = r.as_csv_row()
+    assert "stage_ms" in row
+    assert row["stage_ms"] == json.dumps(
+        {"thinker": 100.5, "talker": 200.25, "code2wav": 50.125}, sort_keys=True
+    )
+    # Existing columns must still be present and parseable (no regression).
+    for col in (
+        "tokenize_ms",
+        "generate_ms",
+        "decode_ms",
+        "wav_ms",
+        "total_ms",
+        "frames",
+        "vram_mb",
+        "generate_cuda_ms",
+        "decode_cuda_ms",
+        "cpu_dispatch_ms",
+        "generate_per_step_ms",
+    ):
+        assert col in row
+
+
+def test_run_one_full_without_executor_keeps_wall_clock_generate():
+    """When the stub has no executor, ``run_one_full`` keeps the wall-clock
+    ``generate_ms`` (no per-stage mapping) and ``stage_ms`` stays None.
+    Guards the existing ``test_run_one_full_times_e2e_and_derives_frames``
+    contract.
+    """
+    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
+
+    raw_pcm = b"\x00\x00" * 2400
+    wav = AudioPayload(data=raw_pcm, sample_rate=24000).wav_bytes()
+
+    class _BareFakeOmni:
+        def generate(self, _text, _sampling_params):
+            out = type(
+                "Out",
+                (),
+                {
+                    "multimodal_output": MultimodalPayload.from_dict(
+                        {"audio": AudioPayload(data=wav, sample_rate=24000)}
+                    )
+                },
+            )()
+            return [out]
+
+    r = run_one_full(_BareFakeOmni(), _short_prompt(), max_tokens=4)
+    assert r.stage_ms is None
+    assert r.times.total_ms == r.times.generate_ms
+    assert r.as_csv_row()["stage_ms"] == ""
+
+
 def test_stage_times_has_cuda_fields_and_overhead():
     """StageTimes tracks per-stage GPU time and derives CPU dispatch overhead."""
     from nanovllm_omni.optim.bench import StageTimes, run_one

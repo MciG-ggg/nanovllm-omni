@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import time
 from typing import Any
 
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
@@ -50,6 +51,12 @@ class PipelineRunner:
         self._merged = merge_pipeline_deploy(pipeline, deploy)
         self._deploy_stages = {stage.name: stage for stage in deploy.stages}
         self._stage_instances: list[Any] | None = None
+        # Per-stage wall-clock ms for the most recent ``run`` call. Bench
+        # reads this to decompose E2E wall time without touching the public
+        # ``OmniRequestOutput`` shape. ``None`` before the first call.
+        # ponytail: wall-clock only; add CUDA Event timing if per-stage GPU
+        # breakdown is needed (mirrors StageTimes.generate_cuda_ms).
+        self._last_stage_timings: list[tuple[str, float]] | None = None
 
     def _stage_args(self, stage_name: str) -> OmniEngineArgs:
         """Overlay stage-local engine knobs without mutating shared args."""
@@ -127,15 +134,22 @@ class PipelineRunner:
         """Run one request through the pipeline.
 
         ``prompt`` is the initial payload. ``sampling`` is the per-request
-        override; per-stage deploy defaults are merged underneath.
+        override; per-stage deploy defaults are merged underneath. Records
+        wall-clock per-stage timings into ``self._last_stage_timings``
+        (list of ``(stage_name, ms)``, in pipeline order) for bench-side
+        decomposition of E2E wall time.
         """
         stages = self._ensure_stages()
         payload: Any = prompt
+        timings: list[tuple[str, float]] = []
         for _, ((stage_cfg, stage_defaults), instance) in enumerate(
             zip(self._merged, stages, strict=True)
         ):
             if stage_cfg.process_input is not None:
                 payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
+            t0 = time.perf_counter()
             payload = instance(payload, stage_sampling)
+            timings.append((stage_cfg.name, (time.perf_counter() - t0) * 1000.0))
+        self._last_stage_timings = timings
         return payload

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +49,12 @@ class RunResult:
     frames: int
     vram_peak_mb: float
     audio_bytes: bytes = b""
+    # Per-stage wall-clock ms breakdown (thinker/talker/code2wav) populated
+    # only by ``run_one_full`` when the underlying ``PipelineRunner``
+    # exposes ``_last_stage_timings``. ``None`` for thinker-only bench.
+    # ponytail: dict shape, not a separate dataclass, so adding a stage
+    # does not require a schema bump; JSON-serialized into CSV.
+    stage_ms: dict[str, float] | None = None
 
     def as_csv_row(self) -> dict[str, Any]:
         row: dict[str, Any] = {
@@ -69,6 +76,8 @@ class RunResult:
         row["generate_per_step_ms"] = (
             f"{self.times.generate_ms / self.frames:.6f}" if self.frames else "0.000000"
         )
+        # E2E per-stage breakdown (full pipeline only; empty for thinker bench).
+        row["stage_ms"] = json.dumps(self.stage_ms, sort_keys=True) if self.stage_ms else ""
         return row
 
 
@@ -295,6 +304,24 @@ def run_one_full(
         gen_end.record()
     t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
 
+    # Read per-stage wall ms the runner recorded during ``omni.generate``.
+    # Falls back gracefully when the fake/test stub has no executor.
+    runner = getattr(getattr(omni, "_executor", None), "_runner", None)
+    raw_timings = getattr(runner, "_last_stage_timings", None) if runner is not None else None
+    stage_ms: dict[str, float] | None = dict(raw_timings) if raw_timings else None
+
+    # Map per-stage timings onto existing StageTimes fields so the CSV's
+    # ``generate_ms`` / ``decode_ms`` columns carry the stage-specific
+    # measurements (thinker -> generate, code2wav -> decode) rather than
+    # the coarse omni.generate() wall clock. Falls back to wall-clock when
+    # the runner did not record timings (test stubs).
+    t_decode_ms = 0.0
+    if stage_ms is not None:
+        if "thinker" in stage_ms:
+            t_generate_ms = stage_ms["thinker"]
+        if "code2wav" in stage_ms:
+            t_decode_ms = stage_ms["code2wav"]
+
     out = outs[0] if isinstance(outs, list) else outs
     mm = getattr(out, "multimodal_output", None) or {}
     try:
@@ -315,11 +342,13 @@ def run_one_full(
         run_idx=run_idx,
         times=StageTimes(
             generate_ms=t_generate_ms,
+            decode_ms=t_decode_ms,
             generate_cuda_ms=t_generate_cuda_ms,
         ),
         frames=frames,
         vram_peak_mb=_vram_peak_mb(),
         audio_bytes=wav_bytes,
+        stage_ms=stage_ms,
     )
 
 

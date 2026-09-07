@@ -26,6 +26,8 @@ CSV_COLUMNS: tuple[str, ...] = (
     "decode_cuda_ms",
     "cpu_dispatch_ms",
     "generate_per_step_ms",
+    # E2E per-stage wall-clock JSON (full-pipeline bench only; empty for thinker).
+    "stage_ms",
 )
 
 

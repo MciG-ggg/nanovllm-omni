@@ -94,8 +94,11 @@ class MiniMindOmniCode2Wav:
 
         # decode_audio owns the Mimi convention: frame-major [F, C] becomes
         # decoder input [1, C, F] before invalid vocabulary ids are filtered.
-        audio_frames = audio_codes.detach().to(dtype=torch.long).cpu().tolist()
-        samples = decode_audio(self.mimi, audio_frames, self.device)
+        # Pass the GPU tensor directly so we don't pay a host sync +
+        # re-upload just to round-trip the matrix. Audio numerics are
+        # unchanged: the filter + reshape sequence is identical to the
+        # CPU-list path inside ``decode_audio``.
+        samples = decode_audio(self.mimi, audio_codes.detach().to(dtype=torch.long), self.device)
         return AudioPayload(
             data=encode_wav(samples, sample_rate=payload.sample_rate),
             sample_rate=payload.sample_rate,
@@ -128,18 +131,27 @@ def _code2wav_stage(deploy: Any, args: Any) -> MiniMindOmniCode2Wav:
 
 def decode_audio(
     mimi: Any,
-    audio_frames: list[list[int]],
-    device: str,
+    audio_frames: Any,
+    device: Any,
 ) -> Any:
     """Decode collected Mimi codebook frames to a float numpy array on CPU.
 
-    Labeled ``decode`` for the benchmark harness. Moves codes to ``device``,
-    runs ``mimi.decode`` under no_grad, then returns ``np.ndarray``.
+    ``audio_frames`` is either a ``list[list[int]]`` (CPU path used by
+    the thinker's ``run_one`` bench) or a ``torch.Tensor`` of shape
+    ``[frames, codebooks]`` on the talker's own device. The GPU path
+    skips the host sync + re-upload that the CPU-list path would impose.
+    Both paths produce bit-identical audio.
+
+    Labeled ``decode`` for the benchmark harness. Runs ``mimi.decode``
+    under no_grad, then returns ``np.ndarray``.
     """
     import torch
 
     with stage("decode"):
-        codes = torch.tensor(audio_frames, dtype=torch.long, device=device).T.unsqueeze(0)
+        if isinstance(audio_frames, torch.Tensor):
+            codes = audio_frames.to(device=device, dtype=torch.long).T.unsqueeze(0)
+        else:
+            codes = torch.tensor(audio_frames, dtype=torch.long, device=device).T.unsqueeze(0)
         filtered = torch.where(codes >= MIMI_CODE_VOCAB_LIMIT, torch.zeros_like(codes), codes)
         with torch.no_grad():
             audio = mimi.decode(filtered).audio_values

@@ -455,3 +455,12 @@ def test_bench_cli_can_force_each_graph_off() -> None:
     )
     assert ns.use_thinker_cuda_graph is False
     assert ns.use_talker_cuda_graph is True
+
+
+def test_full_bench_rejects_non_equivalent_thinker_graph() -> None:
+    """The full path must fail loudly until its post-EOS bridge parity exists."""
+    from nanovllm_omni.optim.bench.__main__ import build_parser, cmd_time
+
+    args = build_parser().parse_args(["time", "--pipeline", "full", "--use-thinker-cuda-graph"])
+    with pytest.raises(SystemExit, match="post-EOS bridge-state contract"):
+        cmd_time(args)

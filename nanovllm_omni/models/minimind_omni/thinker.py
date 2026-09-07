@@ -95,47 +95,24 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             ).to(bundle.device)
             captured_bridge: list[torch.Tensor] = []
             output_tokens: list[int] = []
-            max_new_tokens = int(sampling.max_tokens) if sampling is not None else 512
-            temperature = float(sampling.temperature) if sampling is not None else 0.7
-            top_p = float(sampling.top_p) if sampling is not None else 0.9
-            use_thinker_cuda_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
-            effective_post_eos_padding_count = post_eos_padding_count
-            if use_thinker_cuda_graph:
-                # The graph decoder has no post-EOS mode. Its bridge capture is
-                # graph-owned, so the talker still receives a complete span.
-                run_generate(
-                    bundle.model,
-                    input_ids,
-                    eos_token_id=eos_token_id,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    open_thinking=bool(extra.get("open_thinking", False)),
-                    use_thinker_cuda_graph=True,
-                    capture_bridge_states=True,
-                    bridge_state_callback=captured_bridge.append,
-                    text_token_callback=output_tokens.extend,
-                )
-                effective_post_eos_padding_count = 0
-            else:
-                stream = stream_generate(
-                    bundle.model,
-                    input_ids,
-                    eos_token_id=eos_token_id,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    open_thinking=bool(extra.get("open_thinking", False)),
-                    capture_bridge_states=True,
-                    bridge_state_callback=captured_bridge.append,
-                    post_eos_padding_count=effective_post_eos_padding_count,
-                    internal_stop_token_id=internal_stop_token_id,
-                )
-                for text_chunk, _audio_frame in stream:
-                    if text_chunk is not None:
-                        output_tokens = [
-                            int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
-                        ]
+            stream = stream_generate(
+                bundle.model,
+                input_ids,
+                eos_token_id=eos_token_id,
+                max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
+                temperature=float(sampling.temperature) if sampling is not None else 0.7,
+                top_p=float(sampling.top_p) if sampling is not None else 0.9,
+                open_thinking=bool(extra.get("open_thinking", False)),
+                capture_bridge_states=True,
+                bridge_state_callback=captured_bridge.append,
+                post_eos_padding_count=post_eos_padding_count,
+                internal_stop_token_id=internal_stop_token_id,
+            )
+            for text_chunk, _audio_frame in stream:
+                if text_chunk is not None:
+                    output_tokens = [
+                        int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
+                    ]
         bridge = (
             captured_bridge[0]
             if captured_bridge and captured_bridge[0].numel() > 0
@@ -157,7 +134,7 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             request_id=request_id,
             metadata={
                 "pipeline_kind": "full",
-                "post_eos_padding_count": effective_post_eos_padding_count,
+                "post_eos_padding_count": post_eos_padding_count,
             },
         )
 

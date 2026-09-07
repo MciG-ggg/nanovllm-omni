@@ -89,6 +89,11 @@ def _run_all(
 
 
 def cmd_time(args: argparse.Namespace) -> int:
+    if args.pipeline == "full" and args.use_thinker_cuda_graph is True:
+        raise SystemExit(
+            "full E2E thinker CUDA Graph is unavailable: it does not preserve "
+            "the required post-EOS bridge-state contract"
+        )
     prompts = _resolve_prompts(args.prompts)
 
     if args.pipeline == "full":

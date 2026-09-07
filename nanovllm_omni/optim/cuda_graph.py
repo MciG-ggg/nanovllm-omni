@@ -258,6 +258,9 @@ class CudaGraphDecoder:
         self._captured_n_steps = self.n_steps
 
     # -- programmatic API -------------------------------------------------
+    def _reset_request_state(self) -> None:
+        self._text_finished = False
+
     def _should_stop(self, tok: int, audio_codes: list[list[int]]) -> bool:
         """Defect B fix: parity with ``BatchedThinkerRunner.step_finished``.
 
@@ -300,6 +303,7 @@ class CudaGraphDecoder:
         The ``torch.Generator`` advance stops at the content-natural end
         (no dummy draws), matching eager parity up to the stop step.
         """
+        self._reset_request_state()
         if return_bridge:
             self._enable_bridge_capture()
         num_layers = NUM_AUDIO_LAYERS

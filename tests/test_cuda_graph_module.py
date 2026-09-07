@@ -126,6 +126,14 @@ def test_patched_forward_preserves_arithmetic() -> None:
     assert torch.equal(orig.logits, got.logits)
 
 
+def test_decoder_resets_request_local_stop_state() -> None:
+    """EOS state from one decoded request must not contaminate the next one."""
+    decoder = cg.CudaGraphDecoder.__new__(cg.CudaGraphDecoder)
+    decoder._text_finished = True
+    decoder._reset_request_state()
+    assert decoder._text_finished is False
+
+
 def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     """CudaGraphDecoder attaches the fixed-KV-buffer patch and its decode
     input is [1, 9, 1] (8 audio + 1 text), the shape the buffer forward
@@ -160,6 +168,7 @@ if __name__ == "__main__":
         test_enable_cuda_graph_returns_none_without_cuda,
         test_patched_forward_neutralizes_host_reads_without_rebind,
         test_patched_forward_preserves_arithmetic,
+        test_decoder_resets_request_local_stop_state,
         test_decoder_wires_buffer_patch_and_input_shape,
     ]
     for fn in checks:

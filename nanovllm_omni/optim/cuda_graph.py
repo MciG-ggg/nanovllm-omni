@@ -221,7 +221,8 @@ class CudaGraphDecoder:
     def _capture(self, next_token: torch.Tensor) -> None:
         """Capture one graph per AR step over the (prefill-loaded) KV buffers.
 
-        Defect #5: re-capture when the prefill length changed since the last
+        Warmup forwards are rewound before capture so they do not consume a
+        decode position. Defect #5: re-capture when the prefill length changed since the last
         capture. Per-step graph offsets are baked at ``_kv_pos = prefill_len
         + k``; reusing them for a different-length prompt misaligns KV, so a
         length change must drop the stale graphs and rebuild.
@@ -233,10 +234,15 @@ class CudaGraphDecoder:
         # where the new prefill didn't overwrite. Clear it here (re-capture
         # branch only, same-length reuse stays un-cleared) then re-prefill the
         # current prompt so the rebuilt graphs start from clean KV.
+        had_capture = self._captured
         self.steps = []
         self._captured = False
         self._zero_kv_contents()
-        self._prefill(self._last_input_ids)
+        # ``generate_tokens`` already prefills the current request before
+        # entering _capture.  Only recapture needs another prefill because
+        # zeroing the shared buffer would otherwise erase the fresh prompt.
+        if had_capture:
+            self._prefill(self._last_input_ids)
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         # Warmup on the side stream FIRST so cuBLAS/cuDNN workspace picks an
@@ -256,6 +262,12 @@ class CudaGraphDecoder:
                 inp = _build_omni_input(next_token, self.audio_pad).clone()
                 with torch.no_grad():
                     self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
+                # The warmup forward above advances the Python KV cursor, but
+                # its position must not count toward the graph's replay
+                # position.  Rewind to the same cursor before capture so graph
+                # k is baked at prefill_len + k, not prefill_len + 2*k + 1.
+                for attn in self.attns:
+                    attn._kv_pos -= inp.shape[-1]
                 g = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(g), torch.no_grad():
                     out = self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
@@ -387,7 +399,12 @@ class CudaGraphDecoder:
             return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
         for k in range(self.n_steps - 1):
             step_index = k + 1  # text token index at this decode step
-            audio_step = step_index - 1  # audio lags text by one position
+            # Match ``stream_generate``: the k-th decode step samples audio
+            # from layer k (i.e. audio_start = step_index - 0). Eager writes
+            # audio starting at the first decode step, so we must too --
+            # audio_step == step_index here would drop one audio frame
+            # relative to eager, breaking _should_stop parity.
+            audio_step = step_index
             g, inp, out, bridge = self.steps[k]
             try:
                 inp.copy_(_build_omni_input(next_token, self.audio_pad))

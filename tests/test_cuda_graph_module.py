@@ -134,6 +134,40 @@ def test_decoder_resets_request_local_stop_state() -> None:
     assert decoder._text_finished is False
 
 
+def test_run_generate_syncs_graph_sampling_params(monkeypatch) -> None:
+    """The graph decoder must use the caller's eager-equivalent sampling knobs."""
+    from nanovllm_omni.models.minimind_omni import thinker as th
+
+    class Decoder:
+        temperature = None
+        top_p = None
+
+        def generate_tokens(self, *_args, **_kwargs):
+            return [1], [[2] for _ in range(8)]
+
+    decoder = Decoder()
+    monkeypatch.setattr(cg, "enable_cuda_graph", lambda *_args, **_kwargs: decoder)
+    model = types.SimpleNamespace(
+        forward=object(),
+        audio_pad_token=1,
+        audio_stop_token=2,
+        audio_spk_token=3,
+    )
+    frames = th.run_generate(
+        model,
+        torch.tensor([[1]]),
+        max_new_tokens=1,
+        temperature=0.7,
+        top_p=0.8,
+        eos_token_id=2,
+        open_thinking=False,
+        use_thinker_cuda_graph=True,
+    )
+    assert frames == [[2] * 8]
+    assert decoder.temperature == 0.7
+    assert decoder.top_p == 0.8
+
+
 def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     """CudaGraphDecoder attaches the fixed-KV-buffer patch and its decode
     input is [1, 9, 1] (8 audio + 1 text), the shape the buffer forward
@@ -169,6 +203,7 @@ if __name__ == "__main__":
         test_patched_forward_neutralizes_host_reads_without_rebind,
         test_patched_forward_preserves_arithmetic,
         test_decoder_resets_request_local_stop_state,
+        test_run_generate_syncs_graph_sampling_params,
         test_decoder_wires_buffer_patch_and_input_shape,
     ]
     for fn in checks:

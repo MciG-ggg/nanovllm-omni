@@ -275,6 +275,8 @@ def run_generate(
 
             decoder = enable_cuda_graph(model, n_steps=max_new_tokens, eos_token_id=eos_token_id)
             if decoder is not None:
+                decoder.temperature = temperature
+                decoder.top_p = top_p
                 call_seed = seed if seed is not None else int(torch.initial_seed())
                 result = decoder.generate_tokens(
                     input_ids,

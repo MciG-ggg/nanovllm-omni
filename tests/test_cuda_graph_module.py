@@ -168,6 +168,52 @@ def test_run_generate_syncs_graph_sampling_params(monkeypatch) -> None:
     assert decoder.top_p == 0.8
 
 
+# ---------------------------------------------------------------------------
+# Capture / replay count semantics (off-by-one fix)
+# ---------------------------------------------------------------------------
+
+
+def test_capture_loop_uses_n_steps_minus_one() -> None:
+    """The capture loop must build ``n_steps - 1`` graphs, not ``n_steps``.
+
+    Prefill produces token 0 eagerly; the decode loop replays at most
+    ``n_steps - 1`` graphs (indices 0 .. n_steps-2).  Capturing ``n_steps``
+    wastes one warmup + capture + VRAM for a graph that is never replayed.
+    """
+    import inspect
+
+    src = inspect.getsource(cg.CudaGraphDecoder._capture)
+    assert (
+        "num_decode_graphs = max(self.n_steps - 1, 0)" in src
+    ), "_capture must compute num_decode_graphs = n_steps - 1"
+    assert (
+        "for _ in range(num_decode_graphs):" in src
+    ), "_capture must iterate num_decode_graphs, not n_steps"
+
+
+def test_replay_loop_uses_n_steps_minus_one() -> None:
+    """The replay loop iterates ``n_steps - 1`` to match the capture count."""
+    import inspect
+
+    src = inspect.getsource(cg.CudaGraphDecoder.generate_tokens)
+    assert "for k in range(self.n_steps - 1):" in src
+
+
+def test_position_dependent_by_design() -> None:
+    """Each graph bakes the KV write position via Python-int ``_kv_pos``
+    slicing at capture time.  This is by design: converting to a device-side
+    tensor would require a significant attention rewrite for marginal savings.
+    Verify the attention forward uses ``self._kv_pos`` as a host int."""
+    import inspect
+
+    from nanovllm_omni.optim import attention
+
+    src = inspect.getsource(attention._attention_forward_buffered)
+    # _kv_pos is used for Python slicing (host int, baked at capture)
+    assert "self._kv_pos : self._kv_pos + sequence_len" in src
+    assert "self._kv_pos += sequence_len" in src
+
+
 def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     """CudaGraphDecoder attaches the fixed-KV-buffer patch and its decode
     input is [1, 9, 1] (8 audio + 1 text), the shape the buffer forward
@@ -204,6 +250,9 @@ if __name__ == "__main__":
         test_patched_forward_preserves_arithmetic,
         test_decoder_resets_request_local_stop_state,
         test_run_generate_syncs_graph_sampling_params,
+        test_capture_loop_uses_n_steps_minus_one,
+        test_replay_loop_uses_n_steps_minus_one,
+        test_position_dependent_by_design,
         test_decoder_wires_buffer_patch_and_input_shape,
     ]
     for fn in checks:

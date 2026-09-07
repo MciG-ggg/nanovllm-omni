@@ -3,18 +3,32 @@
 Wraps the fixed-KV-buffer attention (``enable_fixed_kv_buffer``, report
 §23-§25) in a per-step CUDA Graph capture/replay loop, collapsing the
 ~8 000 per-generate `cudaLaunchKernel` calls into a handful of graph
-replays (~7.5x measured on RTX 3050, report §24).
+replays (~7.5x measured on the thinker decode primitive, RTX 3050).
 
-Protocol (locked by GPU experiments in
-`docs/perf/ncu-generate-kernels-2026-09-01.md`):
-
+Semantics
+---------
+- **``n_steps`` = ``max_new_tokens``**: the first token is produced by
+  eager prefill; the remaining ``n_steps - 1`` are decode steps, each
+  replaying one pre-captured CUDA graph.  Accordingly, ``_capture``
+  builds exactly ``n_steps - 1`` graphs (one per decode position).
 - **capture once, replay many** (§25): re-capturing per run folds
   capture-time RNG/state side effects into the loop and breaks
-  determinism. A decoder captures `n_steps` per-step graphs the first
-  time it runs, then replays them on every later call.
-- host-side multinomial sampling lives OUTSIDE the graphs (§24/§25 keep
+  determinism. A decoder captures ``n_steps - 1`` per-step graphs the
+  first time it runs, then replays them on every later call that hits
+  the same prompt length and token budget.
+- **position-dependent graphs**: each graph bakes the KV write position
+  (``_kv_pos``) via Python-int tensor slicing at capture time.  A
+  single graph cannot serve multiple decode positions because the KV
+  read range (``0 .. _kv_pos``) and write slot are frozen in the
+  captured op stream.  Making graphs position-independent would require
+  converting ``_kv_pos`` to a device-side scalar tensor and using
+  ``torch.narrow`` with a tensor index — a significant attention rewrite
+  for marginal VRAM savings (one fewer graph object per budget).  The
+  current per-position approach is standard practice (vLLM, TGI) and is
+  kept intentionally.
+- Host-side multinomial sampling lives OUTSIDE the graphs (§24/§25 keep
   sampling's RNG host-side and deterministic).
-- the two freqs host-reads in the upstream forward are the only capture
+- The two freqs host-reads in the upstream forward are the only capture
   blockers (§13/§18). This module neutralizes them by compiling a copy of
   the forward with the checks set to ``if False`` (warmup proves them dead)
   and calling that copy — it never rebinds the model class.
@@ -232,8 +246,13 @@ class CudaGraphDecoder:
         # keeps the recorded kernels' stream bindings consistent. Moving the
         # warmup INSIDE torch.cuda.graph(g) breaks capture (allocator cache
         # pollution).
+        # Prefill produces token 0; the decode loop replays at most
+        # ``n_steps - 1`` graphs (indices 0 .. n_steps-2).  Capture exactly
+        # that many — the old code captured ``n_steps`` and left the last
+        # graph unreplayed (wasted warmup + capture + VRAM).
+        num_decode_graphs = max(self.n_steps - 1, 0)
         with torch.cuda.stream(side):
-            for _ in range(self.n_steps):
+            for _ in range(num_decode_graphs):
                 inp = _build_omni_input(next_token, self.audio_pad).clone()
                 with torch.no_grad():
                     self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
@@ -454,10 +473,10 @@ def enable_cuda_graph(
 
     Defaults:
       - ``n_steps=16``: the e2e acceptance figure from report §14/§16.
-        Pass a smaller number to capture fewer per-step graphs (less
-        cold-start cost; the decoder emits at most that many decode
-        tokens -- defect B fix: stops earlier when text EOS + audio stop
-        align).
+        Pass a smaller number to capture fewer per-step graphs (the decoder
+        captures ``n_steps - 1`` graphs: prefill produces the first token,
+        then each graph handles one decode step, stops earlier when text
+        EOS + audio stop align).
       - ``max_len=None``: read ``model.config.max_position_embeddings``
         via ``enable_fixed_kv_buffer``; pass an int to override the buffer.
       - ``eos_token_id`` / ``audio_stop_token`` (default None): threaded

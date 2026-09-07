@@ -39,7 +39,7 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
         else create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
     )
     if bundle is not None:
-        bundle.use_cuda_graph = bool(getattr(deploy, "use_cuda_graph", True))
+        bundle.use_thinker_cuda_graph = bool(getattr(deploy, "use_thinker_cuda_graph", True))
 
     return _full_thinker_stage(bundle, deploy)
 
@@ -199,7 +199,7 @@ def run_generate(
     open_thinking: bool,
     audio_inputs: Any = None,
     audio_lens: Any = None,
-    use_cuda_graph: bool = False,
+    use_thinker_cuda_graph: bool = False,
     seed: int | None = None,
     capture_bridge_states: bool = False,
     bridge_state_callback: Callable[[Any], None] | None = None,
@@ -213,7 +213,7 @@ def run_generate(
     ``audio_inputs`` / ``audio_lens`` (when set) ride through to the batched
     runner's prefill so the thinker sees user speech (engine-native audio in).
 
-    ``use_cuda_graph=True`` (opt-in, default off) routes text+audio decode
+    ``use_thinker_cuda_graph=True`` (opt-in, default off) routes text+audio decode
     through the CUDA-Graph fixed-KV-buffer decoder (``optim.cuda_graph``);
     returns the same list-of-8-token frames. Falls back to eager
     ``stream_generate`` when CUDA is unavailable or the model isn't
@@ -233,7 +233,7 @@ def run_generate(
         frames: list[list[int]] = []
         # Graph path rejects post-EOS mode.
         if (
-            use_cuda_graph
+            use_thinker_cuda_graph
             and post_eos_padding_count == 0
             and all(
                 hasattr(model, name)
@@ -310,7 +310,7 @@ def generate_audio(
     audio_inputs: Any = None,
     audio_lens: Any = None,
     audio_markers: int = 0,
-    use_cuda_graph: bool | None = None,
+    use_thinker_cuda_graph: bool | None = None,
 ) -> AudioPayload:
     """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``.
 
@@ -318,14 +318,14 @@ def generate_audio(
     harness. The four helper calls happen inside a single ``no_grad`` block
     so CUDA memory peaks are not doubled by intermediate allocations.
 
-    ``use_cuda_graph`` (default None) routes decode through the CUDA-Graph
-    fixed-KV-buffer decoder. None resolves from ``bundle.use_cuda_graph``
+    ``use_thinker_cuda_graph`` (default None) routes decode through the CUDA-Graph
+    fixed-KV-buffer decoder. None resolves from ``bundle.use_thinker_cuda_graph``
     (set by the deploy layer, deploy/minimind_omni.yaml), else False.
     """
     import torch
 
-    if use_cuda_graph is None:
-        use_cuda_graph = bool(getattr(bundle, "use_cuda_graph", False))
+    if use_thinker_cuda_graph is None:
+        use_thinker_cuda_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
 
     from .code2wav import decode_audio, encode_wav
 
@@ -351,7 +351,7 @@ def generate_audio(
             open_thinking=open_thinking,
             audio_inputs=audio_inputs,
             audio_lens=audio_lens,
-            use_cuda_graph=use_cuda_graph,
+            use_thinker_cuda_graph=use_thinker_cuda_graph,
         )
         if not frames:
             return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)

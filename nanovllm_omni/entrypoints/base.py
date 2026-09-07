@@ -265,9 +265,9 @@ class OmniBase:
                 **kwargs,
             )
             try:
-                self._bundle.use_cuda_graph = self._resolve_deploy().use_cuda_graph
+                self._bundle.use_thinker_cuda_graph = self._resolve_deploy().use_thinker_cuda_graph
             except Exception:
                 # deploy not resolvable -> keep eager default (generate_audio
-                # reads bundle.use_cuda_graph or False)
-                self._bundle.use_cuda_graph = False
+                # reads bundle.use_thinker_cuda_graph or False)
+                self._bundle.use_thinker_cuda_graph = False
         return self._bundle

@@ -56,7 +56,7 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
-        "use_cuda_graph": args.use_cuda_graph,
+        "use_thinker_cuda_graph": args.use_thinker_cuda_graph,
         "seed": args.seed,
     }
 
@@ -84,7 +84,7 @@ def cmd_time(args: argparse.Namespace) -> int:
         from nanovllm_omni.optim.bench.runner import run_n_full
 
         kwargs = _kwargs(args)
-        kwargs.pop("use_cuda_graph", None)  # full E2E has no graph opt-in
+        kwargs.pop("use_thinker_cuda_graph", None)  # full E2E has no graph opt-in
         kwargs.pop("open_thinking", None)  # Omni.generate has no open-thinking switch
         omni = Omni(
             model=args.model,
@@ -115,7 +115,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     """Length matrix: prompts x {--lengths} budget sweep (defect B verification).
 
     Each cell runs ``run_n(bundle, prompt, n=args.runs, warmup=args.warmup,
-    max_tokens=L, use_cuda_graph=args.use_cuda_graph)`` and reports the
+    max_tokens=L, use_thinker_cuda_graph=args.use_thinker_cuda_graph)`` and reports the
     median frames + generate_ms. Emits a markdown table; defect B fix is
     visible here as ``frames < L`` once content terminates naturally.
     """
@@ -313,10 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--open-thinking", action="store_true", help="Pass open_thinking=True to model.generate"
     )
     common.add_argument(
-        "--use-cuda-graph",
+        "--use-thinker-cuda-graph",
         action="store_true",
-        help="Route decode through the CUDA-Graph fast path (run_generate "
-        "use_cuda_graph=True; opt-in, CUDA-only).",
+        help="Route decode through the thinker CUDA-Graph fast path "
+        "(run_generate use_thinker_cuda_graph=True; opt-in, CUDA-only).",
     )
     common.add_argument(
         "--pipeline",

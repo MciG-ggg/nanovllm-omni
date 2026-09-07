@@ -8,7 +8,7 @@ Tests the user-facing Python seam (not just the model-level run_generate):
 
 Verifies:
   A. Each prompt produces a valid OmniRequestOutput with decodable WAV
-  B. The deploy.use_cuda_graph=True (yaml default) is honored through
+  B. The deploy.use_thinker_cuda_graph=True (yaml default) is honored through
      Omni.generate (covered by test_deploy_default_cuda_graph.py contract
      test for the propagation; here we test the actual decode path runs)
   C. Cross-prompt: same prompt produces IDENTICAL WAV MD5 before and after
@@ -48,7 +48,7 @@ def _wav_md5(out) -> str:
 
 
 def main() -> int:
-    print("Loading Omni() with deploy.use_cuda_graph=True (yaml default)...", flush=True)
+    print("Loading Omni() with deploy.use_thinker_cuda_graph=True (yaml default)...", flush=True)
     omni = Omni(MODEL, mimi=MIMI)
     sp = SamplingParams(temperature=0.75, top_p=0.9, max_tokens=16)
 

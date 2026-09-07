@@ -9,7 +9,7 @@ one process:
   - load bundle + enable_cuda_graph ONCE (decoder cached on model._nanovllm_graph_decoder,
     capture happens once)
   - fire 20 heterogeneous prompts from BENCH_PROMPTS through
-    run_generate(use_cuda_graph=True) — reusing the SAME model+buffers
+    run_generate(use_thinker_cuda_graph=True) — reusing the SAME model+buffers
   - interleave a CONTROL prompt (same text) at i=0,5,10,15,19 and require
     its frames to be IDENTICAL (no buffer-state leak / RNG drift over time)
   - track torch.cuda.memory_allocated growth (unbounded growth = leak)
@@ -69,7 +69,7 @@ def main() -> int:
             top_p=0.9,
             eos_token_id=eos,
             open_thinking=False,
-            use_cuda_graph=True,
+            use_thinker_cuda_graph=True,
         )
         torch.cuda.synchronize()
         vram_pts.append(torch.cuda.memory_allocated())

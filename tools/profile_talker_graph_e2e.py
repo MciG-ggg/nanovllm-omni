@@ -60,7 +60,7 @@ def _write_deploy(use_talker_graph: bool, path: Path, max_tokens: int) -> None:
     pad = 128 if max_tokens >= 128 else max_tokens
     path.write_text(
         f"max_batch: 1\n"
-        f"use_cuda_graph: false\n"
+        f"use_thinker_cuda_graph: false\n"
         f"use_talker_cuda_graph: {str(use_talker_graph).lower()}\n"
         f"post_eos_padding_count: {pad}\n"
         f"internal_stop_token_id: 17\n"

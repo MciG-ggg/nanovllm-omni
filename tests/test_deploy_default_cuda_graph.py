@@ -5,14 +5,14 @@ determinism + robustness verified. Deploying it by default is a runtime
 knob (AGENTS.md: runtime knobs belong in deploy/*.yaml, not pipeline
 code), so:
 
-- `DeployConfig.use_cuda_graph` defaults True and `load_deploy_config`
-  reads `use_cuda_graph` from the YAML.
+- `DeployConfig.use_thinker_cuda_graph` defaults True and `load_deploy_config`
+  reads `use_thinker_cuda_graph` from the YAML.
 - `minimind_omni.yaml` sets it true (deploy default ON).
-- `generate_audio(use_cuda_graph=None)` resolves from
-  `bundle.use_cuda_graph` (set by the deploy layer), else False — the
+- `generate_audio(use_thinker_cuda_graph=None)` resolves from
+  `bundle.use_thinker_cuda_graph` (set by the deploy layer), else False — the
   *library* call default stays eager (no silent public-API behavior break;
   §27/§40 parity boundary).
-- `run_generate(use_cuda_graph=False)` default unchanged.
+- `run_generate(use_thinker_cuda_graph=False)` default unchanged.
 
 A future change that makes the Python API default flip silently (breaking
 existing callers' audio bytes) fails here.
@@ -43,22 +43,22 @@ MINIMIND_YAML = (
 
 def test_deploy_config_defaults_true() -> None:
     """The deploy-layer default for the graph path is ON."""
-    assert DeployConfig().use_cuda_graph is True
+    assert DeployConfig().use_thinker_cuda_graph is True
 
 
 def test_yaml_sets_true() -> None:
-    """minimind_omni.yaml carries use_cuda_graph: true (deploy default ON)."""
+    """minimind_omni.yaml carries use_thinker_cuda_graph: true (deploy default ON)."""
     assert MINIMIND_YAML.exists()
-    assert load_deploy_config(MINIMIND_YAML).use_cuda_graph is True
+    assert load_deploy_config(MINIMIND_YAML).use_thinker_cuda_graph is True
 
 
 def test_yaml_false_is_honored() -> None:
     """A deploy file can switch the graph path off; parser reads the key."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        f.write("max_batch: 1\nuse_cuda_graph: false\nstages: []\n")
+        f.write("max_batch: 1\nuse_thinker_cuda_graph: false\nstages: []\n")
         path = f.name
     try:
-        assert load_deploy_config(path).use_cuda_graph is False
+        assert load_deploy_config(path).use_thinker_cuda_graph is False
     finally:
         os.unlink(path)
 
@@ -66,7 +66,7 @@ def test_yaml_false_is_honored() -> None:
 @pytest.fixture
 def codec_and_gen_stub(monkeypatch):
     """Stub codec + run_generate so generate_audio wiring is testable
-    without GPU. Records the use_cuda_graph passed to run_generate."""
+    without GPU. Records the use_thinker_cuda_graph passed to run_generate."""
     from nanovllm_omni.models.minimind_omni import code2wav as c2w
     from nanovllm_omni.models.minimind_omni import thinker as th
 
@@ -91,9 +91,9 @@ def codec_and_gen_stub(monkeypatch):
     return state
 
 
-def _bundle(use_cuda_graph: bool = True) -> types.SimpleNamespace:
+def _bundle(use_thinker_cuda_graph: bool = True) -> types.SimpleNamespace:
     return types.SimpleNamespace(
-        use_cuda_graph=use_cuda_graph,
+        use_thinker_cuda_graph=use_thinker_cuda_graph,
         device="cpu",
         mimi=object(),
         model=types.SimpleNamespace(config=types.SimpleNamespace(audio_pad_token=1)),
@@ -102,21 +102,21 @@ def _bundle(use_cuda_graph: bool = True) -> types.SimpleNamespace:
 
 
 def test_generate_audio_none_resolves_from_bundle(codec_and_gen_stub) -> None:
-    """use_cuda_graph=None must resolve from bundle.use_cuda_graph (deploy
+    """use_thinker_cuda_graph=None must resolve from bundle.use_thinker_cuda_graph (deploy
     ON), not silently default to False."""
     from nanovllm_omni.models.minimind_omni import thinker as th
 
-    out = th.generate_audio(_bundle(True), "hi", use_cuda_graph=None)
+    out = th.generate_audio(_bundle(True), "hi", use_thinker_cuda_graph=None)
     assert out is not None
-    assert codec_and_gen_stub.get("use_cuda_graph") is True
+    assert codec_and_gen_stub.get("use_thinker_cuda_graph") is True
 
 
 def test_generate_audio_explicit_false_wins(codec_and_gen_stub) -> None:
-    """An explicit use_cuda_graph=False must beat the bundle flag."""
+    """An explicit use_thinker_cuda_graph=False must beat the bundle flag."""
     from nanovllm_omni.models.minimind_omni import thinker as th
 
-    th.generate_audio(_bundle(True), "hi", use_cuda_graph=False)
-    assert codec_and_gen_stub.get("use_cuda_graph") is False
+    th.generate_audio(_bundle(True), "hi", use_thinker_cuda_graph=False)
+    assert codec_and_gen_stub.get("use_thinker_cuda_graph") is False
 
 
 def test_generate_audio_bundle_missing_flag_stays_false(codec_and_gen_stub) -> None:
@@ -124,9 +124,9 @@ def test_generate_audio_bundle_missing_flag_stays_false(codec_and_gen_stub) -> N
     from nanovllm_omni.models.minimind_omni import thinker as th
 
     b = _bundle()
-    del b.use_cuda_graph
-    th.generate_audio(b, "hi", use_cuda_graph=None)
-    assert codec_and_gen_stub.get("use_cuda_graph") is False
+    del b.use_thinker_cuda_graph
+    th.generate_audio(b, "hi", use_thinker_cuda_graph=None)
+    assert codec_and_gen_stub.get("use_thinker_cuda_graph") is False
 
 
 def test_run_generate_default_stays_false() -> None:
@@ -134,30 +134,30 @@ def test_run_generate_default_stays_false() -> None:
     public-API behavior break)."""
     from nanovllm_omni.models.minimind_omni import thinker as th
 
-    assert inspect.signature(th.run_generate).parameters["use_cuda_graph"].default is False
+    assert inspect.signature(th.run_generate).parameters["use_thinker_cuda_graph"].default is False
 
 
 def test_thinker_stage_attaches_deploy_flag() -> None:
-    """The pipeline stage must attach deploy.use_cuda_graph to its bundle so
+    """The pipeline stage must attach deploy.use_thinker_cuda_graph to its bundle so
     the served path (runner->stage->generate_audio(None)) honors the yaml
     default. This pins the real-gap fix: before it, the stage bundle never
-    carried use_cuda_graph, so serving stayed eager despite yaml: true."""
+    carried use_thinker_cuda_graph, so serving stayed eager despite yaml: true."""
     import types
 
     from nanovllm_omni.models.minimind_omni import thinker as th
 
-    deploy_on = types.SimpleNamespace(use_cuda_graph=True)
-    deploy_off = types.SimpleNamespace(use_cuda_graph=False)
-    deploy_missing = types.SimpleNamespace()  # no use_cuda_graph -> default True
+    deploy_on = types.SimpleNamespace(use_thinker_cuda_graph=True)
+    deploy_off = types.SimpleNamespace(use_thinker_cuda_graph=False)
+    deploy_missing = types.SimpleNamespace()  # no use_thinker_cuda_graph -> default True
     args = types.SimpleNamespace(
         model="m", device="cpu", trust_remote_code=True, dtype=None, extra={}
     )
     seen: list[bool | None] = []
 
     def fake_create(model_id, **_kw):
-        # every constructed bundle starts with use_cuda_graph unset; the
+        # every constructed bundle starts with use_thinker_cuda_graph unset; the
         # stage factory must attach it from deploy.
-        return types.SimpleNamespace(device="cpu", use_cuda_graph=None)
+        return types.SimpleNamespace(device="cpu", use_thinker_cuda_graph=None)
 
     orig_create = th.create_bundle
 
@@ -178,14 +178,14 @@ def test_thinker_stage_attaches_deploy_flag() -> None:
     finally:
         th.create_bundle = orig_create  # type: ignore[attr-defined]
 
-    # Source-level guard: the factory must read deploy.use_cuda_graph and
+    # Source-level guard: the factory must read deploy.use_thinker_cuda_graph and
     # assign it onto the bundle. This catches the regression (the absence
     # of the assignment) that motivated this test.
     import inspect as _i
 
     src = _i.getsource(th._thinker_stage)
-    assert 'getattr(deploy, "use_cuda_graph", True)' in src
-    assert "bundle.use_cuda_graph = " in src
+    assert 'getattr(deploy, "use_thinker_cuda_graph", True)' in src
+    assert "bundle.use_thinker_cuda_graph = " in src
 
 
 if __name__ == "__main__":

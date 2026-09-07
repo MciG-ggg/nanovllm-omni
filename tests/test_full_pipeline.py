@@ -226,7 +226,7 @@ def _write_deploy(tmp_path: Path) -> Path:
     path = tmp_path / "deploy.yaml"
     path.write_text(
         "max_batch: 1\n"
-        "use_cuda_graph: false\n"
+        "use_thinker_cuda_graph: false\n"
         "post_eos_padding_count: 128\n"
         "internal_stop_token_id: 17\n"
         "talker_max_steps_after_last_thinker_token: 192\n"

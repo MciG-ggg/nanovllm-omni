@@ -9,7 +9,7 @@
 
 - 🎯 **MiniMind-O 流水线** — 最小的 Thinker → Talker → Code2Wav 全链路运行时,加载真实的 `jingyaogong/minimind-3o` 权重
 - ⚡ **full 三阶段 E2E 在 RTX 3050 (4 GB) 上 total 中位约 0.65–1.04 s** — 一条 prompt → thinker → talker → MTP → Mimi → WAV,真 `jingyaogong/minimind-3o` + `kyutai/mimi` 权重,torch 2.14.0+cu130,2026-09 在仅 full 分支上重测。六道 bench 题各 20 次:**total 中位 628–1038 ms**(short ~0.63 s、medium ~0.75 s、system ~1.04 s),p95 ≤ 1.11 s,显存峰值 ~1881 MiB。数据与原始 CSV 见 `docs/perf/tk005-rtx3050.md` / `docs/perf/full-e2e-rtx3050.csv`。
-- 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码:同一硬件上 `--use-cuda-graph` 约 177 ms、eager 约 483 ms total 中位。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
+- 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码:同一硬件上 `--use-thinker-cuda-graph` 约 177 ms、eager 约 483 ms total 中位。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
 - 🔁 **StagePool 模式(单 replica in-process)** — per-stage 持续批处理通过 `RuntimeScheduler` 完成;多 replica + RoundRobin LB 已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
@@ -54,9 +54,49 @@
 | MiniMind-O(`minimind-3o`) | 3 (Thinker → Talker → Code2Wav) | 音频(24 kHz mono WAV) | `jingyaogong/minimind-3o` + `kyutai/mimi` |
 | SmolVLM-500M-Instruct | 1 (VLM) | 文本 | `HuggingFaceTB/SmolVLM-500M-Instruct` |
 | SD-Turbo | 1 (DIFFUSION, 1-step) | 图像(512×512 PNG) | `stabilityai/sd-turbo` |
-| SmolVLA | 1 (LLM_GENERATION) | 动作 chunk | `HuggingFaceTB/SmolVLA-256M` + LIBERO 数据集 |
+| SmolVLA | 1 (LLM_GENERATION) | 动作 chunk | `HuggingFaceVLA/smolvla_libero` + LIBERO 数据集 |
 
 四个模型全部跑在单张 4 GB 消费级卡(RTX 3050)上,一个 Python 进程。视频生成、超出所列四类的多模型流水线、完整 VLA 栈、全双工 S2S 都是当前规划、暂未实现。
+
+## Gallery
+
+四个对齐模型族在单张 RTX 3050 (4 GB) 卡上的真实输出。音频和图像用 `~/minimind-3o`、`~/mimi` 以及 HF 缓存里的本地权重 snapshot;SD-Turbo + SmolVLM 权重需预下载(`hf download …`),loader 是 offline-first 的。
+
+### MiniMind-O — 音频(24 kHz mono WAV)
+
+<audio controls src="docs/gallery/minimind_o_1.wav"></audio>
+
+本地最长的样本(~8.88 s,~386 KB)—— 由 Thinker → Talker → Code2Wav 流水线生成。4 GB 卡上请保持 `max_tokens ≤ 16`,避免 Mimi codec 前向时 OOM。代码:`examples/offline_inference/minimind_o/`。
+
+### SD-Turbo — 图像(512×512 PNG)
+
+两张样例,均 1 步扩散,`guidance_scale=0.0`:
+
+![雾中晨曦山谷,油画,8k](docs/gallery/sd_turbo_1.png)
+> `a misty mountain valley at sunrise, oil painting, 8k`
+
+![木桌上冒着蒸汽的玻璃茶壶,棚拍](docs/gallery/sd_turbo_2.png)
+> `a glass teapot with steam rising, on a wooden table, studio photo`
+
+SD-Turbo 的对抗蒸馏锁死 `guidance_scale=0.0` 与 `num_inference_steps=1`;传其他值画质会下降。代码:`examples/offline_inference/sd_turbo/`。
+
+### SmolVLM-500M-Instruct — 文本(图像 + 文本 → 文本)
+
+> **图像**:`docs/images/sd_turbo_sample.png`(512×512 PNG,由 SD-Turbo 生成 —— 就是上面那张猫图)
+>
+> **Prompt**:`What is in this image and what art style is it rendered in?`
+>
+> **回答**:
+>
+> > There is a cat in the image. The image is a photograph.
+
+500 M 参数的模型回答很短,风格问题被归成一个标签(`photograph`)而不是描述;更大的 VLM 会展开。代码:`examples/offline_inference/smolvlm/`。完整转写在 [`docs/gallery/smolvlm_0.md`](docs/gallery/smolvlm_0.md)。
+
+### SmolVLA — 动作 chunk(LIBERO 评测回放)
+
+<video controls src="docs/gallery/smolvla_0.mp4" width="480"></video>
+
+LIBERO 评测片段;LLM_GENERATION stage 输出 action chunk(`numpy.ndarray`,形状 `[chunk_size, action_dim]`)。视频是把 chunk 喂给 LIBERO 模拟器跑出来的。代码:`examples/offline_inference/smolvla/libero_eval.py`。
 
 ## 快速开始
 
@@ -106,11 +146,22 @@ engine = Omni("HuggingFaceTB/SmolVLM-500M-Instruct")
 outputs = engine.generate(["What is in this image? <image>"], SamplingParams(max_tokens=64))
 
 # 动作(SmolVLA)
-engine = Omni("HuggingFaceTB/SmolVLA-256M")
+engine = Omni("HuggingFaceVLA/smolvla_libero")
 outputs = engine.generate([{"prompt": "do the task", "image": rgb_obs}],
                           SamplingParams(max_tokens=50))
 outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 ```
+
+### 在线 Demo
+
+打包好的 Gradio UI 用四个 tab 拼四个模型族,每个 tab 首次点击时才 lazy-load `Omni(...)` 引擎:
+
+```bash
+pip install -e ".[dev,minimind,smolvla,gradio]"
+python -m nanovllm_omni.serving.app
+```
+
+4 GB 卡上,同一时刻只加载一个 tab 的模型。launcher 只依赖 `[gradio]` —— 想跑哪个 tab 就先装对应的 `[minimind]` / `[smolvla]`。
 
 ### 复现延迟数字
 

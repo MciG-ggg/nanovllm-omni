@@ -45,7 +45,7 @@ smolvla = [
 # untouched. Install alongside a model-family extra (e.g. `.[minimind,gradio]`)
 # to actually run a tab; `gradio` alone only enables the demo launcher.
 gradio = [
-    "gradio>=4.0",
+    "gradio>=5.0,<6.0",
 ]
 # Real-weight MiniMind-O path: required for
 # examples/offline_inference/minimind_o/{end2end,batched}.py and the
@@ -83,7 +83,7 @@ minimind = [
 # up if wired into default-groups. Off by default; the UI launcher is an
 # opt-in convenience.
 gradio = [
-    "gradio>=4.0",
+    "gradio>=5.0,<6.0",
 ]
 
 [project.urls]

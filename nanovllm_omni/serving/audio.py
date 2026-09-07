@@ -85,7 +85,7 @@ def register(demo: Any) -> None:
             type="filepath",
             sources=["upload"],
         )
-        max_tokens = gr.Slider(64, 1024, value=512, step=64, label="max_tokens")
+        max_tokens = gr.Slider(1, 16, value=8, step=1, label="max_tokens")
         btn = gr.Button("Synthesize", variant="primary")
         out_audio = gr.Audio(label="Output (24 kHz mono WAV)", type="filepath")
         btn.click(

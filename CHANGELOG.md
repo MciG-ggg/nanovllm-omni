@@ -20,7 +20,7 @@ First public pre-release.
     text/VLM.
   - **SD-Turbo** (`stabilityai/sd-turbo`): 1-step image generation,
     512 × 512 PNG.
-  - **SmolVLA-256M** (`HuggingFaceTB/SmolVLA-256M`): action-chunk policy
+  - **SmolVLA** (`HuggingFaceVLA/smolvla_libero`): action-chunk policy
     on LIBERO datasets.
 - Unified `OmniRequestOutput` envelope across audio / image / text /
   action modalities, plus a matching JSON shape for
@@ -31,12 +31,11 @@ First public pre-release.
   `OmniRequestOutput`, `PipelineConfig`, `DeployConfig`,
   `register_pipeline`, `resolve_pipeline_config`, `load_deploy_config`,
   `merge_pipeline_deploy`.
-- StagePool pattern with `num_replicas ≥ 2` and RoundRobin load
-  balancing.
-- Per-stage continuous batching (TK-004) and per-stage replica + LB
-  (TK-007) implemented as in-process data structures
-  (`nanovllm_omni/engine/runtime_scheduler.py`,
-  `nanovllm_omni/engine/load_balancer.py`), not as subprocess pools.
+- StagePool pattern: per-stage continuous batching (TK-004) implemented
+  in-process via `nanovllm_omni/engine/runtime_scheduler.py`, single
+  replica only. Multi-replica + RoundRobin load balancing (TK-007) was
+  removed after measuring `num_replicas=1 == num_replicas=2`
+  (`tests/test_batched_runner_contract.py`).
 - Fused QKV / gate-up projections, fused RMSNorm, fused RoPE,
   pre-allocated KV buffer, SDPA decode with `is_causal=True` for
   MiniMind-O on the 4 GB card.

@@ -35,12 +35,11 @@ def register(demo: Any) -> None:
         files = (message.get("files") or []) if isinstance(message, dict) else []
         if not text and not files:
             return gr.update(value=None), history or []
-        blocks: list[dict[str, Any]] = []
-        for f in files or []:
-            blocks.append({"type": "image", "path": str(f)})
+        history = list(history or [])
         if text:
-            blocks.append({"type": "text", "text": text})
-        history = list(history or []) + [{"role": "user", "content": blocks}]
+            history.append({"role": "user", "content": text})
+        for file_path in files:
+            history.append({"role": "user", "content": {"path": str(file_path)}})
         return gr.update(value=None), history
 
     def _bot_reply(
@@ -56,19 +55,22 @@ def register(demo: Any) -> None:
         from nanovllm_omni import SamplingParams  # noqa: PLC0415 -- lazy
 
         engine, mid = _ensure(state_val, model_id)
-        last = history[-1]
-        content = last.get("content", "")
-        text: str = ""
+        text = ""
         files: list[str] = []
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text = str(block.get("text", "") or "")
-                    elif block.get("type") == "image" and block.get("path"):
-                        files.append(str(block["path"]))
-        elif isinstance(content, str):
-            text = content
+        recent_messages: list[dict[str, Any]] = []
+        for message in reversed(history):
+            if message.get("role") == "assistant":
+                break
+            if message.get("role") == "user":
+                recent_messages.append(message)
+        for message in reversed(recent_messages):
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, dict):
+                file_data = content.get("file")
+                if isinstance(file_data, dict) and file_data.get("path"):
+                    files.append(str(file_data["path"]))
         images: list[Any] = []
         for f in files:
             with contextlib.suppress(Exception):

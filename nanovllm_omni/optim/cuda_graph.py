@@ -175,7 +175,15 @@ class CudaGraphDecoder:
         """Run production-shape prefill and return the last text-row logits.
         Fact #3: prefill with the [1, 9, seq] input (audio pads + text) so
         the KV state matches stream_generate's; token0 is sampled from the
-        text row's logits."""
+        text row's logits.
+
+        Always zero the KV buffer first: a fresh prompt must not inherit
+        stale K/V from a previous request at the same buffer addresses
+        (otherwise the new prefill's logits diverge as soon as a layer reads
+        past the freshly-written slot range). The in-place zero keeps the
+        graph-captured tensor addresses stable.
+        """
+        self._zero_kv_contents()
         self._prefill_len = input_ids.shape[1]
         self._last_input_ids = input_ids
         self._reset_pos()

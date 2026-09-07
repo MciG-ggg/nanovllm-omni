@@ -69,7 +69,6 @@ class PipelineRunner:
             "max_num_batched_tokens",
             "max_num_seqs",
             "gpu_memory_utilization",
-            "enforce_eager",
             "device",
         ):
             value = getattr(stage_deploy, field_name)

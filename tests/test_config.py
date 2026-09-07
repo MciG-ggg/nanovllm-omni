@@ -21,8 +21,7 @@ from tests import _stage_factories as fac
 
 
 def test_engine_args_accepts_deploy_kwargs():
-    args = OmniEngineArgs(enforce_eager=True, gpu_memory_utilization=0.8, max_num_seqs=4)
-    assert args.enforce_eager is True
+    args = OmniEngineArgs(gpu_memory_utilization=0.8, max_num_seqs=4)
     assert args.gpu_memory_utilization == 0.8
     assert args.max_num_seqs == 4
 
@@ -81,7 +80,6 @@ def test_deploy_config_parses_stage_resources_and_unknown_sampling_keys(tmp_path
         "    max_num_batched_tokens: '512'\n"
         "    max_num_seqs: '2'\n"
         "    gpu_memory_utilization: '0.6'\n"
-        "    enforce_eager: 'true'\n"
         "    device: cpu\n"
         "    devices: [cpu, cpu]\n"
         "    default_sampling_params: {temperature: 0.7, custom_key: keep}\n",
@@ -91,7 +89,6 @@ def test_deploy_config_parses_stage_resources_and_unknown_sampling_keys(tmp_path
     assert stage.max_num_batched_tokens == 512
     assert stage.max_num_seqs == 2
     assert stage.gpu_memory_utilization == 0.6
-    assert stage.enforce_eager is True
     assert stage.device == "cpu"
     assert stage.devices == ("cpu", "cpu")
     assert stage.default_sampling_params["custom_key"] == "keep"

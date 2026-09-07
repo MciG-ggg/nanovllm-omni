@@ -157,7 +157,6 @@ class DeployStageConfig:
     max_num_batched_tokens: int | None = None
     max_num_seqs: int | None = None
     gpu_memory_utilization: float | None = None
-    enforce_eager: bool | None = None
     device: str | None = None
     devices: str | tuple[str, ...] | None = None
 
@@ -175,8 +174,6 @@ class DeployStageConfig:
                 "gpu_memory_utilization must be a number in (0, 1], "
                 f"got {self.gpu_memory_utilization!r}"
             )
-        if self.enforce_eager is not None and not isinstance(self.enforce_eager, bool):
-            raise ValueError(f"enforce_eager must be a boolean, got {self.enforce_eager!r}")
         if self.device is not None and not isinstance(self.device, str):
             raise ValueError(f"device must be a string or null, got {self.device!r}")
         if self.devices is not None and not isinstance(self.devices, (str, tuple)):
@@ -367,7 +364,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
                 max_num_batched_tokens=_parse_optional_int(s, "max_num_batched_tokens"),
                 max_num_seqs=_parse_optional_int(s, "max_num_seqs"),
                 gpu_memory_utilization=_parse_optional_float(s, "gpu_memory_utilization"),
-                enforce_eager=_parse_optional_bool(s, "enforce_eager"),
                 device=s.get("device"),
                 devices=_parse_devices(s),
             )

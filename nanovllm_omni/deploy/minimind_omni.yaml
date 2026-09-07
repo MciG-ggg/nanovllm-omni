@@ -15,7 +15,6 @@ stages:
     max_num_batched_tokens: 512
     max_num_seqs: 1
     gpu_memory_utilization: 0.6
-    enforce_eager: false
     default_sampling_params:
       temperature: 0.7
       max_tokens: 512
@@ -23,7 +22,6 @@ stages:
     max_num_batched_tokens: 256
     max_num_seqs: 1
     gpu_memory_utilization: 0.2
-    enforce_eager: false
     default_sampling_params:
       temperature: 0.2
       watchdog_limit: 192
@@ -31,5 +29,4 @@ stages:
     max_num_batched_tokens: 64
     max_num_seqs: 1
     gpu_memory_utilization: 0.1
-    enforce_eager: true
     default_sampling_params: {}

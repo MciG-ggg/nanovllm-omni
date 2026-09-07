@@ -72,7 +72,6 @@ def _write_deploy(use_talker_graph: bool, path: Path, max_tokens: int) -> None:
         f"  - name: talker\n"
         f"    default_sampling_params: {{temperature: 0.2, watchdog_limit: 192, do_sample: false}}\n"
         f"  - name: code2wav\n"
-        f"    enforce_eager: true\n"
         f"    default_sampling_params: {{}}\n",
         encoding="utf-8",
     )

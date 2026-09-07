@@ -34,8 +34,6 @@ def _load_bundle(args: argparse.Namespace):
     kwargs: dict[str, object] = {}
     if args.mimi:
         kwargs["mimi_model_id"] = args.mimi
-    if getattr(args, "enforce_eager", False):
-        kwargs["enforce_eager"] = True
     bundle = create_bundle(model_id=args.model, device=args.device, **kwargs)
     return bundle
 
@@ -89,11 +87,6 @@ def _run_all(
 
 
 def cmd_time(args: argparse.Namespace) -> int:
-    if args.pipeline == "full" and args.use_thinker_cuda_graph is True:
-        raise SystemExit(
-            "full E2E thinker CUDA Graph is unavailable: it does not preserve "
-            "the required post-EOS bridge-state contract"
-        )
     prompts = _resolve_prompts(args.prompts)
 
     if args.pipeline == "full":
@@ -111,7 +104,6 @@ def cmd_time(args: argparse.Namespace) -> int:
             device=device,
             dtype="float16" if device.startswith("cuda") else "float32",
             trust_remote_code=True,
-            enforce_eager=bool(getattr(args, "enforce_eager", False)),
             pipeline="minimind_o",
             **_graph_overrides(args),
         )
@@ -135,7 +127,7 @@ def cmd_time(args: argparse.Namespace) -> int:
 
 
 def cmd_sweep_graphs(args: argparse.Namespace) -> int:
-    """Run fusion x CUDA-Graph cells in isolated processes."""
+    """Run CUDA-Graph cells in isolated processes."""
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_cells = (
@@ -145,47 +137,43 @@ def cmd_sweep_graphs(args: argparse.Namespace) -> int:
         ("both", True, True),
     )
     failed: list[str] = []
-    for eager in (True, False):
-        fusion = "off" if eager else "on"
-        for graph, thinker_graph, talker_graph in graph_cells:
-            out = out_dir / f"fusion-{fusion}-graph-{graph}.csv"
-            command = [
-                sys.executable,
-                "-m",
-                "nanovllm_omni.optim.bench",
-                "time",
-                "--pipeline",
-                "full",
-                "--model",
-                args.model,
-                "--max-tokens",
-                str(args.max_tokens),
-                "--temperature",
-                str(args.temperature),
-                "--top-p",
-                str(args.top_p),
-                "--seed",
-                str(args.seed),
-                "--runs",
-                str(args.runs),
-                "--warmup",
-                str(args.warmup),
-                "--out",
-                str(out),
-                "--use-thinker-cuda-graph" if thinker_graph else "--no-use-thinker-cuda-graph",
-                "--use-talker-cuda-graph" if talker_graph else "--no-use-talker-cuda-graph",
-            ]
-            if args.device:
-                command.extend(("--device", args.device))
-            if args.mimi:
-                command.extend(("--mimi", args.mimi))
-            if args.prompts:
-                command.extend(("--prompts", args.prompts))
-            if eager:
-                command.append("--enforce-eager")
-            print(f"running fusion={fusion}, graph={graph}: {' '.join(command)}")
-            if subprocess.run(command).returncode:
-                failed.append(f"fusion={fusion}, graph={graph}")
+    for graph, thinker_graph, talker_graph in graph_cells:
+        out = out_dir / f"graph-{graph}.csv"
+        command = [
+            sys.executable,
+            "-m",
+            "nanovllm_omni.optim.bench",
+            "time",
+            "--pipeline",
+            "full",
+            "--model",
+            args.model,
+            "--max-tokens",
+            str(args.max_tokens),
+            "--temperature",
+            str(args.temperature),
+            "--top-p",
+            str(args.top_p),
+            "--seed",
+            str(args.seed),
+            "--runs",
+            str(args.runs),
+            "--warmup",
+            str(args.warmup),
+            "--out",
+            str(out),
+            "--use-thinker-cuda-graph" if thinker_graph else "--no-use-thinker-cuda-graph",
+            "--use-talker-cuda-graph" if talker_graph else "--no-use-talker-cuda-graph",
+        ]
+        if args.device:
+            command.extend(("--device", args.device))
+        if args.mimi:
+            command.extend(("--mimi", args.mimi))
+        if args.prompts:
+            command.extend(("--prompts", args.prompts))
+        print(f"running graph={graph}: {' '.join(command)}")
+        if subprocess.run(command).returncode:
+            failed.append(f"graph={graph}")
     if failed:
         print(f"failed cells: {', '.join(failed)}", file=sys.stderr)
         return 1
@@ -404,14 +392,6 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Override the deploy setting for talker CUDA Graph (default: use deploy YAML).",
-    )
-    common.add_argument(
-        "--enforce-eager",
-        action="store_true",
-        help="Skip the four attention fusion monkey-patches (SDPA decode, "
-        "fused QKV/gate-up, fused RMSNorm, fused RoPE). Used by the bench "
-        "harness to measure an apples-to-apples baseline. CUDA Graph is "
-        "gated independently by --use-thinker-cuda-graph.",
     )
     common.add_argument(
         "--pipeline",

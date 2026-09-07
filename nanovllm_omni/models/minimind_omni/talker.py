@@ -53,8 +53,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
     the inner module's ``layers`` / ``norm`` / ``lm_head`` / ``embed_tokens``
     / ``codec_proj`` / ``embed_proj`` / ``text_scale`` / ``audio_scale`` /
     ``spk_proj`` so checkpoint loading via :meth:`load_weights` writes
-    into the right buffers and the fused-projection patch in
-    ``attention.enable_fused_projections`` still takes effect.
+    into the right buffers.
     """
 
     # HF checkpoint prefix mapping: HF stores everything under
@@ -155,8 +154,8 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         # Re-expose inner-module attributes so callers reaching
         # ``talker.layers`` / ``talker.lm_head`` keep working without a
         # wrapper-aware rewrite. Inner module is the source of truth --
-        # parameter fusion in ``attention.enable_fused_projections``
-        # mutates these same attributes in place.
+        # any future runtime patch that mutates these same attributes
+        # in place propagates through this shared reference.
         self.layers = hf_talker.layers
         self.norm = hf_talker.norm
         self.lm_head = hf_talker.lm_head
@@ -1048,7 +1047,6 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
                 device=args.device,
                 trust_remote_code=getattr(args, "trust_remote_code", True),
                 dtype=getattr(args, "dtype", None),
-                enforce_eager=bool(getattr(args, "enforce_eager", False)),
             )
             talker = wrap_talker(bundle)
         stage_cache["talker"] = talker

@@ -42,7 +42,11 @@ class SamplingParams:
 @dataclass
 class OmniEngineArgs:
     model: str | None = None
-    enforce_eager: bool = False
+    # NOTE: ``enforce_eager`` was removed (the four attention fusion
+    # monkey-patches it gated are gone; see ``optim/attention.py``). The
+    # flag is intentionally absent from this dataclass so an Omni()
+    # caller passing ``enforce_eager=...`` now raises TypeError instead
+    # of silently being ignored.
     gpu_memory_utilization: float = 0.9
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None
@@ -59,6 +63,15 @@ class OmniEngineArgs:
     def __init__(self, model: str | None = None, **kwargs: Any):
         self.model = model
         self.extra = dict(kwargs.pop("extra", None) or {})
+        # ``enforce_eager`` was removed (the fusion patches it gated are
+        # gone). Surface the deletion loudly so a caller still passing it
+        # sees TypeError instead of a silently-ignored kwarg.
+        if "enforce_eager" in kwargs:
+            raise TypeError(
+                "OmniEngineArgs no longer accepts 'enforce_eager' — the "
+                "attention fusion monkey-patches it gated were removed "
+                "(see nanovllm_omni/optim/attention.py). Drop the kwarg."
+            )
         # Iterate dataclass fields instead of maintaining a parallel set:
         # adding a new typed field to the class now picks it up here automatically.
         for f in dataclasses.fields(self):

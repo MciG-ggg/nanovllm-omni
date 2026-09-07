@@ -182,6 +182,23 @@ def _pad_audio_codes(num_layers: int = 8, num_steps: int = 3) -> list[list[int]]
     return [[2051] * num_steps for _ in range(num_layers)]
 
 
+def test_decoder_post_eos_state_machine_matches_eager_tokens() -> None:
+    """Graph emits enter, PADs, then internal-stop after text EOS."""
+    dec = _make_decoder()
+    dec.model.enter_token_id = 201
+    dec.model.pad_token_id = 0
+    dec._reset_request_state(post_eos_padding_count=2, internal_stop_token_id=17)
+    codes = _pad_audio_codes(num_steps=1)
+
+    assert dec._should_stop(dec.eos_token_id, codes) is False
+    assert dec._next_post_eos_token() == 201
+    assert dec._should_stop(42, codes) is False
+    assert dec._next_post_eos_token() == 0
+    assert dec._next_post_eos_token() == 0
+    assert dec._next_post_eos_token() == 17
+    assert dec._should_stop(17, codes) is True
+
+
 def test_stop_initial_state_does_not_stop() -> None:
     """A token that is neither EOS nor has audio_stop on layer 7 must not
     stop; flag must stay False."""

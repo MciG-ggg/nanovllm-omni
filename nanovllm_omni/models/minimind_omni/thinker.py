@@ -29,7 +29,6 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
         "dtype": getattr(args, "dtype", None),
-        "enforce_eager": bool(getattr(args, "enforce_eager", False)),
     }
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id
@@ -62,7 +61,6 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
 
         import torch
 
-        from .generation import stream_generate
         from .stage_processors import ThinkerStageOutput
 
         if isinstance(payload, str):
@@ -86,6 +84,13 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
         )
         request_id = f"mmo-full-{uuid.uuid4().hex[:12]}"
+        # ``use_thinker_cuda_graph`` is attached to the bundle by the
+        # stage factory from ``deploy.use_thinker_cuda_graph`` (see
+        # ``_thinker_stage``). When True, route through ``run_generate``
+        # so the graph decoder's main decode engages on GPU, including the
+        # post-EOS state machine. When False, run ``stream_generate`` directly
+        # (the historical eager path).
+        use_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
         with torch.no_grad():
             input_ids = tokenize_for_generate(
                 bundle.tokenizer,
@@ -95,34 +100,60 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             ).to(bundle.device)
             captured_bridge: list[torch.Tensor] = []
             output_tokens: list[int] = []
-            stream = stream_generate(
-                bundle.model,
-                input_ids,
-                eos_token_id=eos_token_id,
-                max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
-                temperature=float(sampling.temperature) if sampling is not None else 0.7,
-                top_p=float(sampling.top_p) if sampling is not None else 0.9,
-                open_thinking=bool(extra.get("open_thinking", False)),
-                capture_bridge_states=True,
-                bridge_state_callback=captured_bridge.append,
-                post_eos_padding_count=post_eos_padding_count,
-                internal_stop_token_id=internal_stop_token_id,
-            )
-            # ``stream_generate`` yields a growing prefix each step. The
-            # original code rebuilt the whole Python int list (and forced
-            # a host sync) every iteration. Defer the single
-            # ``detach().cpu().tolist()`` until after the stream so the
-            # per-step host sync disappears. Audio numerics are unchanged
-            # because the final prefix is identical to the last yielded
-            # ``text_chunk``.
-            final_text_chunk: Any = None
-            for text_chunk, _audio_frame in stream:
-                if text_chunk is not None:
-                    final_text_chunk = text_chunk
-            if final_text_chunk is not None:
-                output_tokens = [
-                    int(token) for token in final_text_chunk.detach().cpu().reshape(-1).tolist()
-                ]
+            if use_graph:
+                # Graph path: ``run_generate`` owns the complete decode,
+                # including enter/PAD/internal-stop post-EOS handling.
+                frames = run_generate(
+                    bundle.model,
+                    input_ids,
+                    eos_token_id=eos_token_id,
+                    max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
+                    temperature=float(sampling.temperature) if sampling is not None else 0.7,
+                    top_p=float(sampling.top_p) if sampling is not None else 0.9,
+                    open_thinking=bool(extra.get("open_thinking", False)),
+                    use_thinker_cuda_graph=True,
+                    capture_bridge_states=True,
+                    bridge_state_callback=captured_bridge.append,
+                    text_token_callback=lambda tokens: output_tokens.__setitem__(
+                        slice(None), tokens
+                    ),
+                    post_eos_padding_count=post_eos_padding_count,
+                    internal_stop_token_id=internal_stop_token_id,
+                )
+                # Frames are not consumed by full mode (talker drives audio);
+                # consume the generator's return so the stream fully drains.
+                del frames
+            else:
+                # Eager path: ``stream_generate`` yields (text, audio) per
+                # step. The original code rebuilt the whole Python int list
+                # (and forced a host sync) every iteration; defer the
+                # single ``detach().cpu().tolist()`` until after the stream
+                # so the per-step host sync disappears. Audio numerics are
+                # unchanged because the final prefix is identical to the
+                # last yielded ``text_chunk``.
+                from .generation import stream_generate
+
+                stream = stream_generate(
+                    bundle.model,
+                    input_ids,
+                    eos_token_id=eos_token_id,
+                    max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
+                    temperature=float(sampling.temperature) if sampling is not None else 0.7,
+                    top_p=float(sampling.top_p) if sampling is not None else 0.9,
+                    open_thinking=bool(extra.get("open_thinking", False)),
+                    capture_bridge_states=True,
+                    bridge_state_callback=captured_bridge.append,
+                    post_eos_padding_count=post_eos_padding_count,
+                    internal_stop_token_id=internal_stop_token_id,
+                )
+                final_text_chunk: Any = None
+                for text_chunk, _audio_frame in stream:
+                    if text_chunk is not None:
+                        final_text_chunk = text_chunk
+                if final_text_chunk is not None:
+                    output_tokens = [
+                        int(token) for token in final_text_chunk.detach().cpu().reshape(-1).tolist()
+                    ]
         bridge = (
             captured_bridge[0]
             if captured_bridge and captured_bridge[0].numel() > 0
@@ -245,42 +276,48 @@ def run_generate(
 
     with stage("generate"):
         frames: list[list[int]] = []
-        # Graph path rejects post-EOS mode.
-        if (
-            use_thinker_cuda_graph
-            and post_eos_padding_count == 0
-            and all(
-                hasattr(model, name)
-                for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
-            )
+        # Graph fast path: joint text+audio decode, frames = transpose of
+        # the 8 audio channels (Mimi codebook frames, codec-stage format).
+        # ``audio_stop_token`` falls back to ``model.audio_stop_token``
+        # inside ``enable_cuda_graph``.
+        #
+        # The graph decoder implements the eager post-EOS state machine
+        # (enter, bounded PAD tail, internal-stop), so full mode never
+        # discards graph work and restarts prefill/decode eagerly.
+        if use_thinker_cuda_graph and all(
+            hasattr(model, name)
+            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
         ):
-            # Graph fast path: joint text+audio decode, frames = transpose of
-            # the 8 audio channels (Mimi codebook frames, codec-stage format).
-            # ``audio_stop_token`` falls back to ``model.audio_stop_token``
-            # inside ``enable_cuda_graph``.
             from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
 
-            decoder = enable_cuda_graph(model, n_steps=max_new_tokens, eos_token_id=eos_token_id)
-            if decoder is not None:
-                decoder.temperature = temperature
-                decoder.top_p = top_p
+            graph_decoder = enable_cuda_graph(
+                model, n_steps=max_new_tokens, eos_token_id=eos_token_id
+            )
+            if graph_decoder is not None:
+                graph_decoder.temperature = temperature
+                graph_decoder.top_p = top_p
                 call_seed = seed if seed is not None else int(torch.initial_seed())
-                result = decoder.generate_tokens(
+                result = graph_decoder.generate_tokens(
                     input_ids,
                     seed=call_seed,
                     return_audio=True,
                     return_bridge=capture_bridge_states,
+                    post_eos_padding_count=post_eos_padding_count,
+                    internal_stop_token_id=internal_stop_token_id,
                 )
                 if capture_bridge_states:
-                    text_tokens, audio_codes, bridge = result
-                    if bridge_state_callback is not None:
-                        bridge_state_callback(bridge)
+                    graph_text_tokens, graph_audio_codes, graph_bridge = result
                 else:
-                    text_tokens, audio_codes = result
+                    graph_text_tokens, graph_audio_codes = result
+                if capture_bridge_states and bridge_state_callback is not None:
+                    bridge_state_callback(graph_bridge)
                 if text_token_callback is not None:
-                    text_token_callback(text_tokens)
-                num_frames = len(audio_codes[0])
-                frames = [[audio_codes[ch][t] for ch in range(8)] for t in range(num_frames)]
+                    text_token_callback(graph_text_tokens)
+                if graph_audio_codes is not None:
+                    num_frames = len(graph_audio_codes[0])
+                    frames = [
+                        [graph_audio_codes[ch][t] for ch in range(8)] for t in range(num_frames)
+                    ]
                 return frames
         if all(
             hasattr(model, name)

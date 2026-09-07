@@ -258,8 +258,34 @@ class CudaGraphDecoder:
         self._captured_n_steps = self.n_steps
 
     # -- programmatic API -------------------------------------------------
-    def _reset_request_state(self) -> None:
+    def _reset_request_state(
+        self,
+        *,
+        post_eos_padding_count: int = 0,
+        internal_stop_token_id: int | None = None,
+    ) -> None:
         self._text_finished = False
+        self._post_eos_padding_count = post_eos_padding_count
+        self._post_eos_started = False
+        self._post_eos_remaining = 0
+        self._internal_stop_emitted = False
+        if internal_stop_token_id is None:
+            internal_stop_token_id = getattr(
+                getattr(self, "model", None), "internal_stop_token_id", 17
+            )
+        self._internal_stop_token_id = int(internal_stop_token_id)
+
+    def _next_post_eos_token(self) -> int:
+        """Mirror ``BatchedThinkerRunner._next_post_eos_token``."""
+        if not self._post_eos_started:
+            self._post_eos_started = True
+            self._post_eos_remaining = self._post_eos_padding_count
+            return int(getattr(getattr(self, "model", None), "enter_token_id", 201))
+        if self._post_eos_remaining > 0:
+            self._post_eos_remaining -= 1
+            return int(getattr(getattr(self, "model", None), "pad_token_id", 0))
+        self._internal_stop_emitted = True
+        return self._internal_stop_token_id
 
     def _should_stop(self, tok: int, audio_codes: list[list[int]]) -> bool:
         """Defect B fix: parity with ``BatchedThinkerRunner.step_finished``.
@@ -273,6 +299,8 @@ class CudaGraphDecoder:
         """
         if not self._text_finished and tok == self.eos_token_id:
             self._text_finished = True
+        if getattr(self, "_post_eos_padding_count", 0) > 0:
+            return self._internal_stop_emitted
         return (
             self._text_finished and audio_codes[NUM_AUDIO_LAYERS - 1][-1] == self.audio_stop_token
         )
@@ -284,6 +312,8 @@ class CudaGraphDecoder:
         seed: int | None = None,
         return_audio: bool = False,
         return_bridge: bool = False,
+        post_eos_padding_count: int = 0,
+        internal_stop_token_id: int | None = None,
     ) -> Any:
         """Prefill + n-step joint text/audio decode; returns generated text
         token ids (excludes input), and (if ``return_audio``) the 8-channel
@@ -298,12 +328,16 @@ class CudaGraphDecoder:
         text. For WAV output the audio codes are returned as well.
 
         Stopping (defect B fix): the main loop checks
-        ``_should_stop(tok, audio_codes)`` after each decode step and
-        breaks on match -- matches ``BatchedThinkerRunner.step_finished``.
-        The ``torch.Generator`` advance stops at the content-natural end
-        (no dummy draws), matching eager parity up to the stop step.
+        ``_should_stop(tok, audio_codes)`` after each decode step. With
+        post-EOS padding enabled, it emits enter, PAD, and internal-stop
+        tokens through the same state machine as
+        ``BatchedThinkerRunner``; otherwise it stops at text EOS plus
+        audio-stop.
         """
-        self._reset_request_state()
+        self._reset_request_state(
+            post_eos_padding_count=post_eos_padding_count,
+            internal_stop_token_id=internal_stop_token_id,
+        )
         if return_bridge:
             self._enable_bridge_capture()
         num_layers = NUM_AUDIO_LAYERS
@@ -328,8 +362,8 @@ class CudaGraphDecoder:
         history = history + [tok]
         next_token = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
         self._capture(next_token)
-        # seed0 stop check: text_finished flag may flip here, but no audio
-        # code sampled yet -> break only triggers when both gates fire.
+        # seed0 stop check: text_finished may flip here, but no audio code
+        # was sampled yet; the post-EOS state machine starts on the next step.
         if self._should_stop(tok, audio_codes):
             return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
         for k in range(self.n_steps - 1):
@@ -350,6 +384,7 @@ class CudaGraphDecoder:
                     f"CUDA Graph replay failed at step {step_index}: {exc}; "
                     "capture state reset — retry will recapture."
                 ) from exc
+            was_text_finished = self._text_finished
             tok = sample_text_token(
                 out.logits[0, -1],
                 history_ids=history,
@@ -358,6 +393,8 @@ class CudaGraphDecoder:
                 rp=self.rp,
                 gen=gen,
             )
+            if was_text_finished:
+                tok = self._next_post_eos_token()
             text_codes.append(tok)
             history = history + [tok]
             # audio draws (same gen => identical RNG advance to production)

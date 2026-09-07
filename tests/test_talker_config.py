@@ -93,14 +93,15 @@ def test_constructor_rejects_bundle_without_model_talker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Inner-module sharing (key invariant: fusion in attention.py still works)
+# Inner-module sharing (key invariant: shared references for downstream
+# patching / checkpoint loading).
 # ---------------------------------------------------------------------------
 
 
 def test_layers_norm_lm_head_are_shared_with_inner_module() -> None:
-    """Fusion / patching in ``attention.enable_fused_projections`` mutates the
-    inner module's layers in place; the wrapper must share the same
-    ``nn.ModuleList`` reference so those mutations propagate.
+    """The wrapper must share ``nn.ModuleList`` references with the inner HF
+    TalkerModule so that any in-place mutation of inner-module attributes
+    (checkpoint loading, future runtime patches) is visible to the wrapper.
     """
     bundle = make_fake_bundle(num_hidden_layers=2)
     inner = bundle.model.talker

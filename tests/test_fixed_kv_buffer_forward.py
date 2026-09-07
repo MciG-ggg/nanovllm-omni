@@ -72,26 +72,93 @@ def _repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+def _cat_baseline_forward(attn, x, past_key_value, use_cache, attention_mask):
+    """Reference: separate Q/K/V projections + torch.cat KV history.
+
+    Mirrors the upstream eager path the fixed-KV buffer replaces. Lives
+    in-test so the production ``optim/attention.py`` only carries the
+    buffered implementation.
+    """
+    import math
+
+    import torch
+    import torch.nn.functional as functional
+
+    batch_size, sequence_len, _ = x.shape
+    query = attn.q_proj(x).view(batch_size, sequence_len, attn.n_local_heads, attn.head_dim)
+    key = attn.k_proj(x).view(batch_size, sequence_len, attn.n_local_kv_heads, attn.head_dim)
+    value = attn.v_proj(x).view(batch_size, sequence_len, attn.n_local_kv_heads, attn.head_dim)
+    query, key = attn.q_norm(query), attn.k_norm(key)
+    # rotary is identity in this test (see _run_forward), so skip.
+    if past_key_value is not None:
+        key = torch.cat([past_key_value[0], key], dim=1)
+        value = torch.cat([past_key_value[1], value], dim=1)
+    past = (key, value) if use_cache else None
+    q_t = query.transpose(1, 2)
+    k_t = _repeat_kv(key, attn.n_rep).transpose(1, 2)
+    v_t = _repeat_kv(value, attn.n_rep).transpose(1, 2)
+    if sequence_len == 1 and past_key_value is not None and attention_mask is None:
+        output = functional.scaled_dot_product_attention(
+            q_t, k_t, v_t, dropout_p=0.0, is_causal=False
+        )
+    elif (
+        attn.flash
+        and (sequence_len > 1)
+        and (not attn.is_causal or past_key_value is None)
+        and (attention_mask is None or torch.all(attention_mask == 1))
+    ):
+        output = functional.scaled_dot_product_attention(
+            q_t,
+            k_t,
+            v_t,
+            dropout_p=attn.dropout if attn.training else 0.0,
+            is_causal=attn.is_causal,
+        )
+    else:
+        scores = (q_t @ k_t.transpose(-2, -1)) / math.sqrt(attn.head_dim)
+        if attn.is_causal:
+            scores[:, :, :, -sequence_len:] += torch.full(
+                (sequence_len, sequence_len), float("-inf"), device=scores.device
+            ).triu(1)
+        if attention_mask is not None:
+            scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
+        output = attn.attn_dropout(functional.softmax(scores.float(), dim=-1).type_as(q_t)) @ v_t
+    output = output.transpose(1, 2).reshape(batch_size, sequence_len, -1)
+    return attn.resid_dropout(attn.o_proj(output)), past
+
+
 def _run_forward(attn, x, past_key_value, sequence_len, buffered: bool):
     import torch.nn.functional as functional  # noqa: F401  (mirror upstream)
 
-    from nanovllm_omni.optim.attention import (
-        _kv_buffer_forward,
-        _sdpa_forward,
-    )
+    from nanovllm_omni.optim.attention import _kv_buffer_forward
 
-    fn = _kv_buffer_forward if buffered else _sdpa_forward
-    orig_import = attn_mod._import_upstream
-    attn_mod._import_upstream = lambda _m: (  # type: ignore[attr-defined]
-        type(
-            "M",
-            (),
-            {
-                "apply_rotary_pos_emb": staticmethod(_rotary_identity),
-                "repeat_kv": staticmethod(_repeat_kv),
-            },
-        )()
-    )
+    if buffered:
+        fn = _kv_buffer_forward
+    else:
+
+        def fn(attn_, x_, **kw):  # noqa: ARG001
+            return _cat_baseline_forward(
+                attn_,
+                x_,
+                past_key_value=kw["past_key_value"],
+                use_cache=kw["use_cache"],
+                attention_mask=kw["attention_mask"],
+            )
+
+    # The buffered path needs the upstream-rotary/repeat_kv stub injected.
+    # Cat baseline is self-contained above; only patch when buffered.
+    if buffered:
+        orig_import = attn_mod._import_upstream
+        attn_mod._import_upstream = lambda _m: (  # type: ignore[attr-defined]
+            type(
+                "M",
+                (),
+                {
+                    "apply_rotary_pos_emb": staticmethod(_rotary_identity),
+                    "repeat_kv": staticmethod(_repeat_kv),
+                },
+            )()
+        )
     try:
         out, past = fn(
             attn,
@@ -102,7 +169,8 @@ def _run_forward(attn, x, past_key_value, sequence_len, buffered: bool):
             attention_mask=None,
         )
     finally:
-        attn_mod._import_upstream = orig_import
+        if buffered:
+            attn_mod._import_upstream = orig_import
     return out, past
 
 

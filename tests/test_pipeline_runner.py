@@ -194,7 +194,6 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
                 max_num_batched_tokens=512,
                 max_num_seqs=2,
                 gpu_memory_utilization=0.6,
-                enforce_eager=True,
                 device="cpu",
                 devices=("cpu",),
             ),
@@ -205,7 +204,6 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
     assert observed_args.max_num_batched_tokens == 512
     assert observed_args.max_num_seqs == 2
     assert observed_args.gpu_memory_utilization == 0.6
-    assert observed_args.enforce_eager is True
     assert observed_args.device == "cpu"
     assert observed_args.extra["devices"] == ("cpu",)
 

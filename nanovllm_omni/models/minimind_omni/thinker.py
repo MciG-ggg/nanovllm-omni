@@ -13,6 +13,7 @@ from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
 
+from ._stage import stage
 from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
 
 
@@ -163,7 +164,7 @@ def tokenize_for_generate(
     """
     import torch
 
-    with torch.profiler.record_function("tokenize"):
+    with stage("tokenize"):
         if messages is None:
             content = audio_special_token * audio_markers if audio_markers else ""
             if prompt:
@@ -229,7 +230,7 @@ def run_generate(
     """
     import torch
 
-    with torch.profiler.record_function("generate"):
+    with stage("generate"):
         frames: list[list[int]] = []
         # Graph path rejects post-EOS mode.
         if (
@@ -293,7 +294,7 @@ def run_generate(
         for _text_ids, audio_frame in stream:
             # ``generate.step`` shows up as a sub-event of ``generate`` in the
             # Kineto trace so per-iteration cost is visible in chrome://tracing.
-            with torch.profiler.record_function("generate.step"):
+            with stage("generate.step"):
                 if audio_frame and len(audio_frame) == 8:
                     frames.append(audio_frame)
         return frames

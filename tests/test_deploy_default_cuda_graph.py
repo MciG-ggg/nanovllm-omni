@@ -63,6 +63,21 @@ def test_yaml_false_is_honored() -> None:
         os.unlink(path)
 
 
+def test_omni_extra_overrides_both_graph_deploy_flags() -> None:
+    """Bench can force either graph off without editing the production YAML."""
+    from nanovllm_omni.entrypoints.base import OmniBase
+
+    base = OmniBase(
+        "jingyaogong/minimind-3o",
+        pipeline="minimind_o",
+        use_thinker_cuda_graph=False,
+        use_talker_cuda_graph=False,
+    )
+    deploy = base._resolve_deploy()
+    assert deploy.use_thinker_cuda_graph is False
+    assert deploy.use_talker_cuda_graph is False
+
+
 @pytest.fixture
 def codec_and_gen_stub(monkeypatch):
     """Stub codec + run_generate so generate_audio wiring is testable

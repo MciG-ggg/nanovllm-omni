@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -226,7 +227,14 @@ class OmniBase:
                 )
             else:
                 deploy_path = Path(deploy_path)
-            self._deploy = load_deploy_config(deploy_path)
+            deploy = load_deploy_config(deploy_path)
+            extra = self.engine_args.extra or {}
+            graph_overrides = {
+                name: extra[name]
+                for name in ("use_thinker_cuda_graph", "use_talker_cuda_graph")
+                if extra.get(name) is not None
+            }
+            self._deploy = replace(deploy, **graph_overrides)
         return self._deploy
 
     def _ensure_executor(self) -> PipelineExecutor:

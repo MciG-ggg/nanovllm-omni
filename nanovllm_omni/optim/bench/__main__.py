@@ -58,8 +58,19 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
-        "use_thinker_cuda_graph": args.use_thinker_cuda_graph,
+        "use_thinker_cuda_graph": bool(args.use_thinker_cuda_graph),
         "seed": args.seed,
+    }
+
+
+def _graph_overrides(args: argparse.Namespace) -> dict[str, bool]:
+    return {
+        name: value
+        for name, value in (
+            ("use_thinker_cuda_graph", args.use_thinker_cuda_graph),
+            ("use_talker_cuda_graph", args.use_talker_cuda_graph),
+        )
+        if value is not None
     }
 
 
@@ -78,28 +89,32 @@ def _run_all(
 
 
 def cmd_time(args: argparse.Namespace) -> int:
-    bundle = _load_bundle(args)
     prompts = _resolve_prompts(args.prompts)
 
     if args.pipeline == "full":
+        import torch
+
         from nanovllm_omni import Omni
         from nanovllm_omni.optim.bench.runner import run_n_full
 
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         kwargs = _kwargs(args)
-        kwargs.pop("use_thinker_cuda_graph", None)  # full E2E has no graph opt-in
+        kwargs.pop("use_thinker_cuda_graph", None)
         kwargs.pop("open_thinking", None)  # Omni.generate has no open-thinking switch
         omni = Omni(
             model=args.model,
-            device=args.device or bundle.device,
-            dtype="float16" if (args.device or bundle.device).startswith("cuda") else "float32",
+            device=device,
+            dtype="float16" if device.startswith("cuda") else "float32",
             trust_remote_code=True,
             enforce_eager=bool(getattr(args, "enforce_eager", False)),
             pipeline="minimind_o",
+            **_graph_overrides(args),
         )
         results: list[RunResult] = []
         for prompt in prompts:
             results.extend(run_n_full(omni, prompt, n=args.runs, warmup=args.warmup, **kwargs))
     else:
+        bundle = _load_bundle(args)
         results = _run_all(
             bundle, prompts, n=args.runs, warmup=args.warmup, run_kwargs=_kwargs(args)
         )
@@ -111,6 +126,64 @@ def cmd_time(args: argparse.Namespace) -> int:
     print(markdown_table(results))
     print("Detailed markdown table (GPU/CPU split + per-step):")
     print(markdown_table_detail(results))
+    return 0
+
+
+def cmd_sweep_graphs(args: argparse.Namespace) -> int:
+    """Run fusion x CUDA-Graph cells in isolated processes."""
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    graph_cells = (
+        ("none", False, False),
+        ("thinker", True, False),
+        ("talker", False, True),
+        ("both", True, True),
+    )
+    failed: list[str] = []
+    for eager in (True, False):
+        fusion = "off" if eager else "on"
+        for graph, thinker_graph, talker_graph in graph_cells:
+            out = out_dir / f"fusion-{fusion}-graph-{graph}.csv"
+            command = [
+                sys.executable,
+                "-m",
+                "nanovllm_omni.optim.bench",
+                "time",
+                "--pipeline",
+                "full",
+                "--model",
+                args.model,
+                "--max-tokens",
+                str(args.max_tokens),
+                "--temperature",
+                str(args.temperature),
+                "--top-p",
+                str(args.top_p),
+                "--seed",
+                str(args.seed),
+                "--runs",
+                str(args.runs),
+                "--warmup",
+                str(args.warmup),
+                "--out",
+                str(out),
+                "--use-thinker-cuda-graph" if thinker_graph else "--no-use-thinker-cuda-graph",
+                "--use-talker-cuda-graph" if talker_graph else "--no-use-talker-cuda-graph",
+            ]
+            if args.device:
+                command.extend(("--device", args.device))
+            if args.mimi:
+                command.extend(("--mimi", args.mimi))
+            if args.prompts:
+                command.extend(("--prompts", args.prompts))
+            if eager:
+                command.append("--enforce-eager")
+            print(f"running fusion={fusion}, graph={graph}: {' '.join(command)}")
+            if subprocess.run(command).returncode:
+                failed.append(f"fusion={fusion}, graph={graph}")
+    if failed:
+        print(f"failed cells: {', '.join(failed)}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -317,9 +390,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument(
         "--use-thinker-cuda-graph",
-        action="store_true",
-        help="Route decode through the thinker CUDA-Graph fast path "
-        "(run_generate use_thinker_cuda_graph=True; opt-in, CUDA-only).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the deploy setting for thinker CUDA Graph (default: use deploy YAML).",
+    )
+    common.add_argument(
+        "--use-talker-cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the deploy setting for talker CUDA Graph (default: use deploy YAML).",
     )
     common.add_argument(
         "--enforce-eager",
@@ -346,6 +425,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV output path (default: docs/perf/session-1.csv)",
     )
     p_time.set_defaults(func=cmd_time)
+
+    p_sweep = sub.add_parser(
+        "sweep-graphs",
+        parents=[common],
+        help="Run fusion x {none, thinker, talker, both} graph cells in fresh processes",
+    )
+    p_sweep.add_argument("--runs", type=int, default=20)
+    p_sweep.add_argument("--warmup", type=int, default=1)
+    p_sweep.add_argument("--out-dir", default="docs/perf/aligned/graph-sweep")
+    p_sweep.set_defaults(func=cmd_sweep_graphs)
 
     p_matrix = sub.add_parser(
         "matrix",

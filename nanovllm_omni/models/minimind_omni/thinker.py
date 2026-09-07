@@ -95,24 +95,47 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             ).to(bundle.device)
             captured_bridge: list[torch.Tensor] = []
             output_tokens: list[int] = []
-            stream = stream_generate(
-                bundle.model,
-                input_ids,
-                eos_token_id=eos_token_id,
-                max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
-                temperature=float(sampling.temperature) if sampling is not None else 0.7,
-                top_p=float(sampling.top_p) if sampling is not None else 0.9,
-                open_thinking=bool(extra.get("open_thinking", False)),
-                capture_bridge_states=True,
-                bridge_state_callback=captured_bridge.append,
-                post_eos_padding_count=post_eos_padding_count,
-                internal_stop_token_id=internal_stop_token_id,
-            )
-            for text_chunk, _audio_frame in stream:
-                if text_chunk is not None:
-                    output_tokens = [
-                        int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
-                    ]
+            max_new_tokens = int(sampling.max_tokens) if sampling is not None else 512
+            temperature = float(sampling.temperature) if sampling is not None else 0.7
+            top_p = float(sampling.top_p) if sampling is not None else 0.9
+            use_thinker_cuda_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
+            effective_post_eos_padding_count = post_eos_padding_count
+            if use_thinker_cuda_graph:
+                # The graph decoder has no post-EOS mode. Its bridge capture is
+                # graph-owned, so the talker still receives a complete span.
+                run_generate(
+                    bundle.model,
+                    input_ids,
+                    eos_token_id=eos_token_id,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    open_thinking=bool(extra.get("open_thinking", False)),
+                    use_thinker_cuda_graph=True,
+                    capture_bridge_states=True,
+                    bridge_state_callback=captured_bridge.append,
+                    text_token_callback=output_tokens.extend,
+                )
+                effective_post_eos_padding_count = 0
+            else:
+                stream = stream_generate(
+                    bundle.model,
+                    input_ids,
+                    eos_token_id=eos_token_id,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    open_thinking=bool(extra.get("open_thinking", False)),
+                    capture_bridge_states=True,
+                    bridge_state_callback=captured_bridge.append,
+                    post_eos_padding_count=effective_post_eos_padding_count,
+                    internal_stop_token_id=internal_stop_token_id,
+                )
+                for text_chunk, _audio_frame in stream:
+                    if text_chunk is not None:
+                        output_tokens = [
+                            int(token) for token in text_chunk.detach().cpu().reshape(-1).tolist()
+                        ]
         bridge = (
             captured_bridge[0]
             if captured_bridge and captured_bridge[0].numel() > 0
@@ -134,7 +157,7 @@ def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
             request_id=request_id,
             metadata={
                 "pipeline_kind": "full",
-                "post_eos_padding_count": post_eos_padding_count,
+                "post_eos_padding_count": effective_post_eos_padding_count,
             },
         )
 
@@ -205,6 +228,7 @@ def run_generate(
     seed: int | None = None,
     capture_bridge_states: bool = False,
     bridge_state_callback: Callable[[Any], None] | None = None,
+    text_token_callback: Callable[[list[int]], None] | None = None,
     post_eos_padding_count: int = 0,
     internal_stop_token_id: int | None = None,
 ) -> list[list[int]]:
@@ -226,8 +250,9 @@ def run_generate(
     contract as the eager path).
 
     ``capture_bridge_states`` and ``bridge_state_callback`` expose the
-    additive eager capture seam used by the talker stage. The CUDA Graph
-    path does not capture bridge states.
+    bridge seam used by the talker stage. The CUDA Graph path returns graph-owned
+    bridge states when requested. ``text_token_callback`` receives all decoded
+    text tokens for the full pipeline's talker alignment.
     """
     import torch
 
@@ -251,9 +276,20 @@ def run_generate(
             decoder = enable_cuda_graph(model, n_steps=max_new_tokens, eos_token_id=eos_token_id)
             if decoder is not None:
                 call_seed = seed if seed is not None else int(torch.initial_seed())
-                _, audio_codes = decoder.generate_tokens(
-                    input_ids, seed=call_seed, return_audio=True
+                result = decoder.generate_tokens(
+                    input_ids,
+                    seed=call_seed,
+                    return_audio=True,
+                    return_bridge=capture_bridge_states,
                 )
+                if capture_bridge_states:
+                    text_tokens, audio_codes, bridge = result
+                    if bridge_state_callback is not None:
+                        bridge_state_callback(bridge)
+                else:
+                    text_tokens, audio_codes = result
+                if text_token_callback is not None:
+                    text_token_callback(text_tokens)
                 num_frames = len(audio_codes[0])
                 frames = [[audio_codes[ch][t] for ch in range(8)] for t in range(num_frames)]
                 return frames
@@ -292,12 +328,19 @@ def run_generate(
                 return_audio_codes=True,
                 open_thinking=open_thinking,
             )
-        for _text_ids, audio_frame in stream:
+        text_tokens: list[int] = []
+        for text_ids, audio_frame in stream:
             # ``generate.step`` shows up as a sub-event of ``generate`` in the
             # Kineto trace so per-iteration cost is visible in chrome://tracing.
             with stage("generate.step"):
+                if text_ids is not None:
+                    if hasattr(text_ids, "detach"):
+                        text_ids = text_ids.detach().cpu().reshape(-1).tolist()
+                    text_tokens = [int(token) for token in text_ids]
                 if audio_frame and len(audio_frame) == 8:
                     frames.append(audio_frame)
+        if text_token_callback is not None:
+            text_token_callback(text_tokens)
         return frames
 
 

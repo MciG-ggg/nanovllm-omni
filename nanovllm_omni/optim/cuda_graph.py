@@ -90,9 +90,9 @@ class CudaGraphDecoder:
     """Capture-once / replay-many CUDA-Graphed decoder over the buffer-ized
     model's per-instance KV buffers.
 
-    Each ``self.steps[k]`` is ``(graph, static_input, output_output)``: the
+    Each ``self.steps[k]`` is ``(graph, static_input, output, bridge)``: the
     captured CUDAGraph, the input tensor pinned to the capture-time address,
-    and the output reference held by the graph.
+    the output reference held by the graph, and its replay-owned bridge output.
     """
 
     def __init__(
@@ -128,7 +128,9 @@ class CudaGraphDecoder:
             else int(getattr(model, "audio_stop_token", 0))
         )
         self.attns = [m for m in model.modules() if getattr(m, "_nanovllm_kv_buffer", False)]
-        self.steps: list[tuple[Any, torch.Tensor, Any]] = []
+        self.steps: list[tuple[Any, torch.Tensor, Any, torch.Tensor | None]] = []
+        self._bridge_layer = -1
+        self._prefill_bridge: torch.Tensor | None = None
         self._captured = False
         self._captured_len = -1
         # The per-step graph COUNT is also baked at the first-requested
@@ -166,8 +168,23 @@ class CudaGraphDecoder:
         prefill_in = _build_omni_input(input_ids, self.audio_pad)
         with torch.no_grad():
             out = self.fwd(self.model, input_ids=prefill_in, past_key_values=None, use_cache=True)
+        if self._bridge_layer >= 0:
+            from nanovllm_omni.models.minimind_omni.batched_generation import _read_bridge_capture
+
+            bridge = _read_bridge_capture(self.model, self._bridge_layer)
+            self._prefill_bridge = bridge[0].detach().to(device="cpu", dtype=torch.float32).clone()
         # text row is the last channel: logits[0, -1] is the last text position
         return out.logits[0, -1].clone()
+
+    def _enable_bridge_capture(self) -> None:
+        if self._bridge_layer >= 0:
+            return
+        from nanovllm_omni.models.minimind_omni.batched_generation import enable_bridge_capture
+
+        self._bridge_layer = enable_bridge_capture(self.model)
+        if self._bridge_layer >= 0:
+            # Existing graphs omit the new hook and must be rebuilt.
+            self._captured = False
 
     def _needs_recapture(self) -> bool:
         """Pure decision: must the per-step graphs be rebuilt?
@@ -223,7 +240,14 @@ class CudaGraphDecoder:
                 g = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(g), torch.no_grad():
                     out = self.fwd(self.model, input_ids=inp, past_key_values=None, use_cache=True)
-                self.steps.append((g, inp, out))
+                bridge = None
+                if self._bridge_layer >= 0:
+                    from nanovllm_omni.models.minimind_omni.batched_generation import (
+                        _read_bridge_capture,
+                    )
+
+                    bridge = _read_bridge_capture(self.model, self._bridge_layer)
+                self.steps.append((g, inp, out, bridge))
         torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
         self._captured = True
@@ -251,8 +275,13 @@ class CudaGraphDecoder:
         )
 
     def generate_tokens(
-        self, input_ids: torch.Tensor, *, seed: int | None = None, return_audio: bool = False
-    ) -> list[int] | tuple[list[int], list[list[int]]]:
+        self,
+        input_ids: torch.Tensor,
+        *,
+        seed: int | None = None,
+        return_audio: bool = False,
+        return_bridge: bool = False,
+    ) -> Any:
         """Prefill + n-step joint text/audio decode; returns generated text
         token ids (excludes input), and (if ``return_audio``) the 8-channel
         Mimi audio codes.
@@ -271,8 +300,11 @@ class CudaGraphDecoder:
         The ``torch.Generator`` advance stops at the content-natural end
         (no dummy draws), matching eager parity up to the stop step.
         """
+        if return_bridge:
+            self._enable_bridge_capture()
         num_layers = NUM_AUDIO_LAYERS
         prefill_logits = self._prefill(input_ids)
+        bridge_states: list[torch.Tensor] = []
         history = list(input_ids.reshape(-1).tolist())
         audio_history: list[list[int]] = [[] for _ in range(num_layers)]
         gen = torch.Generator(device=prefill_logits.device)
@@ -295,13 +327,11 @@ class CudaGraphDecoder:
         # seed0 stop check: text_finished flag may flip here, but no audio
         # code sampled yet -> break only triggers when both gates fire.
         if self._should_stop(tok, audio_codes):
-            if return_audio:
-                return text_codes, audio_codes
-            return text_codes
+            return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
         for k in range(self.n_steps - 1):
             step_index = k + 1  # text token index at this decode step
             audio_step = step_index - 1  # audio lags text by one position
-            g, inp, out = self.steps[k]
+            g, inp, out, bridge = self.steps[k]
             try:
                 inp.copy_(_build_omni_input(next_token, self.audio_pad))
                 g.replay()
@@ -340,10 +370,32 @@ class CudaGraphDecoder:
                 else:
                     audio_codes[layer].append(self.audio_pad)
             next_token = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
+            if return_bridge and bridge is not None:
+                bridge_states.append(
+                    bridge[0, 0].detach().to(device="cpu", dtype=torch.float32).clone()
+                )
             # defect B: halt at content-natural end; ``_should_stop`` flips
             # _text_finished on EOS, returns True once last-layer audio_stop.
             if self._should_stop(tok, audio_codes):
                 break
+        return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
+
+    def _result(
+        self,
+        text_codes: list[int],
+        audio_codes: list[list[int]],
+        return_audio: bool,
+        return_bridge: bool,
+        bridge_states: list[torch.Tensor],
+    ) -> Any:
+        if return_bridge:
+            if self._prefill_bridge is None:
+                bridge = torch.empty((0, 0), dtype=torch.float32)
+            elif bridge_states:
+                bridge = torch.cat((self._prefill_bridge, torch.stack(bridge_states)), dim=0)
+            else:
+                bridge = self._prefill_bridge
+            return text_codes, audio_codes, bridge
         if return_audio:
             return text_codes, audio_codes
         return text_codes

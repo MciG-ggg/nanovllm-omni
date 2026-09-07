@@ -437,3 +437,21 @@ def test_bench_cli_accepts_enforce_eager_flag():
         ns = parser.parse_args(argv)
         assert ns.enforce_eager is True, f"--enforce-eager not parsed for {cmd}"
         assert ns.pipeline == "full"
+
+
+def test_bench_cli_can_force_each_graph_off() -> None:
+    """The full E2E sweep must override YAML defaults in either direction."""
+    from nanovllm_omni.optim.bench.__main__ import build_parser
+
+    parser = build_parser()
+    ns = parser.parse_args(
+        [
+            "time",
+            "--pipeline",
+            "full",
+            "--no-use-thinker-cuda-graph",
+            "--use-talker-cuda-graph",
+        ]
+    )
+    assert ns.use_thinker_cuda_graph is False
+    assert ns.use_talker_cuda_graph is True

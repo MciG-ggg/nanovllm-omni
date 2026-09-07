@@ -1,0 +1,13 @@
+Generating SQLite file /tmp/trace-nsys-v3.sqlite from /tmp/trace-nsys-v3.nsys-rep
+Processing [/tmp/trace-nsys-v3.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-x64/reports/nvtx_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
+87.4,10454634879,1,10454634879.0,10454634879.0,10454634879,10454634879,0.0,PushPop,:generate
+12.1,1445060796,1,1445060796.0,1445060796.0,1445060796,1445060796,0.0,PushPop,:decode
+0.2,26497495,1,26497495.0,26497495.0,26497495,26497495,0.0,PushPop,:tokenize
+0.1,17188235,17,1011072.6,87081.0,41158,14983216,3603127.1,PushPop,CCCL:cub::DeviceScan::InclusiveScan
+0.1,6357336,16,397333.5,301185.0,214659,1161014,252031.0,PushPop,CCCL:cub::DeviceRadixSort
+0.0,2187651,16,136728.2,91763.5,38477,477189,112481.0,PushPop,CCCL:cub::DeviceReduce::Sum
+0.0,1986755,16,124172.2,85132.5,34894,499344,117611.9,PushPop,CCCL:cub::DeviceSelect::Flagged
+0.0,907897,15,60526.5,14360.0,9900,356383,89960.3,PushPop,:generate.step
+0.0,651825,1,651825.0,651825.0,651825,651825,0.0,PushPop,:wav
+

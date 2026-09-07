@@ -1,0 +1,23 @@
+==PROF== Connected to process 70346 (/usr/bin/python3.12)
+/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+Notice: ffmpeg is not installed. torchaudio is used to load audio
+If you want to use ffmpeg backend to load audio, please install it by:
+	sudo apt install ffmpeg # ubuntu
+	# brew install ffmpeg # mac
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 9109.32it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  47%|████▋     | 163/350 [00:00<00:00, 1621.95it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 2089.19it/s]
+==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0. For instructions on enabling permissions and to get more information see https://developer.nvidia.com/ERR_NVGPUCTRPERM
+wrote 1 rows to /tmp/profiler-originals/ncu-inner.csv
+
+Spec markdown table (10 cols):
+| prompt_id | tokenize_median | generate_median | decode_median | wav_median | total_median | total_p95 | total_min | frames | vram_mb |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| short_03 | 17.60 | 3530.91 | 1515.47 | 0.54 | 5064.52 | 5064.52 | 5064.52 | 8 | 605.55 |
+
+Detailed markdown table (GPU/CPU split + per-step):
+| prompt_id | generate_median | decode_median | total_median | generate_cuda_median | decode_cuda_median | cpu_dispatch_median | generate_per_step_median | frames | vram_mb |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| short_03 | 3530.91 | 1515.47 | 5064.52 | 3531.05 | 1515.59 | 0.00 | 441.36 | 8 | 605.55 |
+
+==PROF== Disconnected from process 70346

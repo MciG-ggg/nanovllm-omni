@@ -1500,3 +1500,52 @@ eager `batched_generation.py:119`）。
 
 ---
 
+## 36. 2026-09-07 复跑：Colab T4 `.ncu-rep` 原件 + WSL NVTX 阶段名
+
+开放项两条这次补上了：
+
+1. **Colab T4 上重新抓了 4 个 kernel 的 `.ncu-rep` 原件**（WSL 3050 仍是 `ERR_NVGPUCTRPERM`）。
+   文件在 `docs/perf/ncu-colab/`。第一次 SOL 数字来自 ncu 文本表（§4），这次是同一套 kernel 的原始报告。
+2. **`record_function` 不再单独打 Kineto 标签**：`thinker.py` / `code2wav.py` 走 `models.minimind_omni._stage.stage()`，同时发 Kineto `user_annotation` 和 `torch.cuda.nvtx.range`。WSL `trace-nsys` 的 `nvtx_sum` 现在能看见阶段名。
+
+### 36.1 Colab T4 ncu（ncu 2025.1.1.0，torch 2.11.0+cu128，Tesla T4）
+
+`python -m nanovllm_omni.optim.bench time --max-tokens 16 --prompts short_03 --runs 2 --warmup 1`，每个 kernel `--launch-count 3`。k3 在 T4 上名字是 `unrolled_elementwise_kernel`（不再带 `direct_copy_kernel_cuda` 子串），regex 改成 `.*unrolled_elementwise_kernel.*`。
+
+取每个 `.ncu-rep` 的**第一个 instance**：
+
+| # | Kernel | Grid | Duration | Compute SOL | Memory SOL | DRAM SOL | Achieved Occ | No Eligible | 受限类型 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| k1 | fmha | 8 | 21.12 µs | **3.19%** | 2.99% | 2.40% | 12.53% | **82.45%** | launch / grid-size |
+| k2 | gemv2T | 96 | 8.64 µs | 22.13% | 22.13% | 19.54% | 30.15% | 78.00% | launch / small grid（本 instance 未打满；同报告后段 instance 到 Compute 46.7% / DRAM 52.6%） |
+| k3 | unrolled_elementwise | **1** | 8.42 µs | **0.09%** | 2.41% | 1.54% | 12.64% | **95.28%** | launch / 1-block |
+| k4 | CatArrayBatchedCopy | 2 | 5.22 µs | **0.07%** | 1.17% | 0.64% | 7.56% | **96.22%** | launch / tiny grid |
+
+原件：
+
+- `docs/perf/ncu-colab/k1-fmha.ncu-rep`
+- `docs/perf/ncu-colab/k2-gemv.ncu-rep`
+- `docs/perf/ncu-colab/k3-direct-copy.ncu-rep`
+- `docs/perf/ncu-colab/k4-cat.ncu-rep`
+- `docs/perf/ncu-colab/summary.csv`
+
+结论没变：4/4 kernel 都不是 compute-bound。瓶颈仍是 launch。k2 这份报告里混了小 grid 和大 grid 两种 GEMV instance，§4 表用的是接近 SOL 的那次（Compute 45.7% / DRAM 52.7%）。
+
+WSL 3050 仍然出不了 `.ncu-rep`（`ERR_NVGPUCTRPERM`，host NVIDIA 控制面板没开 non-admin counters）。失败日志：`docs/perf/ncu-gemv.log`。
+
+### 36.2 WSL nsys NVTX（`stage()` 之后）
+
+`trace-nsys`（`--trace=cuda,nvtx`，short_03，max-tokens 16）现在 `nvtx_sum` 能看见自定义阶段：
+
+| Range | Time% | Instances |
+|---|---:|---:|
+| `:generate` | 87.4 | 1 |
+| `:decode` | 12.1 | 1 |
+| `:tokenize` | 0.2 | 1 |
+| `:generate.step` | ~0 | 15 |
+| `:wav` | ~0 | 1 |
+
+CUB 内部区间还在，但不再独占汇总。原件：`docs/perf/trace-nsys-v3.nsys-rep`、`docs/perf/trace-nsys-v3.nvtx.csv`。
+
+WSL CUPTI 仍然抓不到 GPU kernel 时间线（`cuda_gpu_kern_sum SKIPPED`），这是环境限制，不是标注问题。
+

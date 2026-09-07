@@ -1,0 +1,19 @@
+
+NOTICE: Existing SQLite export found: /tmp/profiler-originals/trace-nsys.sqlite
+        It is assumed file was previously exported from: /tmp/profiler-originals/trace-nsys.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [/tmp/profiler-originals/trace-nsys.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-x64/reports/nvtx_sum.py]... 
+
+ ** NVTX Range Summary (nvtx_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)   Style                  Range               
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  -------  -----------------------------------
+     66.7         13311337         17  783019.8   63536.0     38007  11821354    2846164.8  PushPop  CCCL:cub::DeviceScan::InclusiveScan
+     21.2          4228674         16  264292.1  230441.0    146195    487977     111048.7  PushPop  CCCL:cub::DeviceRadixSort          
+      7.0          1401333         16   87583.3   61348.0     33962    415408      91160.7  PushPop  CCCL:cub::DeviceReduce::Sum        
+      5.1          1015213         16   63450.8   40570.0     29141    211595      49135.4  PushPop  CCCL:cub::DeviceSelect::Flagged    
+
+Processing [/tmp/profiler-originals/trace-nsys.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-x64/reports/cuda_gpu_mem_time_sum.py]... 
+SKIPPED: /tmp/profiler-originals/trace-nsys.sqlite does not contain GPU memory data.
+

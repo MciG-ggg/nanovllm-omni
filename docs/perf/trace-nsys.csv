@@ -1,0 +1,2 @@
+prompt_id,seed,run_idx,tokenize_ms,generate_ms,decode_ms,wav_ms,total_ms,frames,vram_mb,generate_cuda_ms,decode_cuda_ms,cpu_dispatch_ms,generate_per_step_ms
+short_03,42,0,20.337930,6692.358556,1428.243773,12.600404,8153.540663,8,605.554,6692.937012,1429.316650,0.000000,836.544819

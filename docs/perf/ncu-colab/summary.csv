@@ -1,0 +1,5 @@
+kernel,memory_sol_pct,dram_sol_pct,compute_sol_pct,duration_us,grid,block,achieved_occ_pct,no_eligible_pct,eligible_warps_per_sched,l2_hit_pct,mem_gbps,regs_per_thread
+k1-fmha,2.99,2.40,3.19,21.12,8,128,12.53,82.45,0.18,71.22,7.62,160
+k2-gemv,22.13,19.54,22.13,8.64,96,128,30.15,78.00,0.29,55.72,60.77,62
+k3-direct-copy,2.41,1.54,0.09,8.42,1,128,12.64,95.28,0.05,81.02,4.78,32
+k4-cat,1.17,0.64,0.07,5.22,2,128,7.56,96.22,0.04,84.29,1.97,30

@@ -29,6 +29,7 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     bundle_kwargs: dict[str, Any] = {
         "trust_remote_code": getattr(args, "trust_remote_code", True),
         "dtype": getattr(args, "dtype", None),
+        "enforce_eager": bool(getattr(args, "enforce_eager", False)),
     }
     if mimi_model_id:
         bundle_kwargs["mimi_model_id"] = mimi_model_id

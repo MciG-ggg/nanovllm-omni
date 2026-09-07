@@ -1034,6 +1034,7 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
                 device=args.device,
                 trust_remote_code=getattr(args, "trust_remote_code", True),
                 dtype=getattr(args, "dtype", None),
+                enforce_eager=bool(getattr(args, "enforce_eager", False)),
             )
             talker = wrap_talker(bundle)
         stage_cache["talker"] = talker

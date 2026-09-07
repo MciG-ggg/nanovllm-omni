@@ -100,11 +100,16 @@ def load_minimind_omni_bundle(
     mimi_model_id: str = DEFAULT_MIMI_MODEL_ID,
     trust_remote_code: bool = True,
     dtype: str | None = None,
+    enforce_eager: bool = False,
     **kwargs: Any,
 ) -> MinimindBundle:
     """Load MiniMind-O + tokenizer + Mimi onto ``device``.
 
     ``trust_remote_code`` and ``dtype`` are plumbed from ``OmniEngineArgs``.
+    ``enforce_eager=True`` skips the four attention fusion monkey-patches
+    (SDPA decode, fused QKV/gate-up, fused RMSNorm, fused RoPE). Used by the
+    bench harness to measure an apples-to-apples baseline; CUDA Graph is
+    independently gated by the deploy/CLI flags, not by ``enforce_eager``.
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer, MimiModel
 
@@ -118,20 +123,21 @@ def load_minimind_omni_bundle(
     ).eval()
     model = _cast_model_dtype(model, dtype, device)
     model = model.to(device)
-    from nanovllm_omni.optim.attention import (
-        enable_fused_projections,
-        enable_fused_rmsnorm,
-        enable_fused_rope,
-        enable_sdpa_decode,
-    )
+    if not enforce_eager:
+        from nanovllm_omni.optim.attention import (
+            enable_fused_projections,
+            enable_fused_rmsnorm,
+            enable_fused_rope,
+            enable_sdpa_decode,
+        )
 
-    for _patch in (
-        enable_sdpa_decode,
-        enable_fused_rmsnorm,
-        enable_fused_projections,
-        enable_fused_rope,
-    ):
-        _patch(model)
+        for _patch in (
+            enable_sdpa_decode,
+            enable_fused_rmsnorm,
+            enable_fused_projections,
+            enable_fused_rope,
+        ):
+            _patch(model)
 
     mimi = MimiModel.from_pretrained(mimi_dir).eval()
     mimi = _cast_model_dtype(mimi, dtype, device)
@@ -169,8 +175,15 @@ def load_minimind_omni_bundle(
     )
 
 
-def create_bundle(model_id: str, device: str | None = None, **kwargs: Any) -> MinimindBundle:
-    return load_minimind_omni_bundle(model_id=model_id, device=device, **kwargs)
+def create_bundle(
+    model_id: str,
+    device: str | None = None,
+    enforce_eager: bool = False,
+    **kwargs: Any,
+) -> MinimindBundle:
+    return load_minimind_omni_bundle(
+        model_id=model_id, device=device, enforce_eager=enforce_eager, **kwargs
+    )
 
 
 def create_stages(model_id: str, device: str | None = None, **kwargs: Any):

@@ -257,4 +257,183 @@ __all__ = [
     "test_thinker_stage_passes_trust_remote_code_and_dtype_to_bundle",
     "test_thinker_stage_defaults_keep_legacy_bundle_kwargs",
     "test_bundle_from_pretrained_receives_trust_remote_code_false",
+    "test_thinker_stage_passes_enforce_eager_to_bundle",
+    "test_load_minimind_omni_bundle_skips_fusion_when_enforce_eager_true",
+    "test_load_minimind_omni_bundle_runs_fusion_by_default",
+    "test_bench_cli_accepts_enforce_eager_flag",
 ]
+
+
+# ---------------------------------------------------------------------------
+# enforce_eager plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_thinker_stage_passes_enforce_eager_to_bundle(monkeypatch):
+    """``OmniEngineArgs.enforce_eager`` flows through the thinker stage
+    factory into ``create_bundle`` so the bench harness can measure a
+    true apples-to-apples baseline (no fusion monkey-patches applied)."""
+    from nanovllm_omni.config.params import OmniEngineArgs
+    from nanovllm_omni.models.minimind_omni import thinker as thinker_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_create_bundle(model_id, device, **kwargs):
+        captured["enforce_eager"] = kwargs.get("enforce_eager")
+        return None
+
+    monkeypatch.setattr(thinker_mod, "create_bundle", fake_create_bundle)
+
+    args = OmniEngineArgs(model="any", device="cpu", enforce_eager=True)
+    thinker_mod._thinker_stage(deploy=None, args=args)
+
+    assert captured["enforce_eager"] is True
+
+
+def test_load_minimind_omni_bundle_skips_fusion_when_enforce_eager_true(monkeypatch):
+    """``enforce_eager=True`` keeps the four attention-fusion monkey-patches
+    from running. The bench harness relies on this to measure the unfused
+    baseline; the patches would otherwise mask the launch overhead the
+    fusion stack is supposed to remove."""
+    pytest.importorskip("transformers")
+    from transformers import MimiModel  # noqa: F401  -- probe audio dep
+
+    from nanovllm_omni.models.minimind_omni import bundle as bundle_mod
+
+    fusion_calls: list[str] = []
+
+    class _FakeModel:
+        def eval(self):
+            return self
+
+        def half(self):
+            return self
+
+        def bfloat16(self):
+            return self
+
+        def float(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda path, **kw: object(),
+    )
+    monkeypatch.setattr(
+        "transformers.AutoModelForCausalLM.from_pretrained",
+        lambda path, **kw: _FakeModel(),
+    )
+    monkeypatch.setattr(
+        "transformers.MimiModel.from_pretrained",
+        lambda *a, **kw: _FakeModel(),
+    )
+    monkeypatch.setattr(bundle_mod, "_resolve_snapshot", lambda x: x)
+    monkeypatch.setattr(bundle_mod, "_cast_model_dtype", lambda m, _d, _dev: m)
+
+    for name in (
+        "enable_sdpa_decode",
+        "enable_fused_rmsnorm",
+        "enable_fused_projections",
+        "enable_fused_rope",
+    ):
+        monkeypatch.setattr(
+            f"nanovllm_omni.optim.attention.{name}",
+            lambda _m, _n=name: fusion_calls.append(_n),
+        )
+
+    bundle_mod.load_minimind_omni_bundle(
+        model_id="any",
+        device="cpu",
+        enforce_eager=True,
+    )
+
+    assert (
+        fusion_calls == []
+    ), f"enforce_eager=True must skip fusion patches, but {fusion_calls} ran"
+
+
+def test_load_minimind_omni_bundle_runs_fusion_by_default(monkeypatch):
+    """The legacy default (enforce_eager absent or False) keeps applying all
+    four fusion patches -- this is the existing production behavior and
+    reverting it silently would regress every downstream user."""
+    pytest.importorskip("transformers")
+    from transformers import MimiModel  # noqa: F401
+
+    from nanovllm_omni.models.minimind_omni import bundle as bundle_mod
+
+    fusion_calls: list[str] = []
+
+    class _FakeModel:
+        def eval(self):
+            return self
+
+        def half(self):
+            return self
+
+        def bfloat16(self):
+            return self
+
+        def float(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda path, **kw: object(),
+    )
+    monkeypatch.setattr(
+        "transformers.AutoModelForCausalLM.from_pretrained",
+        lambda path, **kw: _FakeModel(),
+    )
+    monkeypatch.setattr(
+        "transformers.MimiModel.from_pretrained",
+        lambda *a, **kw: _FakeModel(),
+    )
+    monkeypatch.setattr(bundle_mod, "_resolve_snapshot", lambda x: x)
+    monkeypatch.setattr(bundle_mod, "_cast_model_dtype", lambda m, _d, _dev: m)
+
+    for name in (
+        "enable_sdpa_decode",
+        "enable_fused_rmsnorm",
+        "enable_fused_projections",
+        "enable_fused_rope",
+    ):
+        monkeypatch.setattr(
+            f"nanovllm_omni.optim.attention.{name}",
+            lambda _m, _n=name: fusion_calls.append(_n),
+        )
+
+    bundle_mod.load_minimind_omni_bundle(model_id="any", device="cpu")
+
+    assert sorted(fusion_calls) == sorted(
+        [
+            "enable_sdpa_decode",
+            "enable_fused_rmsnorm",
+            "enable_fused_projections",
+            "enable_fused_rope",
+        ]
+    )
+
+
+def test_bench_cli_accepts_enforce_eager_flag():
+    """The bench CLI must surface --enforce-eager on every subcommand
+    (time / matrix / trace-torch / profile-detail / trace-nsys) so the
+    apples-to-apples measurement matrix can sweep the flag uniformly."""
+    from nanovllm_omni.optim.bench.__main__ import build_parser
+
+    parser = build_parser()
+    # Subcommands that take --out get a dummy path; the test only checks
+    # --enforce-eager is accepted on each subcommand, not that the run succeeds.
+    out_required = {"trace-torch", "profile-detail", "trace-nsys", "_nsys-inner"}
+    for cmd in ("time", "matrix", "trace-torch", "profile-detail", "trace-nsys"):
+        argv = [cmd, "--enforce-eager", "--pipeline", "full"]
+        if cmd in out_required:
+            argv.extend(["--out", "/tmp/bench-flag-test"])
+        ns = parser.parse_args(argv)
+        assert ns.enforce_eager is True, f"--enforce-eager not parsed for {cmd}"
+        assert ns.pipeline == "full"

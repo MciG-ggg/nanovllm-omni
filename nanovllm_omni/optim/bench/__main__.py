@@ -31,9 +31,11 @@ from .trace import (
 def _load_bundle(args: argparse.Namespace):
     from nanovllm_omni.models.minimind_omni import create_bundle
 
-    kwargs: dict[str, str] = {}
+    kwargs: dict[str, object] = {}
     if args.mimi:
         kwargs["mimi_model_id"] = args.mimi
+    if getattr(args, "enforce_eager", False):
+        kwargs["enforce_eager"] = True
     bundle = create_bundle(model_id=args.model, device=args.device, **kwargs)
     return bundle
 
@@ -91,6 +93,7 @@ def cmd_time(args: argparse.Namespace) -> int:
             device=args.device or bundle.device,
             dtype="float16" if (args.device or bundle.device).startswith("cuda") else "float32",
             trust_remote_code=True,
+            enforce_eager=bool(getattr(args, "enforce_eager", False)),
             pipeline="minimind_o",
         )
         results: list[RunResult] = []
@@ -317,6 +320,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Route decode through the thinker CUDA-Graph fast path "
         "(run_generate use_thinker_cuda_graph=True; opt-in, CUDA-only).",
+    )
+    common.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Skip the four attention fusion monkey-patches (SDPA decode, "
+        "fused QKV/gate-up, fused RMSNorm, fused RoPE). Used by the bench "
+        "harness to measure an apples-to-apples baseline. CUDA Graph is "
+        "gated independently by --use-thinker-cuda-graph.",
     )
     common.add_argument(
         "--pipeline",

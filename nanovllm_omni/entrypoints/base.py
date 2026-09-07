@@ -256,6 +256,7 @@ class OmniBase:
             kwargs: dict[str, Any] = {
                 "trust_remote_code": self.engine_args.trust_remote_code,
                 "dtype": self.engine_args.dtype,
+                "enforce_eager": bool(self.engine_args.enforce_eager),
             }
             if mimi_model_id:
                 kwargs["mimi_model_id"] = mimi_model_id

@@ -110,6 +110,12 @@ def _load_fork_module(
     if short_name in sys.modules:
         return sys.modules[short_name]
 
+    # 0) Load torch FIRST. torch requires the real numpy and aborts the
+    #    process if a stub is registered under that name before it loads.
+    #    Importing here guarantees the genuine module wins the race, so
+    #    the ``numpy`` stub below only ever applies when torch is absent.
+    import torch  # noqa: F401
+
     # 1) Stub triton + flash_attn if absent.
     if "triton" not in sys.modules:
         _stub_module("triton", jit=(lambda *a, **kw: (lambda fn: fn)))
@@ -391,6 +397,126 @@ class PagedKVCache:
         self.block_manager.deallocate(seq)  # type: ignore[union-attr]
 
 
+def flash_attn_available() -> bool:
+    """True when a real (non-stubbed) ``flash_attn`` is importable.
+
+    ``_load_fork_module`` registers a stub under ``flash_attn`` so the
+    fork source can be imported without the CUDA wheel. The stub's
+    functions return ``None``, so we must distinguish it from the real
+    package before routing attention through it.
+    """
+    mod = sys.modules.get("flash_attn")
+    if mod is None:
+        try:
+            import flash_attn as mod  # type: ignore[no-redef]
+        except Exception:
+            return False
+    return getattr(mod, "__file__", None) is not None
+
+
+def _store_kv_paged(
+    key: Any,
+    value: Any,
+    k_cache: Any,
+    v_cache: Any,
+    slot_mapping: Any,
+) -> None:
+    """Write new K/V into the block pool at ``slot_mapping`` positions.
+
+    ``slot_mapping[t]`` is the flat slot index ``block_id * block_size +
+    offset``; ``-1`` means "skip this token" (padding lane in a batched
+    or graph-captured step).
+
+    Uses the fork's Triton ``store_kvcache`` when triton is really
+    installed, else an ``index_copy_`` fallback with identical
+    semantics. Both are CUDA-Graph safe: shapes are fixed and the write
+    target addresses never move.
+    """
+    import torch
+
+    n_kv = key.shape[-2]
+    d = key.shape[-1]
+    k_flat = key.reshape(-1, n_kv, d)
+    v_flat = value.reshape(-1, n_kv, d)
+    # Pool view as a flat slot table: [num_blocks * block_size, n_kv, d].
+    k_slots = k_cache.view(-1, n_kv, d)
+    v_slots = v_cache.view(-1, n_kv, d)
+    slots = slot_mapping[: k_flat.shape[0]].to(torch.long)
+    # Route -1 (padding) to a scratch row so the write stays shape-static
+    # instead of branching -- block 0 is reserved as the sentinel block.
+    safe = torch.where(slots >= 0, slots, torch.zeros_like(slots))
+    k_slots.index_copy_(0, safe, k_flat)
+    v_slots.index_copy_(0, safe, v_flat)
+
+
+def _gather_paged_kv(
+    k_cache: Any,
+    v_cache: Any,
+    block_tables: Any,
+) -> tuple[Any, Any]:
+    """Gather each request's blocks into a dense ``[B, W, n_kv, d]`` view.
+
+    ``W = block_tables.shape[1] * block_size`` is the *window*, fixed at
+    capture time by the width of ``block_tables`` -- NOT the model's
+    ``max_position_embeddings``. Sizing ``block_tables`` to
+    ``ceil((prompt_len + max_new_tokens) / block_size)`` keeps the
+    gathered window tight (e.g. 32 tokens), so this stays far cheaper
+    than padding attention out to the full context length.
+
+    The gather is what makes one graph replay many times: the window
+    shape never changes across AR steps, only the *contents* of
+    ``block_tables`` / ``context_lens`` do.
+    """
+    import torch
+
+    num_blocks, block_size, n_kv, d = k_cache.shape
+    bs, max_blocks = block_tables.shape
+    idx = block_tables.to(torch.long).clamp_(min=0).reshape(-1)
+    k_win = k_cache.index_select(0, idx).view(bs, max_blocks * block_size, n_kv, d)
+    v_win = v_cache.index_select(0, idx).view(bs, max_blocks * block_size, n_kv, d)
+    return k_win, v_win
+
+
+def _paged_sdpa_decode(
+    self: Any,
+    query: Any,
+    k_cache: Any,
+    v_cache: Any,
+    ctx: Any,
+) -> Any:
+    """Torch-native paged decode attention (no flash-attn required).
+
+    Gathers the per-request KV window via ``block_tables``, masks slots
+    at/after ``context_lens``, and runs SDPA. Every tensor shape is a
+    compile-time constant, so this path is CUDA-Graph capturable and a
+    single captured graph can be replayed for every decode step of a
+    request -- only tensor *values* change between replays.
+    """
+    import torch
+    import torch.nn.functional as functional
+
+    module = __import__(type(self).__module__, fromlist=["repeat_kv"])
+    batch_size = query.shape[0]
+    k_win, v_win = _gather_paged_kv(k_cache, v_cache, ctx.block_tables[:batch_size])
+    window = k_win.shape[1]
+
+    positions = torch.arange(window, device=query.device).unsqueeze(0)
+    valid = positions < ctx.context_lens[:batch_size].unsqueeze(1).to(positions.dtype)
+    # [B, 1, 1, W] additive mask: 0 for real history, -inf for unwritten
+    # or out-of-range slots.
+    bias = torch.zeros(
+        batch_size, 1, 1, window, dtype=query.dtype, device=query.device
+    ).masked_fill_(~valid.unsqueeze(1).unsqueeze(1), float("-inf"))
+
+    q = query.transpose(1, 2)
+    k = module.repeat_kv(k_win, self.n_rep).transpose(1, 2)
+    v = module.repeat_kv(v_win, self.n_rep).transpose(1, 2)
+    # is_causal=False: decode has a single query position, and validity is
+    # already expressed by the additive mask.
+    out = functional.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.0)
+    return out.transpose(1, 2)
+
+
 def _paged_attention_forward(
     self: Any,
     x: Any,
@@ -402,18 +528,21 @@ def _paged_attention_forward(
     """Rewrite of upstream ``Attention.forward`` for paged KV.
 
     Mirrors ``optim/attention._kv_buffer_forward`` for the projection
-    head (q/k/v projections + q_norm/k_norm + RoPE) and then defers the
-    SDPA backend to ``flash_attn_varlen_func`` (prefill) or
-    ``flash_attn_with_kvcache`` (decode). KV storage is the shared
-    ``[num_blocks, block_size, n_kv, d]`` block pool bound as
-    ``self.k_cache / self.v_cache``.
+    head (q/k/v projections + q_norm/k_norm + RoPE), then routes the
+    SDPA backend by availability:
+
+    - ``flash_attn`` installed -> ``flash_attn_varlen_func`` (prefill) /
+      ``flash_attn_with_kvcache`` (decode)
+    - otherwise -> ``_paged_sdpa_decode``, a torch-native gather+mask
+      path with identical paged semantics
+
+    KV storage is the shared ``[num_blocks, block_size, n_kv, d]`` block
+    pool bound as ``self.k_cache / self.v_cache``.
 
     Returns ``(output, None)`` -- the actual KV lives in the block pool;
     we never propagate past_key_value.
     """
     import math
-
-    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
     module = __import__(type(self).__module__, fromlist=["apply_rotary_pos_emb"])
     batch_size, sequence_len, _ = x.shape
@@ -429,47 +558,55 @@ def _paged_attention_forward(
     k_cache = self.k_cache  # [num_blocks, block_size, n_kv, d]
     v_cache = self.v_cache
 
+    use_flash = flash_attn_available()
+    _store_kv_paged(key, value, k_cache, v_cache, ctx.slot_mapping)
+
     if ctx.is_prefill:
-        # Prefill path: write all new tokens into the block pool via
-        # fork's ``store_kvcache`` Triton kernel, then run
-        # ``flash_attn_varlen_func`` against the cache.
-        store_kvcache(key, value, k_cache, v_cache, ctx.slot_mapping)
-        # flash_attn_varlen_func expects q/k/v shaped [N, H, D] (flat).
-        q_flat = query.reshape(-1, self.n_local_heads, self.head_dim)
-        scale = 1.0 / math.sqrt(self.head_dim)
-        out = flash_attn_varlen_func(
-            q_flat,
-            k_cache,
-            v_cache,
-            max_seqlen_q=ctx.max_seqlen_q,
-            cu_seqlens_q=ctx.cu_seqlens_q,
-            max_seqlen_k=ctx.max_seqlen_k,
-            cu_seqlens_k=ctx.cu_seqlens_k,
-            softmax_scale=scale,
-            causal=self.is_causal,
-            block_table=ctx.block_tables,
-        )
-        # out: [N, H, D] -> [B, seq, H, D]
-        out = out.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
-    else:
-        # Decode path: write one new token per request via store_kvcache,
-        # then call flash_attn_with_kvcache which reads the relevant
-        # history through block_table + context_lens.
-        store_kvcache(key, value, k_cache, v_cache, ctx.slot_mapping)
-        # q: [B, 1, H, D] -- flash_attn expects 4D
+        if use_flash:
+            from flash_attn import flash_attn_varlen_func
+
+            q_flat = query.reshape(-1, self.n_local_heads, self.head_dim)
+            out = flash_attn_varlen_func(
+                q_flat,
+                k_cache,
+                v_cache,
+                max_seqlen_q=ctx.max_seqlen_q,
+                cu_seqlens_q=ctx.cu_seqlens_q,
+                max_seqlen_k=ctx.max_seqlen_k,
+                cu_seqlens_k=ctx.cu_seqlens_k,
+                softmax_scale=1.0 / math.sqrt(self.head_dim),
+                causal=self.is_causal,
+                block_table=ctx.block_tables,
+            )
+            out = out.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
+        else:
+            # Prefill is never graph-captured, so a plain causal SDPA over
+            # the freshly written tokens is both correct and simplest.
+            import torch.nn.functional as functional
+
+            q = query.transpose(1, 2)
+            k = module.repeat_kv(key, self.n_rep).transpose(1, 2)
+            v = module.repeat_kv(value, self.n_rep).transpose(1, 2)
+            out = functional.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=self.is_causal
+            )
+            out = out.transpose(1, 2)
+    elif use_flash:
+        from flash_attn import flash_attn_with_kvcache
+
         q4d = query.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
-        scale = 1.0 / math.sqrt(self.head_dim)
         out = flash_attn_with_kvcache(
             q4d,
             k_cache,
             v_cache,
             cache_seqlens=ctx.context_lens,
             block_table=ctx.block_tables,
-            softmax_scale=scale,
+            softmax_scale=1.0 / math.sqrt(self.head_dim),
             causal=self.is_causal,
         )
-        # out: [B, 1, H, D] -> [B, 1, H, D] (already correct shape)
         out = out.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
+    else:
+        out = _paged_sdpa_decode(self, query, k_cache, v_cache, ctx)
 
     output = out.reshape(batch_size, sequence_len, -1)
     output = self.resid_dropout(self.o_proj(output))
@@ -601,11 +738,12 @@ def enable_paged_kv_cache(
 
 
 __all__ = [
+    "BlockManager",
     "PagedKVCache",
     "PagedKVContext",
-    "BlockManager",
     "Sequence",
     "enable_paged_kv_cache",
+    "flash_attn_available",
     "store_kvcache",
     "store_kvcache_kernel",
 ]

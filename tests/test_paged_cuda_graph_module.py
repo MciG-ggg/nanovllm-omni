@@ -43,8 +43,9 @@ _ensure_stub(
 # numpy is a real torch dependency -- never stub it.
 _ensure_stub("xxhash")
 
-from nanovllm_omni.engine import cuda_graph as cg  # noqa: E402
-from nanovllm_omni.engine import paged_cuda_graph as pcg  # noqa: E402
+from nanovllm_omni.models.minimind_omni import cuda_graph as cg  # noqa: E402
+from nanovllm_omni.models.minimind_omni import paged_attention as pa  # noqa: E402
+from nanovllm_omni.models.minimind_omni import paged_cuda_graph as pcg  # noqa: E402
 
 
 def test_capture_builds_exactly_one_graph() -> None:
@@ -135,6 +136,28 @@ def test_required_blocks_covers_prompt_plus_budget(
     dec.block_size = block_size
     assert dec._required_blocks(prompt_len) == expected
     assert dec._required_blocks(prompt_len) * block_size >= prompt_len + n_steps
+
+
+def test_prefill_context_sets_flashattention_boundaries() -> None:
+    """The B=1 paged decoder must supply valid varlen prefill metadata."""
+    dec = object.__new__(pcg.PagedCudaGraphDecoder)
+    dec.block_size = 4
+    dec._seq = types.SimpleNamespace(block_table=[2, 3])
+    ctx = pa.PagedKVContext(
+        slot_mapping=torch.full((8,), -1, dtype=torch.int32),
+        context_lens=torch.zeros(1, dtype=torch.int32),
+        block_tables=torch.zeros((1, 2), dtype=torch.int32),
+        cu_seqlens_q=torch.zeros(2, dtype=torch.int32),
+        cu_seqlens_k=torch.zeros(2, dtype=torch.int32),
+    )
+    dec.cache = types.SimpleNamespace(_ctx=ctx)
+
+    dec._sync_prefill_ctx(prompt_len=6)
+
+    assert ctx.is_prefill
+    assert ctx.cu_seqlens_q.tolist() == [0, 6]
+    assert ctx.cu_seqlens_k.tolist() == [0, 6]
+    assert ctx.max_seqlen_q == ctx.max_seqlen_k == 6
 
 
 def test_enable_paged_cuda_graph_returns_none_without_cuda() -> None:

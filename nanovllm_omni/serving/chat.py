@@ -9,8 +9,10 @@ fed back into the prompt. The engine is lazy-built on first send.
 
 from __future__ import annotations
 
-import contextlib
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 def register(demo: Any) -> None:
@@ -73,15 +75,16 @@ def register(demo: Any) -> None:
                     files.append(str(file_data["path"]))
         images: list[Any] = []
         for f in files:
-            with contextlib.suppress(Exception):
-                # Corrupt or unreadable file -- skip silently so the chat
-                # still answers the text part of the message.
+            try:
                 images.append(PILImage.open(f).convert("RGB"))
+            except (OSError, ValueError) as exc:
+                _logger.warning("Skipping unreadable chat image %s: %s", f, exc)
         prompt = text if text else "Describe this image."
         extras: dict[str, Any] = {"images": images, "max_new_tokens": 256}
         try:
             out = engine.generate([prompt], SamplingParams(extra=extras))[0]
-        except Exception as exc:  # engine load / forward failure
+        except Exception as exc:  # UI boundary must return a visible error.
+            _logger.exception("SmolVLM chat inference failed")
             history = list(history) + [{"role": "assistant", "content": f"[error] {exc}"}]
             return history, (engine, mid)
         reply = f"[error] {out.error}" if out.error else out.multimodal_output["text"]

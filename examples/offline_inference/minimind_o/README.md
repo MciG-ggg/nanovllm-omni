@@ -43,7 +43,7 @@ HF_HUB_OFFLINE=1 bash run_batched.sh \
     --mimi pretrained/mimi --out batched_smoke
 ```
 
-`batched.py` exercises `engine/kv_pool.py + engine/batched_runner.py`
+`batched.py` exercises `models/minimind_omni/kv_pool.py + models/minimind_omni/batched_runner.py`
 on two prompts and asserts:
 
 - **Q10a determinism** — `solo_a.wav` is byte-identical to

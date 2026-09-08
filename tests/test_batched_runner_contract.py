@@ -21,7 +21,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.engine.batched_runner import run_batched_generate  # noqa: E402
+from nanovllm_omni.models.minimind_omni.batched_runner import run_batched_generate  # noqa: E402
 from nanovllm_omni.outputs import AudioPayload  # noqa: E402
 from tests.test_batched_generation import FakeMiniMindOmni, _FakeMimi, _FakeTokenizer  # noqa: E402
 

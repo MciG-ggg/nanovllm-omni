@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+import nanovllm_omni
 from nanovllm_omni import Omni
 from nanovllm_omni.config.params import SamplingParams
 

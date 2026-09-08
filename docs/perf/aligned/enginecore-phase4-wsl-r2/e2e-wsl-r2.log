@@ -1,0 +1,16 @@
+[transformers] The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[transformers] You are using a model of type `minimind-o` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+Notice: ffmpeg is not installed. torchaudio is used to load audio
+If you want to use ffmpeg backend to load audio, please install it by:
+	sudo apt install ffmpeg # ubuntu
+	# brew install ffmpeg # mac
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 11122.15it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  46%|████▋     | 162/350 [00:00<00:00, 1609.91it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 2456.01it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  41%|████      | 142/350 [00:00<00:00, 1418.48it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 2313.89it/s]
+2026-09-08 22:12:40,405 [INFO] paged CUDA Graph captured: 1 graph, window=3 blocks (replayed every AR step)
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 9540.74it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  56%|█████▌    | 195/350 [00:00<00:00, 1941.51it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 2792.54it/s]
+2026-09-08 22:12:47,894 [INFO] talker CUDA Graph engaged forces greedy decode; request do_sample=True ignored. Set use_talker_cuda_graph: false to keep sampling.
+wrote /tmp/wsl-e2e-paged.wav (1962284 bytes, sr=24000)

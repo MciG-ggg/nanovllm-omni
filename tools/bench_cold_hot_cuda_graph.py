@@ -217,7 +217,7 @@ def bench_interleaved(
     """Alternate between different prompt lengths and max_tokens budgets."""
     import torch
 
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
 
     metrics = InterleavedMetrics()
     prev_n_steps = -1
@@ -256,7 +256,7 @@ def cpu_contract_check() -> None:
     # Verify n_steps - 1 capture semantics via source inspection
     import inspect
 
-    from nanovllm_omni.engine import cuda_graph as cg
+    from nanovllm_omni.models.minimind_omni import cuda_graph as cg
 
     src = inspect.getsource(cg.CudaGraphDecoder._capture)
     assert (
@@ -326,8 +326,8 @@ def main() -> int:
         )
         return 0
 
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
     from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
 
     print(f"Loading model from {args.model} ...", flush=True)
     bundle = load_minimind_omni_bundle(model_id=args.model, mimi_model_id=args.mimi)

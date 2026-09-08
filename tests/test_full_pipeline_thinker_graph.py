@@ -23,7 +23,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.engine import cuda_graph as cg  # noqa: E402
+from nanovllm_omni.models.minimind_omni import cuda_graph as cg  # noqa: E402
 from nanovllm_omni.models.minimind_omni import generation as gen_module  # noqa: E402
 from nanovllm_omni.models.minimind_omni.stage_processors import (  # noqa: E402
     ThinkerStageOutput,

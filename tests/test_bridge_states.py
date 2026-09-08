@@ -211,7 +211,7 @@ def _drain(runner: BatchedThinkerRunner, sched) -> None:
 
 
 # Lazy import so non-bridge tests can skip the runtime scheduler import.
-from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler  # noqa: E402
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # enable_bridge_capture + _resolve_bridge_layer

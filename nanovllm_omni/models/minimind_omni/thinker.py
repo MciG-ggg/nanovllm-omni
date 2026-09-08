@@ -249,6 +249,7 @@ def run_generate(
     text_token_callback: Callable[[list[int]], None] | None = None,
     post_eos_padding_count: int = 0,
     internal_stop_token_id: int | None = None,
+    graph_backend: str = "paged",
 ) -> list[list[int]]:
     """Stream ``model.generate`` and collect Mimi codebook frames.
 
@@ -258,8 +259,9 @@ def run_generate(
     runner's prefill so the thinker sees user speech (engine-native audio in).
 
     ``use_thinker_cuda_graph=True`` (opt-in, default off) routes text+audio decode
-    through the CUDA-Graph fixed-KV-buffer decoder (``optim.cuda_graph``);
-    returns the same list-of-8-token frames. Falls back to eager
+    through a CUDA-Graph decoder. Default ``graph_backend="paged"`` is the
+    single-graph paged path; ``graph_backend="perpos"`` keeps the legacy
+    per-position decoder for the three-cell bench. Falls back to eager
     ``stream_generate`` when CUDA is unavailable or the model isn't
     capture-compatible.
 
@@ -288,11 +290,20 @@ def run_generate(
             hasattr(model, name)
             for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
         ):
-            from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+            from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
+            from nanovllm_omni.models.minimind_omni.paged_cuda_graph import enable_paged_cuda_graph
 
-            graph_decoder = enable_cuda_graph(
-                model, n_steps=max_new_tokens, eos_token_id=eos_token_id
-            )
+            graph_decoder = None
+            if graph_backend != "perpos" and hasattr(
+                getattr(model, "config", None), "audio_pad_token"
+            ):
+                graph_decoder = enable_paged_cuda_graph(
+                    model, n_steps=max_new_tokens, eos_token_id=eos_token_id
+                )
+            if graph_decoder is None:
+                graph_decoder = enable_cuda_graph(
+                    model, n_steps=max_new_tokens, eos_token_id=eos_token_id
+                )
             if graph_decoder is not None:
                 graph_decoder.temperature = temperature
                 graph_decoder.top_p = top_p

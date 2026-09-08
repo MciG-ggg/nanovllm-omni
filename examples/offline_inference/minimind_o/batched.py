@@ -1,7 +1,7 @@
 """Smoke: batched continuous-batching generate -> audio.wav (MiniMind-O).
 
 Real-weight check for the batched engine loop
-(``engine/kv_pool.py`` + ``engine/batched_runner.py``). Asserts two
+(``models/minimind_omni/kv_pool.py`` + ``models/minimind_omni/batched_runner.py``). Asserts two
 properties that would otherwise be invisible in the fake-model unit
 tests:
 
@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from nanovllm_omni.engine.batched_runner import run_batched_generate
+from nanovllm_omni.models.minimind_omni.batched_runner import run_batched_generate
 from nanovllm_omni.models.minimind_omni.bundle import create_bundle
 
 

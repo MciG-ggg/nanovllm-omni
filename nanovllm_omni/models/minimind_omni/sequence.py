@@ -8,7 +8,7 @@ decode (Q8a).
 
 Named ``OmniSequence`` (not ``Sequence``) because it is a different
 dataclass than ``nanovllm.engine.sequence.Sequence`` (the fork's type,
-used by ``engine/paged_attention.py`` via the shim) -- same name would
+used by ``paged_attention.py`` via the shim) -- same name would
 collide and mislead ``from .sequence import Sequence`` callers about
 which shape they get.
 

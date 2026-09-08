@@ -1,0 +1,18 @@
+/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+Notice: ffmpeg is not installed. torchaudio is used to load audio
+If you want to use ffmpeg backend to load audio, please install it by:
+	sudo apt install ffmpeg # ubuntu
+	# brew install ffmpeg # mac
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 10305.67it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  35%|███▍      | 121/350 [00:00<00:00, 1189.56it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 1894.86it/s]
+2026-09-08 22:11:47,352 [INFO] paged CUDA Graph captured: 1 graph, window=1 blocks (replayed every AR step)
+2026-09-08 22:11:59,604 [INFO] paged CUDA Graph captured: 1 graph, window=1 blocks (replayed every AR step)
+cell      graphs       p50      cold   capture  vram_mb  frames
+eager          0     636.1       0.0       0.0      527       8
+perpos        15     199.6     295.3      95.7      501      16
+paged          1     198.4     243.8      45.4      509      16
+
+speedup vs eager: {'eager': 1.0, 'perpos': 3.187, 'paged': 3.206}
+recapture when n_steps changes: False (paged must be False)
+wrote docs/perf/aligned/enginecore-phase4-wsl-r2/cells.csv + meta.json

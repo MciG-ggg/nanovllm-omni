@@ -23,7 +23,9 @@ import pytest
 torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402 -- after importorskip
 
-from nanovllm_omni.engine import attention as attn_mod  # noqa: E402 -- after importorskip
+from nanovllm_omni.models.minimind_omni import (  # noqa: E402 -- after importorskip
+    attention as attn_mod,
+)
 
 
 class _RMSNorm(nn.Module):
@@ -130,7 +132,7 @@ def _cat_baseline_forward(attn, x, past_key_value, use_cache, attention_mask):
 def _run_forward(attn, x, past_key_value, sequence_len, buffered: bool):
     import torch.nn.functional as functional  # noqa: F401  (mirror upstream)
 
-    from nanovllm_omni.engine.attention import _kv_buffer_forward
+    from nanovllm_omni.models.minimind_omni.attention import _kv_buffer_forward
 
     if buffered:
         fn = _kv_buffer_forward
@@ -187,7 +189,7 @@ def _run_step_sequence(
     via the returned (key, value)."""
     attn = _make_stub_attention(n_heads, n_kv_heads, head_dim, feat_dim)
     if use_buffer:
-        from nanovllm_omni.engine.attention import _attach_kv_buffer
+        from nanovllm_omni.models.minimind_omni.attention import _attach_kv_buffer
 
         _attach_kv_buffer(attn, max_len=prefill_seq + n_steps + 4)
         # prefill
@@ -223,7 +225,7 @@ def _make_paired_stubs(n_heads, n_kv_heads, head_dim, feat_dim):
 
 def _run_both(n_steps, feat_dim, n_heads, n_kv_heads, head_dim, prefill_seq):
     """Run buffered and cat paths on bit-identical stubs; return all outputs."""
-    from nanovllm_omni.engine.attention import _attach_kv_buffer
+    from nanovllm_omni.models.minimind_omni.attention import _attach_kv_buffer
 
     buf_attn, cat_attn = _make_paired_stubs(n_heads, n_kv_heads, head_dim, feat_dim)
     _attach_kv_buffer(buf_attn, max_len=prefill_seq + n_steps + 4)
@@ -291,7 +293,7 @@ def test_fixed_buffer_returns_full_history_as_past() -> None:
 def test_attach_is_per_instance_and_idempotent() -> None:
     """E24 lesson: patch must bind per instance, and re-attach must not
     double-bind (new `forward` each call)."""
-    from nanovllm_omni.engine.attention import (
+    from nanovllm_omni.models.minimind_omni.attention import (
         _attach_kv_buffer,
         _kv_buffer_forward,
     )

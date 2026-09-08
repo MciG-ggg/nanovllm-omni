@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,9 @@ from ..config.registry import (
 
 if TYPE_CHECKING:
     from ..engine.executor import PipelineExecutor
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -52,7 +56,8 @@ def _load_pretrained_config(model: str, trust_remote_code: bool) -> Any | None:
         return None
     try:
         return PretrainedConfig.from_pretrained(model, trust_remote_code=trust_remote_code)
-    except Exception:
+    except OSError as exc:
+        _logger.debug("Could not load HF config for %s: %s", model, exc)
         return None
 
 
@@ -129,12 +134,8 @@ def try_infer_model_type(
                         continue
                     if archs.intersection(registered.hf_architectures):
                         predicate = registered.hf_config_predicate
-                        if predicate is not None:
-                            try:
-                                if not predicate(config):
-                                    continue
-                            except Exception:
-                                continue
+                        if predicate is not None and not predicate(config):
+                            continue
                         return registered.name
 
     return None
@@ -272,10 +273,5 @@ class OmniBase:
                 device=self.engine_args.device,
                 **kwargs,
             )
-            try:
-                self._bundle.use_thinker_cuda_graph = self._resolve_deploy().use_thinker_cuda_graph
-            except Exception:
-                # deploy not resolvable -> keep eager default (generate_audio
-                # reads bundle.use_thinker_cuda_graph or False)
-                self._bundle.use_thinker_cuda_graph = False
+            self._bundle.use_thinker_cuda_graph = self._resolve_deploy().use_thinker_cuda_graph
         return self._bundle

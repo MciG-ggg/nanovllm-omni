@@ -1,0 +1,69 @@
+[transformers] The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[transformers] You are using a model of type `minimind-o` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+Notice: ffmpeg is not installed. torchaudio is used to load audio
+If you want to use ffmpeg backend to load audio, please install it by:
+	sudo apt install ffmpeg # ubuntu
+	# brew install ffmpeg # mac
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 8527.85it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  23%|██▎       | 80/350 [00:00<00:00, 799.13it/s]Loading weights:  48%|████▊     | 168/350 [00:00<00:00, 842.20it/s]Loading weights:  79%|███████▊  | 275/350 [00:00<00:00, 945.66it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 1042.19it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  13%|█▎        | 47/350 [00:00<00:00, 465.91it/s]Loading weights:  42%|████▏     | 148/350 [00:00<00:00, 784.10it/s]Loading weights:  66%|██████▋   | 232/350 [00:00<00:00, 806.73it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 1024.68it/s]
+2026-09-08 19:09:23,025 [INFO] enable_cuda_graph: 12 attention instances buffer-ized
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 9292.72it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  27%|██▋       | 95/350 [00:00<00:00, 941.26it/s]Loading weights:  54%|█████▍    | 190/350 [00:00<00:00, 919.98it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 1375.61it/s]
+[W908 19:10:23.170333663 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 16777216 bytes (free: 0, total: 4294508544).
+[W908 19:10:23.177555597 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 16777216 bytes (free: 0, total: 4294508544).
+Traceback (most recent call last):
+  File "/home/mcig/nanovllm-omni/examples/offline_inference/minimind_o/end2end.py", line 55, in <module>
+    main()
+  File "/home/mcig/nanovllm-omni/examples/offline_inference/minimind_o/end2end.py", line 47, in main
+    outs = omni.generate([args.prompt], sampling)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/entrypoints/omni.py", line 108, in generate
+    return list(_iter())
+           ^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/entrypoints/omni.py", line 104, in _iter
+    yield self._one(prompt, sp)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/entrypoints/omni.py", line 59, in _one
+    payload = executor._runner.run(text, sampling_params)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/engine/runner.py", line 151, in run
+    payload = instance(payload, stage_sampling)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/models/minimind_omni/talker.py", line 1104, in talker_forward_full
+    mtp_runner, graph_engaged = _resolve_mtp_runner()
+                                ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/models/minimind_omni/talker.py", line 1064, in _resolve_mtp_runner
+    talker = _resolve_talker()
+             ^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/models/minimind_omni/talker.py", line 1045, in _resolve_talker
+    bundle = create_bundle(
+             ^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/models/minimind_omni/bundle.py", line 164, in create_bundle
+    return load_minimind_omni_bundle(model_id=model_id, device=device, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/nanovllm-omni/nanovllm_omni/models/minimind_omni/bundle.py", line 125, in load_minimind_omni_bundle
+    mimi = mimi.to(device)
+           ^^^^^^^^^^^^^^^
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/transformers/modeling_utils.py", line 3768, in to
+    return super().to(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1388, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  [Previous line repeated 1 more time]
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 966, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1374, in convert
+    return t.to(
+           ^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.00 MiB. GPU 0 has a total capacity of 4.00 GiB of which 0 bytes is free. Including non-PyTorch memory, this process has 17179869184.00 GiB memory in use. Of the allocated memory 2.56 GiB is allocated by PyTorch, with 1008.67 MiB allocated in private pools (e.g., CUDA Graphs), and 21.55 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

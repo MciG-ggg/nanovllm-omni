@@ -209,9 +209,9 @@ docs/           # 项目笔记与性能归档
 
 这是与 vllm-omni 的有意分歧:vllm-omni 里每个 stage 跑在独立的 `StageEngineCoreProc` 子进程里,stage 可以绑定到不同的 GPU。vllm-omni 能这么做是因为每个 stage 都是独立的 HF checkpoint(thinker 30B、talker 2B、code2wav 1B 等)。MiniMind-O 的 `thinker` 和 `talker` 是同一个 `AutoModelForCausalLM` 的子模块,从同一个 safetensors 文件加载,所以 per-stage 子进程隔离会强制每个 stage 重新加载完整的 ~3 GB checkpoint — 在我们目标的 4 GB 卡上跑不动,在更大的卡上也是浪费。`bundle.py` 改成所有东西在一个进程里;stage 之间的通信(thinker hidden states → talker → code2wav)用 Python tensor 引用,零序列化、零 IPC。
 
-同卡上的请求级并行用 in-process 批量 runner(`examples/offline_inference/minimind_o/batched.py`,由 `tests/test_batched_generation.py` 锁定 — Q10a)。多卡、per-stage 子进程隔离、tensor-parallel 和 pipeline-parallel 调度器都明确不在范围内;以后要加任意一项,改动必须从改造 `bundle.py`(每个 replica 一个 bundle)和 `engine/runtime.py`(per-replica 推理路径)开始,而不是把 vllm-omni 的 `StageRuntime` 硬塞进一个今天用不上的运行时。
+同卡上的请求级并行用 in-process 批量 runner(`examples/offline_inference/minimind_o/batched.py`,由 `tests/test_batched_generation.py` 锁定 — Q10a)。多卡、per-stage 子进程隔离、tensor-parallel 和 pipeline-parallel 调度器都明确不在范围内;以后要加任意一项,改动必须从改造 `models/minimind_omni/bundle.py`(每个 replica 一个 bundle)和 `engine/runner.py` / `engine/executor.py`(per-replica 推理路径)开始,而不是把 vllm-omni 的 `StageRuntime` 硬塞进一个今天用不上的运行时。
 
-四个支持的模型族共用同一个单进程运行时:per-stage 持续批处理(TK-004)通过 `engine/runtime_scheduler.py` in-process 实现。per-stage replica + RoundRobin LB 层(TK-007)已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)。
+四个支持的模型族共用同一个单进程 pipeline runner。per-stage 持续批处理(TK-004)目前只用于 MiniMind-O,通过 `models/minimind_omni/runtime_scheduler.py` in-process 实现。per-stage replica + RoundRobin LB 层(TK-007)已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)。
 
 ## 致谢
 

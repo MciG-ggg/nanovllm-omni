@@ -1,6 +1,6 @@
 """Single-graph paged CUDA Graph decode (one graph, replayed many times).
 
-This is the position-independent counterpart to ``optim/cuda_graph``.
+This is the position-independent counterpart to ``cuda_graph``.
 
 The difference in one line
 --------------------------
@@ -11,7 +11,7 @@ tensor shapes at capture time.
 
 This module captures **exactly one** decode graph and replays it for
 every AR step of a request. That is possible because the paged cache
-(``optim/paged_attention``) keeps every tensor shape constant:
+(``paged_attention``) keeps every tensor shape constant:
 
 - new K/V is written through ``slot_mapping`` (fixed length)
 - history is read through ``block_tables`` + ``context_lens``
@@ -46,17 +46,17 @@ from typing import Any
 
 import torch
 
-from nanovllm_omni.engine.cuda_graph import (
-    CudaGraphDecoder,
-    _build_omni_input,
-    _patched_forward,
-)
-from nanovllm_omni.engine.paged_attention import enable_paged_kv_cache
 from nanovllm_omni.models.minimind_omni._sampling import (
     NUM_AUDIO_LAYERS,
     sample_one_audio_layer,
     sample_text_token,
 )
+from nanovllm_omni.models.minimind_omni.cuda_graph import (
+    CudaGraphDecoder,
+    _build_omni_input,
+    _patched_forward,
+)
+from nanovllm_omni.models.minimind_omni.paged_attention import enable_paged_kv_cache
 
 _log = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         """
         if self._seq is not None:
             # already-freed is not fatal
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(RuntimeError):
                 self.cache.release(self._seq)
             self._seq = None
         if self.cache is not None and self.cache.kv_cache is not None:
@@ -196,6 +196,14 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         )
         context.context_lens.zero_()
         context.context_lens[0] = prompt_len
+        # The decoder currently runs one request per graph. FlashAttention's
+        # varlen prefill still needs explicit [0, prompt_len] boundaries.
+        context.cu_seqlens_q.zero_()
+        context.cu_seqlens_q[1] = prompt_len
+        context.cu_seqlens_k.zero_()
+        context.cu_seqlens_k[1] = prompt_len
+        context.max_seqlen_q = prompt_len
+        context.max_seqlen_k = prompt_len
         context.block_tables.zero_()
         context.block_tables[0, : len(bt)] = torch.tensor(
             bt, dtype=context.block_tables.dtype, device=context.block_tables.device
@@ -358,7 +366,7 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
                 self.graph_input.copy_(_build_omni_input(next_token, self.audio_pad))
                 self._sync_decode_ctx()
                 self.graph.replay()
-            except Exception as exc:  # noqa: BLE001 - replay can fail for many CUDA reasons
+            except RuntimeError as exc:
                 self.graph = None
                 self._captured = False
                 raise RuntimeError(

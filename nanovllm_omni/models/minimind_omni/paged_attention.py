@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from contextlib import suppress
@@ -9,10 +10,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import torch
 
+
+_logger = logging.getLogger(__name__)
+
+
 """Paged-KV attention via the MciG-ggg/nano-vllm fork (submodule).
 
 This module is the **position-independent successor** to
-``optim/attention.enable_fixed_kv_buffer``. The fork is the foundation:
+``attention.enable_fixed_kv_buffer``. The fork is the foundation:
 ``BlockManager`` allocates block IDs from a shared pool, ``Sequence``
 tracks per-request block tables, and each attention layer's
 ``module.k_cache / module.v_cache`` are views into a single
@@ -50,14 +55,14 @@ generate() calls requires no attention changes.
 Submodule strategy
 ------------------
 The fork is pinned at ``third_party/nano-vllm/`` (see ``.gitmodules``).
-We **dynamically load** the three files we need
-(``nanovllm.layers.attention`` + ``nanovllm.engine.block_manager`` +
-``nanovllm.engine.sequence``) via ``importlib`` so that macOS-side
-imports don't require ``flash_attn`` / ``triton`` -- those deps only
-need to be installed on the WSL inference box. The fork's
-``store_kvcache`` Triton kernel + ``Attention`` SDPA helpers are re-used
-directly; the surrounding plumbing (per-layer pool wiring, batched
-Context, AR-step block management) is written here.
+Its package initializer is lazy: importing ``nanovllm.engine.block_manager``
+does not import or instantiate the full Qwen3 ``LLMEngine``. We add the
+submodule root to ``sys.path`` only when paged KV is first enabled, then
+import the two fork types we actually use (``BlockManager`` and
+``Sequence``). Flash-attn / triton remain optional on macOS; the torch-native
+SDPA fallback is used when those CUDA wheels are unavailable. The surrounding
+plumbing (per-layer pool wiring, batched context, AR-step block management)
+is written here.
 
 Bridged contracts
 -----------------
@@ -79,46 +84,32 @@ Bridged contracts
 _PAGEDKV_MARKER = "_nanovllm_paged_kv"
 
 # Submodule path -- third_party/nano-vllm/.
-_FORK_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "nano-vllm"
+_FORK_ROOT = Path(__file__).resolve().parents[3] / "third_party" / "nano-vllm"
 
 
-def _install_fork_shim() -> None:
-    """Install a thin import-time shim over the nano-vllm fork's package.
+def _ensure_fork_path() -> None:
+    """Make the vendored fork importable without loading its full engine.
 
-    The fork's own ``nanovllm/__init__.py`` is ``from nanovllm.llm import
-    LLM`` -- it instantiates a full vLLM engine, pulls in Qwen3, transformers,
-    flash-attn, and calls ``torch.distributed.init_process_group``. We need
-    *none of that*: just ``BlockManager`` and ``Sequence`` for the paged KV
-    adapter.
-
-    The shim replaces the package entry in ``sys.modules`` while keeping the
-    real fork's directory on ``__path__``. Consumers then write normal imports
-    like ``from nanovllm.engine.block_manager import BlockManager`` -- no
-    importlib magic, no post-load stub withdrawal, no spec_from_file_location.
-
-    Idempotent: re-running after the shim is already installed is a no-op.
+    The fork's lazy ``__init__.py`` keeps normal package imports cheap. If a
+    different ``nanovllm`` package was imported first, fail explicitly rather
+    than silently mixing two packages under one module name.
     """
-    if getattr(sys.modules.get("nanovllm"), "_fork_shim", False):
-        return
-    # Drop any prior stub (ours or someone else's) so the real package
-    # can claim the name.
-    sys.modules.pop("nanovllm", None)
     pkg_root = _FORK_ROOT / "nanovllm"
     if not pkg_root.exists():
         raise RuntimeError(
             f"nano-vllm submodule missing at {pkg_root}; "
             "did you forget `git submodule update --init`?"
         )
-    # sys.path so the real submodule files resolve.
     fork_root = str(_FORK_ROOT)
     if fork_root not in sys.path:
         sys.path.insert(0, fork_root)
-    shim = types.ModuleType("nanovllm")
-    shim.__file__ = str(pkg_root / "__init__.py")
-    shim.__path__ = [str(pkg_root)]
-    shim.__package__ = "nanovllm"
-    shim._fork_shim = True
-    sys.modules["nanovllm"] = shim
+    package = sys.modules.get("nanovllm")
+    if package is not None:
+        package_path = {str(path) for path in getattr(package, "__path__", ())}
+        if str(pkg_root) not in package_path:
+            raise ImportError(
+                "nanovllm is already imported from a different package; " f"expected {pkg_root}"
+            )
 
 
 def _ensure_xxhash() -> None:
@@ -158,22 +149,16 @@ _FORK_TYPES_CACHE: list[tuple[type, type]] = []
 
 
 def _load_fork_types() -> tuple[type, type]:
-    """Install the fork shim and return ``(BlockManager, Sequence)``.
+    """Load and cache the fork's ``(BlockManager, Sequence)`` types.
 
-    Deferred to first call (not module import) so that importing this
-    module -- e.g. as a dependency of ``engine/paged_cuda_graph.py``
-    before any paged path is actually used -- does not pay the
-    ``sys.modules`` rewrite + submodule import cost. Real callers are
+    Deferred to first call so importing this module does not add the fork
+    root or its optional dependencies to the process. Real callers are
     ``PagedKVCache.new_sequence`` / ``append_token`` / ``release`` and
-    ``enable_paged_kv_cache``; only they need the shim installed.
-
-    Cached after the first successful call: the shim install itself is
-    idempotent, but repeating the two ``import`` statements every call
-    would be wasteful.
+    ``enable_paged_kv_cache``.
     """
     if _FORK_TYPES_CACHE:
         return _FORK_TYPES_CACHE[0]
-    _install_fork_shim()
+    _ensure_fork_path()
     _ensure_xxhash()
     from nanovllm.engine.block_manager import BlockManager  # noqa: PLC0415
     from nanovllm.engine.sequence import Sequence  # noqa: PLC0415
@@ -402,7 +387,8 @@ def flash_attn_available() -> bool:
     if mod is None:
         try:
             import flash_attn as mod  # type: ignore[no-redef]
-        except Exception:
+        except (ImportError, OSError) as exc:
+            _logger.debug("flash_attn is unavailable: %s", exc)
             return False
     return getattr(mod, "__file__", None) is not None
 
@@ -481,7 +467,7 @@ def _paged_sdpa_decode(
     query: Any,
     k_cache: Any,
     v_cache: Any,
-    ctx: Any,
+    context: Any,
 ) -> Any:
     """Torch-native paged decode attention (no flash-attn required).
 
@@ -496,11 +482,11 @@ def _paged_sdpa_decode(
 
     module = __import__(type(self).__module__, fromlist=["repeat_kv"])
     batch_size = query.shape[0]
-    k_win, v_win = _gather_paged_kv(k_cache, v_cache, ctx.block_tables[:batch_size])
+    k_win, v_win = _gather_paged_kv(k_cache, v_cache, context.block_tables[:batch_size])
     window = k_win.shape[1]
 
     positions = torch.arange(window, device=query.device).unsqueeze(0)
-    valid = positions < ctx.context_lens[:batch_size].unsqueeze(1).to(positions.dtype)
+    valid = positions < context.context_lens[:batch_size].unsqueeze(1).to(positions.dtype)
     # [B, 1, 1, W] additive mask: 0 for real history, -inf for unwritten
     # or out-of-range slots.
     bias = torch.zeros(
@@ -526,7 +512,7 @@ def _paged_attention_forward(
 ) -> tuple[Any, Any]:
     """Rewrite of upstream ``Attention.forward`` for paged KV.
 
-    Mirrors ``optim/attention._kv_buffer_forward`` for the projection
+    Mirrors ``attention._kv_buffer_forward`` for the projection
     head (q/k/v projections + q_norm/k_norm + RoPE), then routes the
     SDPA backend by availability:
 
@@ -553,7 +539,7 @@ def _paged_attention_forward(
     query, key = self.q_norm(query), self.k_norm(key)
     query, key = module.apply_rotary_pos_emb(query, key, *position_embeddings)
 
-    ctx = self._paged_kv_ctx
+    context = self._paged_kv_ctx
     k_cache = self.k_cache  # [num_blocks, block_size, n_kv, d]
     v_cache = self.v_cache
 
@@ -564,9 +550,9 @@ def _paged_attention_forward(
     import os
 
     use_flash = flash_attn_available() and not os.environ.get("NANOVLLM_DISABLE_FLASH")
-    _store_kv_paged(key, value, k_cache, v_cache, ctx.slot_mapping)
+    _store_kv_paged(key, value, k_cache, v_cache, context.slot_mapping)
 
-    if ctx.is_prefill:
+    if context.is_prefill:
         if use_flash:
             from flash_attn import flash_attn_varlen_func
 
@@ -575,13 +561,13 @@ def _paged_attention_forward(
                 q_flat,
                 k_cache,
                 v_cache,
-                max_seqlen_q=ctx.max_seqlen_q,
-                cu_seqlens_q=ctx.cu_seqlens_q,
-                max_seqlen_k=ctx.max_seqlen_k,
-                cu_seqlens_k=ctx.cu_seqlens_k,
+                max_seqlen_q=context.max_seqlen_q,
+                cu_seqlens_q=context.cu_seqlens_q,
+                max_seqlen_k=context.max_seqlen_k,
+                cu_seqlens_k=context.cu_seqlens_k,
                 softmax_scale=1.0 / math.sqrt(self.head_dim),
                 causal=self.is_causal,
-                block_table=ctx.block_tables,
+                block_table=context.block_tables,
             )
             out = out.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
         else:
@@ -604,14 +590,14 @@ def _paged_attention_forward(
             q4d,
             k_cache,
             v_cache,
-            cache_seqlens=ctx.context_lens,
-            block_table=ctx.block_tables,
+            cache_seqlens=context.context_lens,
+            block_table=context.block_tables,
             softmax_scale=1.0 / math.sqrt(self.head_dim),
             causal=self.is_causal,
         )
         out = out.view(batch_size, sequence_len, self.n_local_heads, self.head_dim)
     else:
-        out = _paged_sdpa_decode(self, query, k_cache, v_cache, ctx)
+        out = _paged_sdpa_decode(self, query, k_cache, v_cache, context)
 
     output = out.reshape(batch_size, sequence_len, -1)
     output = self.resid_dropout(self.o_proj(output))

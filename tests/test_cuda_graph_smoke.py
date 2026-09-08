@@ -47,7 +47,7 @@ def input_ids(bundle):
 @skip_no_weights
 def test_graph_captures_n_steps_minus_one(bundle, input_ids):
     """Verify the decoder captures exactly n_steps - 1 graphs."""
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
 
     n = 8
     model = bundle.model
@@ -62,7 +62,7 @@ def test_graph_captures_n_steps_minus_one(bundle, input_ids):
 @skip_no_weights
 def test_graph_token_count_matches_eager(bundle, input_ids):
     """Graph and eager produce the same number of text tokens (same seed)."""
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
     from nanovllm_omni.models.minimind_omni.generation import stream_generate
 
     model = bundle.model
@@ -103,7 +103,7 @@ def test_graph_token_count_matches_eager(bundle, input_ids):
 @skip_no_weights
 def test_graph_deterministic_across_calls(bundle, input_ids):
     """Same seed, two graph calls → identical text tokens."""
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
 
     model = bundle.model
     dec = enable_cuda_graph(model, n_steps=16, max_len=input_ids.shape[1] + 20)
@@ -118,7 +118,7 @@ def test_graph_deterministic_across_calls(bundle, input_ids):
 @skip_no_weights
 def test_recapture_on_different_prompt_length(bundle):
     """Different prompt lengths trigger recapture (defect #5 guard)."""
-    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
+    from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
 
     model = bundle.model
     tok = bundle.tokenizer

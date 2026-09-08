@@ -270,7 +270,7 @@ class TalkerMtpCudaGraph:
                     )
             entry.graph.replay()
             return entry.output.clone()
-        except Exception as exc:
+        except RuntimeError as exc:
             self.invalidate(key)
             _log.warning("Talker MTP CUDA Graph failed; using eager path: %s", exc)
             return self._invoke(

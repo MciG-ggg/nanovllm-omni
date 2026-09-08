@@ -54,7 +54,7 @@ def stream_generate(
     """
     import torch
 
-    from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
+    from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler
 
     sched = RuntimeScheduler(max_num_seqs=1)
     runner = BatchedThinkerRunner(

@@ -1,144 +1,141 @@
 # Architecture: how nanovllm-omni maps to vllm-omni
 
-This document is for readers who want to understand vllm-omni's design
-by reading `nanovllm-omni`. It pairs each module in this repository
-with its counterpart in vllm-omni, walks through the request lifecycle
-end-to-end, and lists the in-scope divergences you should know about.
+This document describes the implementation that is actually in this
+repository. The project mirrors vllm-omni's consumer-facing pipeline shape;
+it does not reuse vllm-omni's engine internals.
 
-If you have not read the [README](../README.md) and [AGENTS.md](../AGENTS.md)
-yet, read them first. The "Definition of aligned" section in AGENTS.md
-defines what counts as a divergence from vllm-omni and what does not.
+## Runtime boundary
+
+`nanovllm-omni` has one in-process pipeline runner. `OmniBase` resolves a
+registered `PipelineConfig`, loads deploy defaults, and owns one
+`PipelineExecutor`. `PipelineExecutor` wraps a synchronous `PipelineRunner`
+with an asyncio semaphore and a thread pool.
+
+The vendored `third_party/nano-vllm` submodule is a separate, text-only
+educational engine. It is **not** the engine behind `Omni.generate`.
+`nanovllm-omni` uses only these fork pieces:
+
+- `BlockManager` for paged KV block allocation.
+- The fork's `Sequence` for paged KV block-table bookkeeping.
+
+The current attention adapter, K/V writes, and decode loop remain local.
+When the separate `flash_attn` wheel is installed, the adapter calls its
+paged kernel directly; otherwise it uses the torch SDPA fallback.
+
+The fork's `LLMEngine`, `ModelRunner`, `Scheduler`, `Config`, and
+`SamplingParams` are not part of the Omni generation path. In particular,
+MiniMind-O's Thinker -> Talker -> Code2Wav generation is not a Qwen3
+`LLMEngine` workload, so making `OmniBase` inherit `LLMEngine` would only add a
+nominal parent class while violating the model and scheduler contracts.
+
+The fork package initializer is lazy. Importing `nanovllm.engine.block_manager`
+does not import or construct `LLM`; constructing the fork's `LLM` remains an
+explicit operation with its own CUDA and distributed-runtime requirements.
+The paged adapter adds the submodule to `sys.path` only when paged KV is first
+used and fails clearly if another package has already claimed the `nanovllm`
+module name.
 
 ## Module map
 
-Every `nanovllm_omni/` module has a vllm-omni counterpart the reader can
-jump to. Some nanovllm-omni modules have **no** counterpart (they exist
-only because the single-process runtime collapses what vllm-omni does in
-N subprocesses into one in-process structure); those are flagged with
-`— ` below.
-
-| `nanovllm_omni/` | `vllm_omni/` counterpart | Notes |
+| Local module | Responsibility | vllm-omni relationship |
 |---|---|---|
-| `__init__.py` | `__init__.py` | Public-API re-exports only |
-| `config/registry.py` | `config/pipeline_registry.py`, `config/stage_config.py` | `StageExecutionType`, `register_pipeline`, `resolve_pipeline_config`, `load_deploy_config` |
-| `config/params.py` | `config/...`, `engine/arg_utils.py` | `SamplingParams` + `OmniEngineArgs` (deliberately smaller field set; see divergences below) |
-| `outputs.py` | `outputs.py` | `OutputModality` / `OutputModalityNames`, `MultimodalPayload`, `OmniRequestOutput`, `AudioPayload` / `TextArtifact` / `ImageArtifact` / `ActionArtifact` |
-| `entrypoints/base.py` | `entrypoints/omni_base.py`, `config/config_factory.py` | `OmniBase`, `try_infer_model_type` cascade |
-| `entrypoints/omni.py` | `entrypoints/omni.py` | `Omni` class |
-| `entrypoints/async_omni.py` | `entrypoints/async_omni.py` | `AsyncOmni` class |
-| `engine/runtime.py` | `engine/runtime.py` (or `StageRuntime`) | Single-process `Runtime`; collapses vllm-omni's per-stage `StageEngineCoreProc` pool (see divergence) |
-| `engine/runtime_scheduler.py` | `engine/scheduler.py` | Per-stage continuous batching (in-process) |
-| `engine/load_balancer.py` | `engine/load_balancer.py` | StagePool with `num_replicas ≥ 2` + RoundRobin LB (in-process) |
-| `engine/executor.py` | `engine/executor.py` | Stage executor |
-| `serving/openai_adapter.py` | `entrypoints/cli/serve.py` | `POST /v1/chat/completions` adapter; envelope + base64 WAV/PNG |
-| `serving/{server.py}` | `experimental/*/serving/*` (FastAPI/uvicorn) | **stdlib `http.server` — divergence** |
-| `models/<family>/pipeline.py` | `models/<family>/pipeline.py` | Per-family `PipelineConfig` definition + `register_pipeline(...)` call |
-| `models/<family>/bundle.py` (MiniMind-O) | `models/<family>/bundle.py` | Holds the loaded checkpoint + codec + tokenizer in one process |
-| `models/<family>/attention.py` | `models/<family>/attention.py` | Fused QKV / gate-up / RMSNorm / RoPE variants |
-| `optim/` | `optim/`, `engine/optim/` | Bench + optimization helpers |
+| `config/registry.py` | Pipeline and deploy registry; dotted-path stage factories | Small local counterpart to pipeline registry and stage config |
+| `config/params.py` | `OmniEngineArgs`, aligned `SamplingParams` | Consumer-facing subset, not the fork's sampling class |
+| `outputs.py` | `OmniRequestOutput` and modality artifacts | Consumer-facing output envelope |
+| `entrypoints/base.py` | Model and pipeline resolution; lazy executor setup | Local `OmniBase` counterpart |
+| `entrypoints/omni.py` | Synchronous `Omni.generate` | Local public entry point |
+| `entrypoints/async_omni.py` | Async submission and streaming wrapper | Local async entry point |
+| `engine/runner.py` | Sequential stage execution and deploy merge | Single-replica in-process runner |
+| `engine/executor.py` | Thread-pool and semaphore wrapper | Async transport around the runner |
+| `models/minimind_omni/runtime_scheduler.py` | Per-stage continuous-batching state | MiniMind-O model-family helper |
+| `models/minimind_omni/attention.py` | Fixed contiguous KV buffer adapter | MiniMind-O graph optimization |
+| `models/minimind_omni/paged_attention.py` | Paged KV pool and fork allocator bridge | MiniMind-O paged KV adapter |
+| `models/minimind_omni/cuda_graph.py` | Per-position Thinker CUDA Graph decoder | MiniMind-O-specific optimization |
+| `models/minimind_omni/paged_cuda_graph.py` | One-window, replay-many decoder | MiniMind-O-specific paged optimization |
+| `models/minimind_omni/talker_cuda_graph.py` | Fixed-shape Talker MTP graph cache | MiniMind-O-specific optimization |
+| `models/minimind_omni/` | Stages, schedulers, KV helpers, graph decoders, and bundle | Model-family implementation |
+| `serving/openai_adapter.py` | Stdlib OpenAI-shaped HTTP adapter | Small serving seam, not FastAPI |
 
-For each vllm-omni file path above, `nanovllm-omni`'s read-only reference
-clone lives at `/Users/mcig/Projects/vllm-omni` on the developer's
-machine; otherwise the same path is reachable from
-<https://github.com/vllm-project/vllm-omni>.
+There is no `engine/runtime.py`, `engine/load_balancer.py`, or top-level
+`optim/` package in the current tree. The generic `engine/` package only owns
+pipeline execution; MiniMind-O CUDA, KV, scheduler, and sequence helpers live
+under `models/minimind_omni/`.
 
-## How a request flows
+## Request flow
 
-End-to-end request lifecycle, with the module that owns each step:
+For a normal synchronous request:
 
-1. **User constructs `Omni(<model_id>)`** — `entrypoints/omni.py`
-   - Resolves to a `PipelineConfig` via `resolve_pipeline_config(...)`,
-     which reads `OMNI_PIPELINES` (`config/registry.py`).
-   - Calls `OmniBase.try_infer_model_type(...)` to disambiguate HF
-     architectures that share a `model_type` (`entrypoints/base.py`).
-   - Loads the matching `PipelineConfig` and merges its deploy defaults
-     via `merge_pipeline_deploy(...)` (`config/registry.py`).
-2. **`engine/runtime.py`** is instantiated with the merged
-   `(stage, defaults)` tuple. The runtime holds one in-process
-   `ModelsBundle` per family (e.g. `MinimindBundle` for MiniMind-O in
-   `models/minimind_omni/bundle.py`).
-3. **`Omni.generate([prompt], SamplingParams(...))`** —
-   `entrypoints/omni.py` calls into the runtime's per-stage
-   scheduler (`engine/runtime_scheduler.py`) for continuous batching,
-   and the per-stage load balancer (`engine/load_balancer.py`) picks a
-   `(stage_id, replica_id)` for each stage under load.
-4. **Each stage executor** (`engine/executor.py`) feeds the prompt or
-   the previous stage's hidden states through the stage's loaded
-   model(s), wrapping the result in the stage's
-   `final_output_type` (`audio` / `image` / `text` / `actions`).
-5. **`OmniRequestOutput`** is assembled in `outputs.py`:
-   - `multimodal_output` carries the modality payload (audio bytes,
-     image bytes, action array).
-   - `custom_output` carries optional non-modal extras (e.g. the
-     MiniMind-O transcript; see note below).
-   - `to_dict()` materializes the JSON envelope: tensors → lists,
-     bytes → base64, artifacts include a `<key>_metadata` sibling
-     (`sample_rate` for WAV, `width`/`height` for PNG,
-     `token_ids` for text).
-6. **For the HTTP seam** (`serving/openai_adapter.py` +
-   `serving/{server.py}`), the same `to_dict()` output becomes the
-   `POST /v1/chat/completions` body, preserving the OpenAI envelope
-   (`id`, `object`, `created`, `model`, `choices[].message`,
-   `usage`).
+1. `Omni.generate(...)` materializes prompts and sampling overrides.
+2. `Omni._one(...)` resolves the executor and converts a multimodal prompt
+   dictionary into text plus `SamplingParams.extra`.
+3. `PipelineExecutor._runner.run(...)` lazily constructs the configured stage
+   instances.
+4. `PipelineRunner.run(...)` applies each stage's optional `process_input`,
+   merges deploy defaults with request sampling, and calls the stage instance
+   in pipeline order.
+5. `OmniRequestOutput.from_pipeline(...)` wraps the terminal stage result.
 
-## In-scope divergences from vllm-omni
+For MiniMind-O the stage order is:
 
-Each divergence here is deliberate, documented, and locked by at least
-one test. The complete list lives in AGENTS.md's
-"Definition of aligned" section; this table is the developer-facing
-checklist.
+```text
+prompt
+  -> thinker: token generation and audio-code sequence
+  -> talker: hidden-state bridge and MTP audio refinement
+  -> code2wav: Mimi audio-code decode and WAV envelope
+  -> OmniRequestOutput
+```
 
-| Divergence | Where it shows up in nanovllm-omni | Where it's documented | Locked by |
-|---|---|---|---|
-| `PipelineConfig` registered under `name` (vllm-omni uses `model_type`) | `config/registry.py:register_pipeline` | AGENTS.md "Definition of aligned" | `tests/test_registry_resolver.py` |
-| Same-name re-registration **silently overrides** (vllm-omni validates + warns) | `config/registry.py:register_pipeline` | AGENTS.md "Definition of aligned" | `tests/test_registry_resolver.py` (drift-lock) |
-| Single-process runtime (no `StageEngineCoreProc` pool, no multi-GPU / tensor-parallel) | `engine/runtime.py` (one `Runtime` per `Omni`) | README "Scope → Single-card, single-process runtime" | `tests/test_batched_generation.py` (Q10a) |
-| `OmniEngineArgs` has a deliberately smaller field set than vllm-omni's | `config/params.py:OmniEngineArgs` | AGENTS.md "Alignment rules" | the dataclass itself |
-| HTTP server uses stdlib `http.server` (not FastAPI/uvicorn) | `serving/{server.py}` + `serving/openai_adapter.py` | README "Scope" | `tests/test_serving_http.py` |
-| `_custom_output` ↔ `custom_output` serialization name on `OmniRequestOutput` | `outputs.py:OmniRequestOutput` | inline property docstring | `tests/test_outputs.py` |
+The Thinker stage may select eager decoding, the contiguous fixed-KV CUDA
+Graph decoder, or the paged single-graph decoder. These are implementation
+choices inside the stage; none of them calls fork `LLMEngine.generate`,
+`add_request`, or `step`.
 
-If you spot a divergence that is not in this table, it is either a
-bug or an undocumented in-scope difference. Open an issue and reference
-this section.
+## Paged KV bridge
 
-## Reading order for vllm-omni newcomers
+`models.minimind_omni.paged_attention.enable_paged_kv_cache(...)` discovers attention-like
+modules by their projection interface, allocates one shared
+`[2, layers, blocks, block_size, kv_heads, head_dim]` tensor, and binds each
+layer's K/V views to it. A `PagedKVContext` owns fixed-address metadata
+(`slot_mapping`, `context_lens`, and `block_tables`) for graph replay.
 
-If you have never read vllm-omni's source before, this 30-minute path
-through `nanovllm-omni` mirrors vllm-omni 1:1:
+The fork `BlockManager` allocates block IDs. The local adapter owns the
+per-layer pool wiring, context scratch buffers, attention-forward replacement,
+and MiniMind-O request lifecycle. The torch-native SDPA path is used when
+flash-attn is unavailable; flash-attn remains optional for the macOS test
+path and is expected on the WSL CUDA box for its optimized kernel.
 
-1. `entrypoints/omni.py` ↔ `vllm_omni/entrypoints/omni.py`
-2. `entrypoints/base.py` ↔ `vllm_omni/entrypoints/omni_base.py`
-3. `config/registry.py` ↔ `vllm_omni/config/pipeline_registry.py`
-4. `config/params.py` ↔ `vllm_omni/engine/arg_utils.py` (focus on `OmniEngineArgs`)
-5. `outputs.py` ↔ `vllm_omni/outputs.py` (focus on `OmniRequestOutput.to_dict()`)
-6. `engine/runtime.py` ↔ `vllm_omni/engine/runtime.py` (note the single-process divergence)
-7. `serving/openai_adapter.py` ↔ `vllm_omni/entrypoints/cli/serve.py`
-8. Pick one family — `models/minimind_omni/pipeline.py` is the
-   richest — and walk its bundle, attention, and stage modules.
+The local `OmniSequence` in `models/minimind_omni/sequence.py` is deliberately named
+separately from the fork's `nanovllm.engine.sequence.Sequence`. The former is
+scheduler state for the local pipeline; the latter is paged-KV block-table
+state. They are not interchangeable.
 
-After step 8, you should be able to read any other vllm-omni file
-without orientation.
+## Deliberate divergences
 
-## Adding a model family
+- Single process and single local replica; no distributed stage pool or
+  tensor-parallel fork engine.
+- Thread-pool async wrapper around synchronous stages.
+- Small consumer-facing `SamplingParams` subset; it is not a re-export of the
+  fork's class.
+- Stdlib `http.server` instead of FastAPI/uvicorn.
+- MiniMind-O uses its Hugging Face model implementation and local stage
+  contracts rather than the fork's Qwen3-only model runner.
+- CUDA Graph source adaptation is limited to the MiniMind-O forward contract;
+  graph optimization is opt-in through deploy configuration and falls back to
+  eager execution when unsupported.
 
-See [`.agents/skills/add-new-model/SKILL.md`](../.agents/skills/add-new-model/SKILL.md)
-for the full runbook. The short version: each family adds a
-`models/<family>/pipeline.py` that builds a `PipelineConfig` and calls
-`register_pipeline(...)` at import time; topology goes in code, sampling
-defaults go in `deploy/<family>.yaml`; the family auto-loads because
-`_load_builtin_pipelines()` imports the module on package init.
+## Reading order
 
-## What's intentionally not here
+1. `entrypoints/omni.py` and `entrypoints/base.py`
+2. `engine/executor.py` and `engine/runner.py`
+3. `config/registry.py` and `config/params.py`
+4. `models/minimind_omni/pipeline.py`
+5. `models/minimind_omni/bundle.py`, `thinker.py`, `talker.py`, and `code2wav.py`
+6. `models/minimind_omni/paged_attention.py` and
+   `models/minimind_omni/paged_cuda_graph.py`
+7. `outputs.py` and `serving/openai_adapter.py`
 
-`nanovllm-omni` does not implement:
+## Out of scope
 
-- Video generation.
-- Multi-model pipelines beyond the four listed families
-  (MiniMind-O, SmolVLM, SD-Turbo, SmolVLA).
-- Distributed execution, multi-card tensor-parallel, pipeline-parallel
-  schedulers.
-- WebSockets, streaming responses.
-- FastAPI/uvicorn serving.
-
-If you need any of those, this is the wrong project — `vllm-omni` is
-the upstream that does.
+This repository does not implement distributed execution, tensor parallelism,
+video generation, a general-purpose text-only vLLM engine, WebSockets,
+streaming HTTP responses, or FastAPI/uvicorn serving.

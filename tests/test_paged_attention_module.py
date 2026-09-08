@@ -1,4 +1,4 @@
-"""CPU-only contract tests for ``optim/paged_attention``.
+"""CPU-only contract tests for ``models/minimind_omni/paged_attention``.
 
 The fork's flash-attn / triton / xxhash / numpy are stubbed at import
 time so these tests run on macOS without the CUDA deps. They cover:
@@ -15,6 +15,7 @@ time so these tests run on macOS without the CUDA deps. They cover:
 
 from __future__ import annotations
 
+import importlib.machinery
 import sys
 import types
 from typing import Any
@@ -37,6 +38,7 @@ def _ensure_stub(name: str, **attrs: Any) -> None:
     if name in sys.modules:
         return
     mod = types.ModuleType(name)
+    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
     for k, v in attrs.items():
         setattr(mod, k, v)
     sys.modules[name] = mod
@@ -103,7 +105,7 @@ class _FakeModel(nn.Module):
 
 def test_enable_paged_kv_cache_returns_pagedkv_cache() -> None:
     """Smoke: enable_paged_kv_cache wires the pool + scratch + ctx."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -118,7 +120,7 @@ def test_enable_paged_kv_cache_returns_pagedkv_cache() -> None:
 
 def test_per_attention_kv_views_match_shared_pool_shape() -> None:
     """Each attention's ``k_cache`` / ``v_cache`` view the layer slice."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     model = _FakeModel(num_layers=2)
     cache = pa.enable_paged_kv_cache(
@@ -137,7 +139,7 @@ def test_per_attention_kv_views_match_shared_pool_shape() -> None:
 
 def test_paged_marker_set_on_attention() -> None:
     """Each attention instance is marked as paged after install."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -151,7 +153,7 @@ def test_paged_marker_set_on_attention() -> None:
 
 def test_scratch_tensors_match_request_shapes() -> None:
     """Persistent scratch tensors sized to max_batch + max_new_tokens."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -171,7 +173,7 @@ def test_block_manager_allocate_append_deallocate_through_cache() -> None:
     """End-to-end: BlockManager allocates blocks for a Sequence via the
     cache helper; append + may_append grows the block table; deallocate
     returns the block to the free pool."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -193,9 +195,21 @@ def test_block_manager_allocate_append_deallocate_through_cache() -> None:
     assert seq.block_table == []
 
 
+def test_fork_package_import_is_lazy() -> None:
+    """Importing the fork package must not load its full text engine."""
+    import importlib
+
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
+
+    pa._ensure_fork_path()
+    importlib.import_module("nanovllm")
+    assert "nanovllm.llm" not in sys.modules
+    assert "nanovllm.engine.model_runner" not in sys.modules
+
+
 def test_submodule_path_resolves() -> None:
     """``_FORK_ROOT`` points at ``third_party/nano-vllm`` from the repo."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     expected = pa._FORK_ROOT / "nanovllm" / "layers" / "attention.py"
     assert expected.exists(), f"fork submodule path missing: {expected}"
@@ -204,7 +218,7 @@ def test_submodule_path_resolves() -> None:
 def test_fork_block_manager_and_sequence_classes_exposed() -> None:
     """The fork ``BlockManager`` and ``Sequence`` are reachable via
     ``paged_attention`` for upstream consumers."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     bm = pa.BlockManager(num_blocks=4, block_size=2)
     assert bm.block_size == 2
@@ -226,7 +240,7 @@ def test_fork_block_manager_and_sequence_classes_exposed() -> None:
 
 def test_ducktyped_attention_detection() -> None:
     """``_is_attention_like`` matches by interface, not class name."""
-    from nanovllm_omni.engine import paged_attention as pa
+    from nanovllm_omni.models.minimind_omni import paged_attention as pa
 
     good = _FakeAttention()
     bad = nn.Linear(8, 8, bias=False)  # no q_proj/k_proj/o_proj set

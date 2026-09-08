@@ -1,7 +1,7 @@
-"""Per-request fixed-slot KV pool (engine/kv_pool.py).
+"""Per-request fixed-slot KV pool for MiniMind-O.
 
 After the design split, the request lifecycle + group formation moved to
-``engine.runtime_scheduler.RuntimeScheduler``. This module keeps only the
+``runtime_scheduler.RuntimeScheduler``. This module keeps only the
 KV-cache memory manager (``FixedKvSlotPool``) which is orthogonal to the
 scheduler -- it owns the per-request fixed-size KV buffers that
 ``BatchedThinkerRunner`` writes into during ``prefill_group`` /

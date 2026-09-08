@@ -1,9 +1,11 @@
-"""Engine package: real modules only (runner, executor, sched, runtime, ...).
+"""Internal pipeline runner for the aligned omni seam.
 
-No public re-exports here. Internal callers import leaf modules directly
-(the runner and executor modules in this package), and the
-public contract types (``SamplingParams`` / ``OmniEngineArgs``) live in
-the config package's params module. This mirrors the reference, where
-engine transport types live in their own modules rather than being
-re-exported at the package root.
+Owns the per-request ``PipelineRunner`` and its async ``PipelineExecutor``.
+Model-specific execution modules (CUDA Graph adapters, KV pools, schedulers,
+attention adapters) live next to the model family in
+``nanovllm_omni.models.<family>``; this package only contains the
+pipeline-level driver that walks ``StageConfig`` instances in order.
+
+No public re-exports are provided here. Import leaf modules directly; public
+contract types live in ``nanovllm_omni.config.params`` and the package root.
 """

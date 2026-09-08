@@ -1,72 +1,52 @@
 # AGENTS.md
 
-## Project contract
+## 定位
 
-`nanovllm-omni` aligns its user-facing audio API with `vllm-omni`; it does not reproduce the full vLLM-Omni implementation. The reference repository is `/Users/mcig/Projects/vllm-omni` and is read-only. Never modify it or import from it.
+`nanovllm-omni` 是一个**教学项目**：目标是让人读懂 omni（文本→音频）推理链路是怎么跑起来的，
+并在一张 4 GB 的 RTX 3050 上真的跑通。它不是生产推理引擎，不追求吞吐、不追求覆盖所有模型。
 
-## Alignment rules
+一切取舍的判据只有一条：**代码是否更容易读懂**。
 
-- Match public names, signatures, field names, return shapes, and observable behavior where the scope requires it:
-  - `Omni`, `AsyncOmni`, `OmniBase`
-  - `SamplingParams`, `OmniEngineArgs`
-  - `OmniRequestOutput`
-  - `PipelineConfig`, `DeployConfig`, registry functions
-  - `POST /v1/chat/completions` OpenAI response shape
-- Scope is any model family that runs locally on the user's hardware (RTX 3050 4 GB). Add a family through the registry contract; the full runbook lives in `.agents/skills/add-new-model/SKILL.md`.
-- Prefer package modules with one responsibility. `__init__.py` files should primarily re-export public symbols; implementation classes and runtime logic belong in dedicated modules. The configuration layer lives in `nanovllm_omni/config/` (`registry.py` + `params.py`) behind a thin `__init__.py` facade; keep `config/__init__.py` leaf-only (no engine/model/entrypoint imports) so the import graph stays acyclic.
-- Keep deploy/runtime knobs separate from pipeline topology. Pipeline topology belongs in model-family `pipeline.py`; sampling/resource defaults belong in `deploy/*.yaml`.
+## 代码风格（最重要的一节）
 
-## Required workflow for interface changes
+- 先写最直白的版本。能用一个 `for` 说清楚的，不要用生成器 + 闭包。
+- 不处理假想的输入。没有测试或调用方触发的 corner case，不加分支；真出现再加。
+- 不做未测量的性能优化。没有 profile 数据支撑的 cache / 批处理 / 并发，一律不写。
+- 抽象只在出现**第二个真实使用者**时引入。一个实现不要接口、工厂、注册表或配置项。
+- 一个函数一件事，名字说清楚就少写注释；需要解释「为什么」时写注释，「做什么」交给代码。
+- 宁可多几行显式代码，不要「聪明」写法。凌晨三点能一眼看懂的才算合格。
+- 可读性和边界/性能冲突时，选可读的那个，加一行注释说明放弃了什么。
+- 删代码优于加代码。改完发现能少一个文件、少一层，就少。
 
-1. Read the relevant ticket before editing.
-2. Inspect the current nanovllm implementation and the corresponding read-only vllm-omni reference.
-3. Add a focused test for every changed public contract: construction, signature, output fields, error behavior, or HTTP JSON shape.
-5. Run the CI-equivalent checks before commit:
-   ```bash
-   ruff check nanovllm_omni/ tests/
-   black --check nanovllm_omni/ tests/
-   python -m pytest -m "not smoke" -v
-   python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
-   python -m compileall -q nanovllm_omni
-   ```
-   Or, equivalently, run the pre-commit hook (install once with
-   `./scripts/install-hooks.sh`):
-   ```bash
-   scripts/pre-commit
-   ```
-   The hook runs the fast lint, format, and public-API-import checks on
-   the whole repo. `scripts/pre-push` runs the same command set as the
-   no-torch CI job (adds compileall + pytest -m "not smoke");
-   `install-hooks.sh` wires it as the git **pre-push** hook, so a full
-   CI-equivalent pass runs automatically before every push.
+## 对齐契约
 
-   Caveat: the local env (macOS, Py 3.13, torch 2.11) differs from CI
-   (Py 3.11/3.12, fresh-pip torch), so a locally-green tree is not proof
-   of a green CI. Keep tests version-agnostic: don't bake statistical or
-   numeric assertions tight to a specific Python/torch release.
-6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
-6. For Python seam changes, verify `Omni(...).generate(...)` returns `OmniRequestOutput` with valid audio/WAV bytes. For HTTP changes, verify `/v1/chat/completions` has the required OpenAI envelope and decodable base64 WAV audio.
-7. Commit each ticket or coherent change separately with a descriptive message, then push only after the checks pass.
+对外接口与 `vllm-omni` 对齐（消费者可见的名字、签名、字段、返回形状、HTTP 响应）：
+`Omni` / `AsyncOmni` / `SamplingParams` / `OmniEngineArgs` / `OmniRequestOutput` /
+`PipelineConfig` / `DeployConfig` / `POST /v1/chat/completions`。
 
-## Definition of aligned
+对齐指行为兼容，不指内部实现相同。因本项目范围（单进程、小模型、stdlib serving）
+产生的差异是允许的，用测试锁住并在文档里写明，不要声称不存在的 parity。
 
-Alignment means consumer-visible compatibility, not identical internals. A difference is acceptable only when it is required by this project's explicit scope (for example, local single-process execution on small models and stdlib serving); document such differences in tests and docs rather than claiming unsupported parity.
+参考仓库 `/Users/mcig/Projects/vllm-omni` **只读**：不修改、不 import。
 
-已知在范围内差异:内建 registry 的 `PipelineConfig` 以 `name` 为注册键(参考 vllm-omni 以 `model_type` 为键),且同名重复注册静默覆盖(参考为 validate+warn)。`name` 键是为内部一致性做的有意选择,不承诺参考级告警行为;实际行为由 `tests/test_registry_resolver.py` 的 drift-lock 测试锁定。
+## 结构约定
+
+- 模型族拓扑放 `nanovllm_omni/models/<family>/pipeline.py`；采样/资源默认值放 `deploy/<family>.yaml`。两者不混。
+- `__init__.py` 只 re-export，不放实现；`config/__init__.py` 保持叶子，不 import engine/model/entrypoint。
+- 新增模型族按 `.agents/skills/add-new-model/SKILL.md` 走。
 
 ## 命名约定
 
-函数/变量/字段名:全词优先、`num_*` 优先。同一语义只保留一个拼写:
+同一语义只保留一个拼写，全词优先：
 
-- 数量:一律 `num_*`(`num_heads`/`num_layers`/`num_requests`/`num_positions`/`num_steps`);不用 `n_*`(唯一例外是 `SamplingParams.n`,vLLM 锁名)。
-- 序列:一律 `sequence`/`sequence_len`/`max_sequence_len`;不用 `seq` 缩写。
-- 完整词优先:`token` 不用 `tok`、`config` 不用 `cfg`、`max_embeddings` 不用 `max_emb`。
+- 数量：`num_*`（`num_heads` / `num_layers` / `num_requests`）。不用 `n_*`，唯一例外 `SamplingParams.n`（vLLM 锁名）。
+- 序列：`sequence` / `sequence_len` / `max_sequence_len`。不用 `seq`。
+- 全词：`token` / `config` / `max_embeddings`。不用 `tok` / `cfg` / `max_emb`。
 
-**边界(不纳入重命名,写新代码也不要改这些名字):**
+不改的边界：`trust_remote_code` 加载的远端模型属性（`n_rep` 等）、注释/docstring 里的形状记法、
+JSON key / 表头等序列化 schema、上面列出的公开对齐符号。
 
-- 远端模型(`AutoModelForCausalLM.from_pretrained(...trust_remote_code=True)` 加载)的属性名是外部契约,如 `n_rep`/`n_local_heads`/`n_local_kv_heads`;只读引用,别改名。
-- 字符串/注释/docstring/张量形状记法(如 `[B, seq, kv, d]`)不是标识符,不动。
-- 序列化格式键(JSON key、markdown 表头)是外部 schema,不动。
-- 公开对齐符号(`Omni`/`SamplingParams` 字段/`OmniRequestOutput` 字段等)是公开契约,走接口变更流程,不因内部统一而改。
+## 改代码前
 
-内部命名只要求自洽,不要求与 vllm-omni 内部一致——vllm-omni 内部自己就是 `n_*`/`num_*` 混用,没有可对齐的基准。重命名请按轴分 commit,并跑 pre-commit 钩子。
+流程、CI 命令、hook 安装见 `CONTRIBUTING.md`；提交前跑 `scripts/pre-commit`，push 前 `scripts/pre-push`。
+每个公开契约的改动配一个聚焦测试；一个 commit 一件事。

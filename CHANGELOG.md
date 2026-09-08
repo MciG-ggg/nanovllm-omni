@@ -32,7 +32,7 @@ First public pre-release.
   `register_pipeline`, `resolve_pipeline_config`, `load_deploy_config`,
   `merge_pipeline_deploy`.
 - StagePool pattern: per-stage continuous batching (TK-004) implemented
-  in-process via `nanovllm_omni/engine/runtime_scheduler.py`, single
+  in-process via `nanovllm_omni/models/minimind_omni/runtime_scheduler.py`, single
   replica only. Multi-replica + RoundRobin load balancing (TK-007) was
   removed after measuring `num_replicas=1 == num_replicas=2`
   (`tests/test_batched_runner_contract.py`).

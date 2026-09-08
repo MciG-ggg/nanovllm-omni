@@ -23,12 +23,12 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from nanovllm_omni.engine.kv_pool import FixedKvSlotPool
-from nanovllm_omni.engine.runtime_scheduler import (
+from nanovllm_omni.models.minimind_omni.kv_pool import FixedKvSlotPool
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import (
     RuntimeGroup,
     RuntimeScheduler,
 )
-from nanovllm_omni.engine.sequence import OmniSequence, PrefillChunk
+from nanovllm_omni.models.minimind_omni.sequence import OmniSequence, PrefillChunk
 
 from ._sampling import (
     AUDIO_VOCAB_BOUNDARY,
@@ -592,7 +592,7 @@ def enable_bridge_capture(model: Any, bridge_layer: int | None = None) -> int:
         # hidden state as the bridge hidden state. Test doubles that
         # return a single tensor are also accepted.
         captured = out[0] if isinstance(out, tuple) else out
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(AttributeError, TypeError):
             self._bridge_capture = captured
         return out
 

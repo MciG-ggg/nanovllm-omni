@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import pytest
 
-from nanovllm_omni.engine.runtime_scheduler import (
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import (
     RuntimeGroup,
     RuntimeScheduler,
     RuntimeSchedulerOutput,
 )
-from nanovllm_omni.engine.sequence import OmniSequence, PrefillChunk, SequenceStatus
+from nanovllm_omni.models.minimind_omni.sequence import OmniSequence, PrefillChunk, SequenceStatus
 
 # ---------------------------------------------------------------------------
 # OmniSequence data structure

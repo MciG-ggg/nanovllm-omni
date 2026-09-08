@@ -29,9 +29,9 @@ import torch
 sys.path.insert(0, "/home/mcig/nanovllm-omni")
 from transformers import AutoTokenizer
 
-from nanovllm_omni.engine.attention import enable_fixed_kv_buffer
-from nanovllm_omni.engine.cuda_graph import _build_omni_input, _patched_forward
 from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
+from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
+from nanovllm_omni.models.minimind_omni.cuda_graph import _build_omni_input, _patched_forward
 
 MODEL = "/home/mcig/minimind-3o"
 MIMI = "/home/mcig/mimi"

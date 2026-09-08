@@ -17,9 +17,9 @@ from __future__ import annotations
 from itertools import count
 from typing import Any
 
-from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
 from nanovllm_omni.models.minimind_omni.batched_generation import BatchedThinkerRunner
 from nanovllm_omni.models.minimind_omni.code2wav import decode_audio, encode_wav
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler
 from nanovllm_omni.models.minimind_omni.thinker import tokenize_for_generate
 from nanovllm_omni.outputs import AudioPayload
 

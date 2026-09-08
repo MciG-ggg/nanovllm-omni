@@ -29,9 +29,11 @@ Semantics
 - Host-side multinomial sampling lives OUTSIDE the graphs (§24/§25 keep
   sampling's RNG host-side and deterministic).
 - The two freqs host-reads in the upstream forward are the only capture
-  blockers (§13/§18). This module neutralizes them by compiling a copy of
-  the forward with the checks set to ``if False`` (warmup proves them dead)
-  and calling that copy — it never rebinds the model class.
+  blockers (§13/§18). This module neutralizes them by parsing a copy of
+  the forward's source into an AST, structurally matching the
+  ``<x>.freqs_cos[0, 0] == 0`` guard shape, and setting its test to
+  ``if False:`` (warmup proves them dead) before compiling and calling
+  that copy — it never rebinds the model class.
 
 Opt-in: ``enable_cuda_graph`` returns ``None`` when CUDA is unavailable or
 the model isn't the MiniMind-O upstream shape. The caller keeps the eager
@@ -40,6 +42,7 @@ path in that case.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import logging
 import textwrap
@@ -47,7 +50,6 @@ from typing import Any
 
 import torch
 
-from nanovllm_omni.engine.attention import enable_fixed_kv_buffer
 from nanovllm_omni.models.minimind_omni._sampling import (
     DEFAULT_TEXT_TEMPERATURE,
     DEFAULT_TEXT_TOP_P,
@@ -55,31 +57,101 @@ from nanovllm_omni.models.minimind_omni._sampling import (
     sample_one_audio_layer,
     sample_text_token,
 )
+from nanovllm_omni.models.minimind_omni.attention import enable_fixed_kv_buffer
 
 _log = logging.getLogger(__name__)
+
+
+def _is_freqs_zero_guard(test: ast.expr) -> bool:
+    """True when ``test`` is structurally ``<...>.freqs_cos[0, 0] == 0``.
+
+    This is the meta-device RoPE-buffer recompute guard ("buffers lost
+    during meta-device init") present twice in the upstream MiniMind-Omni
+    forward -- once for ``self.thinker``, once for ``self.talker``. It is a
+    host-read: comparing a GPU tensor element against a Python int forces a
+    device sync, which ``torch.cuda.graph()`` capture forbids outright
+    (raises rather than silently misbehaving). Since the model is always
+    fully loaded (not meta) by the time capture runs, the guard is always
+    False in practice -- but its *presence* in the captured op stream is
+    still fatal, so it must be eliminated from the source, not just skipped
+    at runtime.
+
+    Matching structurally (AST shape) rather than by literal string means a
+    whitespace or variable-naming change upstream (``self.thinker`` vs
+    ``model.thinker``, spacing, etc.) does not silently break detection --
+    only a genuine change in what the guard *checks* would.
+    """
+    if not isinstance(test, ast.Compare):
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    right = test.comparators[0]
+    if not (isinstance(right, ast.Constant) and right.value == 0):
+        return False
+    left = test.left
+    if not isinstance(left, ast.Subscript):
+        return False
+    # Left side must end in a `.freqs_cos` attribute access -- any receiver
+    # chain (`self.thinker`, `model.talker`, etc.) is accepted.
+    if not (isinstance(left.value, ast.Attribute) and left.value.attr == "freqs_cos"):
+        return False
+    # Slice must be the literal tuple `[0, 0]`.
+    sl = left.slice
+    elts = sl.elts if isinstance(sl, ast.Tuple) else None
+    if elts is None or len(elts) != 2:
+        return False
+    return all(isinstance(e, ast.Constant) and e.value == 0 for e in elts)
+
+
+class _NeutralizeFreqsGuards(ast.NodeTransformer):
+    """Replaces every ``if <freqs_zero_guard>:`` test with ``if False:``.
+
+    Counts replacements on ``self.replaced`` so the caller can assert the
+    expected number of capture blockers were actually found (drift in the
+    upstream source should fail loud, not silently skip a host-read).
+    """
+
+    def __init__(self) -> None:
+        self.replaced = 0
+
+    def visit_If(self, node: ast.If) -> ast.If:
+        self.generic_visit(node)
+        if _is_freqs_zero_guard(node.test):
+            self.replaced += 1
+            node.test = ast.Constant(value=False)
+        return node
 
 
 def _patched_forward(cls: Any, src: str) -> Any:
     """Compile a copy of cls.forward with the two freqs `[0,0]` host-read
     checks neutralized (proven capture blockers, §13/§18). Returns a plain
-    function `fwd(model, **kwargs)` — never rebinds the class."""
-    patched = src.replace(
-        "if self.thinker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed"
-    ).replace("if self.talker.freqs_cos[0, 0] == 0:", "if False:  # CUDA-Graph: warmup precomputed")
+    function `fwd(model, **kwargs)` -- never rebinds the class.
+
+    Neutralization happens at the AST level (structural match on
+    ``_is_freqs_zero_guard``), not by literal string replacement: the
+    guard's exact spelling/whitespace can drift across upstream model
+    revisions without silently breaking detection.
+    """
+    tree = ast.parse(textwrap.dedent(src))
+    transformer = _NeutralizeFreqsGuards()
+    tree = transformer.visit(tree)
+    ast.fix_missing_locations(tree)
     # Require exactly the two known capture blockers to be neutralized, so
-    # a drift in the upstream forward's freqs-check spelling fails loud
+    # a drift in the upstream forward's freqs-check shape fails loud
     # instead of silently skipping one host-read during capture.
-    if patched.count("if False:") != 2:
+    if transformer.replaced != 2:
         _log.warning(
             "enable_cuda_graph: expected 2 freqs host-reads to neutralize, "
             "found %s; skipping graph path",
-            patched.count("if False:"),
+            transformer.replaced,
         )
         return None
     namespace = dict(cls.forward.__globals__)
     namespace["__name__"] = cls.__module__
     namespace["__qualname__"] = cls.__qualname__ + ".forward_graph"
-    exec(compile(textwrap.dedent(patched), "<enable_cuda_graph>", "exec"), namespace)
+    exec(compile(tree, "<enable_cuda_graph>", "exec"), namespace)
     return namespace["forward"]
 
 
@@ -413,7 +485,7 @@ class CudaGraphDecoder:
             try:
                 inp.copy_(_build_omni_input(next_token, self.audio_pad))
                 g.replay()
-            except Exception as exc:  # noqa: BLE001 - graph replay can fail for many CUDA reasons
+            except RuntimeError as exc:
                 # Drop stale per-step graphs so a later request recaptures,
                 # then surface a clear error (parity: talker_cuda_graph.decode
                 # invalidates + falls back; here there is no clean eager path

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from .prompts import BenchPrompt
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -286,7 +289,8 @@ def run_one_full(
             ),
         )
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
-    except Exception:
+    except Exception as exc:  # benchmark helper returns a measurable failed row.
+        _logger.warning("Full pipeline benchmark failed: %s", exc)
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
         return RunResult(
             prompt_id=p.id,

@@ -1,0 +1,20 @@
+/home/mcig/venvs/nanovllm-omni/lib/python3.12/site-packages/pydub/utils.py:170: RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+  warn("Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work", RuntimeWarning)
+Notice: ffmpeg is not installed. torchaudio is used to load audio
+If you want to use ffmpeg backend to load audio, please install it by:
+	sudo apt install ffmpeg # ubuntu
+	# brew install ffmpeg # mac
+Loading weights:   0%|          | 0/195 [00:00<?, ?it/s]Loading weights: 100%|██████████| 195/195 [00:00<00:00, 6348.89it/s]
+Loading weights:   0%|          | 0/350 [00:00<?, ?it/s]Loading weights:  16%|█▋        | 57/350 [00:00<00:00, 563.77it/s]Loading weights:  37%|███▋      | 128/350 [00:00<00:00, 648.74it/s]Loading weights:  55%|█████▌    | 193/350 [00:00<00:00, 640.05it/s]Loading weights:  97%|█████████▋| 338/350 [00:00<00:00, 952.68it/s]Loading weights: 100%|██████████| 350/350 [00:00<00:00, 842.67it/s]
+2026-09-08 19:06:27,184 [INFO] enable_cuda_graph: 12 attention instances buffer-ized
+2026-09-08 19:06:43,423 [INFO] paged CUDA Graph captured: 1 graph, window=1 blocks (replayed every AR step)
+cell      graphs       p50      cold   capture  vram_mb  frames
+eager          0    1064.1       0.0       0.0      527       8
+perpos        15     267.6    1083.7     816.0     1075      16
+paged          1     183.9     292.7     108.9     1094      16
+
+speedup vs eager: {'eager': 1.0, 'perpos': 3.976, 'paged': 5.788}
+recapture when n_steps changes: False (paged must be False)
+wrote docs/perf/aligned/enginecore-baseline/cells.csv + meta.json
+e)
+wrote docs/perf/aligned/enginecore-baseline/cells.csv + meta.json

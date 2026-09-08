@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanovllm_omni.engine.kv_pool import FixedKvSlotPool
-from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
+from nanovllm_omni.models.minimind_omni.kv_pool import FixedKvSlotPool
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler
 
 torch = pytest.importorskip("torch")
 
@@ -268,7 +268,7 @@ class _FakeMimi:
 
 
 def test_run_batched_generate_engine_loop():
-    from nanovllm_omni.engine.batched_runner import run_batched_generate
+    from nanovllm_omni.models.minimind_omni.batched_runner import run_batched_generate
     from nanovllm_omni.outputs import AudioPayload
 
     model = FakeMiniMindOmni()
@@ -306,7 +306,7 @@ def test_deploy_config_parses_max_batch(tmp_path):
 
 def test_run_batched_generate_reads_max_batch_from_deploy():
     from nanovllm_omni.config.registry import DeployConfig
-    from nanovllm_omni.engine.batched_runner import run_batched_generate
+    from nanovllm_omni.models.minimind_omni.batched_runner import run_batched_generate
     from nanovllm_omni.outputs import AudioPayload
 
     model = FakeMiniMindOmni()

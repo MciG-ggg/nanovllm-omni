@@ -99,6 +99,8 @@ docs/site/
 # Local design notes / specs
 docs/design-grill.md
 docs/specs/
+docs/review/
+docs/dev/
 
 # OS
 Thumbs.db

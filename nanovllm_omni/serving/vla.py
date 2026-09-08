@@ -9,7 +9,10 @@ shape returned by the aligned ``Omni`` seam. Heavy deps (lerobot / torch
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 def register(demo: Any) -> None:
@@ -59,7 +62,8 @@ def register(demo: Any) -> None:
                 [task],
                 SamplingParams(extra={"image": arr, "state": state_vec}),
             )[0]
-        except Exception as exc:
+        except Exception as exc:  # UI boundary must return a visible error.
+            _logger.exception("SmolVLA inference failed")
             raise gr.Error(f"SmolVLA inference failed: {exc}") from exc
         if out.error:
             raise gr.Error(out.error)

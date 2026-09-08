@@ -252,15 +252,17 @@ verified by `tests/test_batched_generation.py` — Q10a).
 Multi-card, per-stage subprocess isolation, tensor-parallel, and
 pipeline-parallel schedulers are intentionally out of scope; if
 any are added later, the change must start by reworking
-`bundle.py` (one bundle per replica) and `engine/runtime.py`
-(per-replica inference path), not by retrofitting vllm-omni's
+`models/minimind_omni/bundle.py` (one bundle per replica) and
+`engine/runner.py` / `engine/executor.py` (per-replica inference path),
+not by retrofitting vllm-omni's
 `StageRuntime` into a runtime that has no use for it today.
 
-The four supported model families all run on the same single-process
-runtime: per-stage continuous batching (TK-004) is wired in-process
-via `engine/runtime_scheduler.py`. The per-stage replica + RoundRobin
-LB layer (TK-007) was removed after measuring `num_replicas=1 ==
-num_replicas=2` (`tests/test_batched_runner_contract.py`).
+The four supported model families share the same single-process pipeline
+runner. Per-stage continuous batching (TK-004) is currently a MiniMind-O
+feature, wired in-process via `models/minimind_omni/runtime_scheduler.py`.
+The per-stage replica + RoundRobin LB layer (TK-007) was removed after
+measuring `num_replicas=1 == num_replicas=2`
+(`tests/test_batched_runner_contract.py`).
 
 ## Acknowledgements
 

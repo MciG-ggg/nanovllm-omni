@@ -6,10 +6,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler  # noqa: E402
 from nanovllm_omni.models.minimind_omni.batched_generation import (  # noqa: E402
     BatchedThinkerRunner,
 )
+from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler  # noqa: E402
 from nanovllm_omni.models.minimind_omni.talker import wrap_talker  # noqa: E402
 from tests._talker_fixtures import make_fake_bundle, span_bridge  # noqa: E402
 from tests.test_batched_generation import FakeMiniMindOmni  # noqa: E402

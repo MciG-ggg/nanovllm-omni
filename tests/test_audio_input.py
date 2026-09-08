@@ -90,8 +90,8 @@ class _FakeAudioModel:
 
 
 def _make_runner(model):
-    from nanovllm_omni.engine.runtime_scheduler import RuntimeScheduler
     from nanovllm_omni.models.minimind_omni.batched_generation import BatchedThinkerRunner
+    from nanovllm_omni.models.minimind_omni.runtime_scheduler import RuntimeScheduler
 
     sched = RuntimeScheduler(max_num_seqs=4)
     runner = BatchedThinkerRunner(

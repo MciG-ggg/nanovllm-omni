@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +22,8 @@ from nanovllm_omni.config.params import OmniPromptType
 from nanovllm_omni.config.registry import load_deploy_config
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "minimind_omni.yaml"
+
+_logger = logging.getLogger(__name__)
 
 
 _ALLOWED_BLOCK_TYPES = frozenset({"text", "image_url"})
@@ -175,9 +178,10 @@ def serve(state, host: str, port: int) -> None:
                 output = engine.generate([prompt], sampling_params=sampling)[0]
                 payload = output.to_dict()
                 self._json(200, _chat_completion(payload, model, len(text.split())))
-            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            except (ValueError, TypeError) as exc:
                 self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            except Exception as exc:
+            except Exception as exc:  # HTTP boundary must return a 500 response.
+                _logger.exception("OpenAI adapter request failed")
                 self._json(500, {"error": {"message": str(exc), "type": "server_error"}})
 
     print(f"Omni adapter on http://{host}:{port}/v1/chat/completions", file=sys.stderr)

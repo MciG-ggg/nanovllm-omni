@@ -14,6 +14,7 @@ Public symbols: ``SenseVoice``, ``attach_audio_encoder``, ``load_audio``,
 from __future__ import annotations
 
 import io
+import logging
 import os
 import wave
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from typing import Any
 SENSEVOICE_SAMPLE_RATE = 16_000
 # <|audio_pad|> token repeated per injected audio feature frame.
 AUDIO_MARKER_TOKEN = "<|audio_pad|>"
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,7 +85,8 @@ class SenseVoice:
             return ""
         try:
             result = self.asr.generate(input=samples, cache={}, language="auto", use_itn=True)
-        except Exception:  # funasr backends vary; transcription is best-effort
+        except Exception as exc:  # FunASR backends expose inconsistent errors.
+            _logger.warning("SenseVoice transcription failed; returning empty text: %s", exc)
             return ""
         if not result or not result[0].get("text"):
             return ""
@@ -90,7 +94,8 @@ class SenseVoice:
             from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
             return rich_transcription_postprocess(result[0]["text"])
-        except Exception:
+        except (ImportError, KeyError, TypeError, ValueError) as exc:
+            _logger.warning("SenseVoice transcription postprocess failed: %s", exc)
             return str(result[0]["text"])
 
 

@@ -789,7 +789,7 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             try:
                 param.data.copy_(loaded_weight.to(device=param.device, dtype=param.dtype))
                 loaded_weights.add(name)
-            except Exception as exc:  # noqa: BLE001 -- narrow message only
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 logger.warning(
                     "talker.load_weights: failed to copy %s (%s): %s",
                     name,
@@ -813,7 +813,7 @@ def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
     if isinstance(existing, MiniMindOmniTalkerForConditionalGeneration):
         return existing
     wrapped = MiniMindOmniTalkerForConditionalGeneration(bundle)
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(AttributeError, TypeError):
         bundle.talker = wrapped
     return wrapped
 
@@ -1024,7 +1024,7 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
         talker = _resolve_talker()
         runner = talker
         if use_talker_graph:
-            from nanovllm_omni.engine.talker_cuda_graph import (
+            from nanovllm_omni.models.minimind_omni.talker_cuda_graph import (
                 enable_talker_mtp_cuda_graph,
             )
 

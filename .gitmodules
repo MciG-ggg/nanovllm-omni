@@ -1,0 +1,3 @@
+[submodule "third_party/nano-vllm"]
+	path = third_party/nano-vllm
+	url = https://github.com/MciG-ggg/nano-vllm.git

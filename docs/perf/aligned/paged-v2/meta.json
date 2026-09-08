@@ -1,0 +1,18 @@
+{
+  "max_new_tokens": 16,
+  "repeats": 10,
+  "prompts": [
+    "Hi",
+    "Hello there",
+    "Tell me a short story"
+  ],
+  "seed": 42,
+  "torch": "2.14.0+cu130",
+  "gpu": "NVIDIA GeForce RTX 3050 4GB Laptop GPU",
+  "recapture_on_n_steps_change": false,
+  "speedup_vs_eager": {
+    "eager": 1.0,
+    "perpos": 4.855,
+    "paged": 4.295
+  }
+}

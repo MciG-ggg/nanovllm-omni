@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import sys
 import types
 from contextlib import suppress
@@ -83,189 +82,79 @@ _PAGEDKV_MARKER = "_nanovllm_paged_kv"
 _FORK_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "nano-vllm"
 
 
-def _stub_module(name: str, *, force: bool = False, **attrs: Any) -> types.ModuleType | None:
-    """Register a stub ``sys.modules[name]`` so an import path resolves.
+def _install_fork_shim() -> None:
+    """Install a thin import-time shim over the nano-vllm fork's package.
 
-    Refuses to shadow a package that is genuinely installed. This is not
-    a nicety: on the GPU box ``triton`` ships with torch, and replacing
-    it with a partial stub broke *transformers* -- its lazy module graph
-    hit ``triton.language`` on the stub and failed to import
-    ``AutoModelForCausalLM``. A stub must only ever fill a real absence.
+    The fork's own ``nanovllm/__init__.py`` is ``from nanovllm.llm import
+    LLM`` -- it instantiates a full vLLM engine, pulls in Qwen3, transformers,
+    flash-attn, and calls ``torch.distributed.init_process_group``. We need
+    *none of that*: just ``BlockManager`` and ``Sequence`` for the paged KV
+    adapter.
 
-    Returns the stub, or ``None`` when the real module exists.
+    The shim replaces the package entry in ``sys.modules`` while keeping the
+    real fork's directory on ``__path__``. Consumers then write normal imports
+    like ``from nanovllm.engine.block_manager import BlockManager`` -- no
+    importlib magic, no post-load stub withdrawal, no spec_from_file_location.
+
+    Idempotent: re-running after the shim is already installed is a no-op.
     """
-    if name in sys.modules:
-        return None
-    if not force:
-        try:
-            if importlib.util.find_spec(name) is not None:
-                return None  # real package present -- never shadow it
-        except (ImportError, ValueError, ModuleNotFoundError):
-            pass  # unimportable parent -> genuinely absent, stub it
-    mod = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(mod, k, v)
-    sys.modules[name] = mod
-    return mod
+    if getattr(sys.modules.get("nanovllm"), "_fork_shim", False):
+        return
+    # Drop any prior stub (ours or someone else's) so the real package
+    # can claim the name.
+    sys.modules.pop("nanovllm", None)
+    pkg_root = _FORK_ROOT / "nanovllm"
+    if not pkg_root.exists():
+        raise RuntimeError(f"nano-vllm submodule missing at {pkg_root}; "
+                           "did you forget `git submodule update --init`?")
+    # sys.path so the real submodule files resolve.
+    fork_root = str(_FORK_ROOT)
+    if fork_root not in sys.path:
+        sys.path.insert(0, fork_root)
+    shim = types.ModuleType("nanovllm")
+    shim.__file__ = str(pkg_root / "__init__.py")
+    shim.__path__ = [str(pkg_root)]
+    shim.__package__ = "nanovllm"
+    shim._fork_shim = True
+    sys.modules["nanovllm"] = shim
 
 
-def _load_fork_module(
-    short_name: str,
-    rel_path: str,
-    extra_stubs: dict[str, Any] | None = None,
-) -> Any:
-    """Load a fork module via ``importlib.util`` so we don't go through
-    ``nanovllm/__init__.py`` (which pulls in transformers + LLMEngine and
-    is not importable on macOS without the full vLLM env).
+def _ensure_xxhash() -> None:
+    """BlockManager imports xxhash; provide a no-op stub when it isn't installed.
 
-    Stubs heavy deps first so the source parses + key symbols exist even
-    when the CUDA deps are absent. Kernel calls are only made at
-    runtime; on macOS we never call them, the module just needs to
-    import.
+    On macOS we never call into block-manager code that needs hashing, so the
+    stub is just enough to make ``import xxhash`` succeed. WSL installs the
+    real package; this is a no-op there.
     """
-    if short_name in sys.modules:
-        return sys.modules[short_name]
-
-    # 0) Load torch FIRST. torch requires the real numpy and aborts the
-    #    process if a stub is registered under that name before it loads.
-    #    Importing here guarantees the genuine module wins the race, so
-    #    the ``numpy`` stub below only ever applies when torch is absent.
-    import torch  # noqa: F401
-
-    # 1) Stub triton + flash_attn if absent.
-    if "triton" not in sys.modules:
-        _stub_module("triton", jit=(lambda *a, **kw: (lambda fn: fn)))
-    if "triton.language" not in sys.modules:
-        _tl = _stub_module("triton.language", constexpr=type("constexpr", (), {}))
-        if _tl is not None and "triton" in sys.modules:
-            # A sys.modules entry alone does not satisfy ``triton.language``
-            # attribute access; bind it on the parent module object too.
-            sys.modules["triton"].language = _tl
-    if "flash_attn" not in sys.modules:
-        _stub_module(
-            "flash_attn",
-            flash_attn_varlen_func=(lambda *a, **kw: None),
-            flash_attn_with_kvcache=(lambda *a, **kw: None),
-        )
-
-    # 2) Stub nanovllm package tree so cross-module imports resolve.
-    if "nanovllm" not in sys.modules:
-        pkg = _stub_module("nanovllm", force=True)
-        pkg.__path__ = [str(_FORK_ROOT / "nanovllm")]  # type: ignore[attr-defined]
-    if "nanovllm.utils" not in sys.modules:
-        utils_pkg = _stub_module("nanovllm.utils", force=True)
-        utils_pkg.__path__ = [str(_FORK_ROOT / "nanovllm" / "utils")]  # type: ignore[attr-defined]
-    if "nanovllm.engine" not in sys.modules:
-        eng_pkg = _stub_module("nanovllm.engine", force=True)
-        eng_pkg.__path__ = [str(_FORK_ROOT / "nanovllm" / "engine")]  # type: ignore[attr-defined]
-
-    # 3) Per-file stubs before exec_module. Only register stubs for
-    #    modules that don't already exist so we don't clobber a real
-    #    torch-installed numpy / xxhash / sampling_params.
-    def _maybe_stub(name: str, attrs: dict[str, Any]) -> None:
-        if name not in sys.modules:
-            _stub_module(name, **attrs)
-
-    if extra_stubs:
-        for full_name, attrs in extra_stubs.items():
-            _maybe_stub(full_name, attrs)
-    _maybe_stub("xxhash", {})
-    _maybe_stub("numpy", {})
-
-    # Track which external stubs *we* created, so we can withdraw them
-    # after exec. Leaving them in sys.modules poisons the rest of the
-    # process: transformers probes ``find_spec("flash_attn")``, and a
-    # stub module has ``__spec__ is None``, which raises ValueError and
-    # breaks importing AutoModelForCausalLM entirely.
-    _ours = [n for n in ("triton", "triton.language", "flash_attn", "xxhash", "numpy")
-             if isinstance(sys.modules.get(n), types.ModuleType)
-             and getattr(sys.modules[n], "__spec__", None) is None]
-
-    spec = importlib.util.spec_from_file_location(short_name, str(_FORK_ROOT / rel_path))
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"paged_attention: cannot load fork module {rel_path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[short_name] = mod
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-
-    # 4) Patch the just-loaded module's stubs to expose the minimum
-    #    surface the fork modules reference (numpy.array / xxhash.xxh64).
-    if "numpy" in sys.modules:
-        np = sys.modules["numpy"]
-        if not hasattr(np, "array"):
-            np.array = lambda *a, **kw: b""  # type: ignore[attr-defined]
-        if not hasattr(np, "asarray"):
-            np.asarray = lambda *a, **kw: b""  # type: ignore[attr-defined]
     if "xxhash" in sys.modules:
-        xxhash_mod = sys.modules["xxhash"]
+        return
+    try:
+        import xxhash  # noqa: F401
+        return
+    except ImportError:
+        pass
+    mod = types.ModuleType("xxhash")
 
-        class _StubHash:
-            def __init__(self, *a: Any, **kw: Any) -> None: ...
-            def update(self, *a: Any, **kw: Any) -> None: ...
-            def intdigest(self) -> int:
-                return 0
+    class _StubHash:
+        def __init__(self, *a: Any, **kw: Any) -> None: ...
+        def update(self, *a: Any, **kw: Any) -> None: ...
+        def intdigest(self) -> int:
+            return 0
 
-        if not hasattr(xxhash_mod, "xxh64"):
-            def _xxh64(*a: Any, **kw: Any) -> _StubHash:
-                return _StubHash()
+    def _xxh64(*a: Any, **kw: Any) -> _StubHash:
+        return _StubHash()
 
-            xxhash_mod.xxh64 = _xxh64  # type: ignore[attr-defined]
-
-    # 5) Withdraw our external stubs. The fork module already bound the
-    #    names it needs at exec time, so removing the sys.modules entries
-    #    costs it nothing -- and it leaves the process clean for every
-    #    other library that probes for these packages.
-    for name in _ours:
-        if getattr(sys.modules.get(name), "__spec__", "missing") is None:
-            del sys.modules[name]
-
-    return mod
+    mod.xxh64 = _xxh64  # type: ignore[attr-defined]
+    sys.modules["xxhash"] = mod
 
 
-# Eagerly resolve at import time so the rest of the module can name
-# these symbols directly. If the submodule is missing (e.g.
-# ``git submodule update --init`` was skipped), surface a clear error
-# pointing at .gitmodules.
-try:
-    _fork_attention = _load_fork_module(
-        "nanovllm_fork_layers_attention",
-        "nanovllm/layers/attention.py",
-    )
-    # block_manager and sequence both reference SamplingParams at import.
-    # Build a stub class once and inject it under ``nanovllm.sampling_params``
-    # so ``from nanovllm.sampling_params import SamplingParams`` resolves.
+_install_fork_shim()
+_ensure_xxhash()
 
-    class _StubSamplingParams:
-        temperature: float = 1.0
-        max_tokens: int = 64
-        ignore_eos: bool = False
-
-        def __post_init__(self) -> None: ...
-
-    if "nanovllm.sampling_params" not in sys.modules:
-        _stub_module("nanovllm.sampling_params", SamplingParams=_StubSamplingParams)
-    else:
-        sys.modules["nanovllm.sampling_params"].SamplingParams = _StubSamplingParams
-
-    _fork_block_manager = _load_fork_module(
-        "nanovllm_fork_engine_block_manager",
-        "nanovllm/engine/block_manager.py",
-    )
-    _fork_sequence = _load_fork_module(
-        "nanovllm_fork_engine_sequence",
-        "nanovllm/engine/sequence.py",
-    )
-except (FileNotFoundError, ModuleNotFoundError) as exc:
-    raise RuntimeError(
-        "paged_attention requires the MciG-ggg/nano-vllm submodule; run "
-        "`git submodule update --init --recursive` from the repo root."
-    ) from exc
-
-store_kvcache = _fork_attention.store_kvcache
-store_kvcache_kernel = _fork_attention.store_kvcache_kernel
-ForkAttention = _fork_attention.Attention
-BlockManager = _fork_block_manager.BlockManager
-Sequence = _fork_sequence.Sequence
+# Real imports through normal machinery. After the shim is installed and
+# the fork root is on sys.path, these resolve to the genuine fork files.
+from nanovllm.engine.block_manager import BlockManager  # noqa: E402
+from nanovllm.engine.sequence import Sequence  # noqa: E402
 
 
 class PagedKVContext:
@@ -822,6 +711,4 @@ __all__ = [
     "disable_paged_kv_cache",
     "enable_paged_kv_cache",
     "flash_attn_available",
-    "store_kvcache",
-    "store_kvcache_kernel",
 ]

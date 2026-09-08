@@ -2,7 +2,7 @@
 
 Loads the jingyaogong/minimind-3o checkpoint + Mimi codec + tokenizer
 into a ``MinimindBundle`` for the per-stage modules. Public symbols:
-``load_minimind_omni_bundle``, ``create_bundle``, ``create_stages``.
+``load_minimind_omni_bundle`` (single canonical name; the old ``create_bundle`` / ``create_stages`` aliases were removed).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class MinimindBundle:
     mimi: Any
     device: str
     model_id: str
-    # Aliases so create_stages() can return three handles.
+    # Aliases removed: create_bundle / create_stages -> load_minimind_omni_bundle.
     thinker: Any = None
     talker: Any = None
     code2wav: Any = None
@@ -156,19 +156,6 @@ def load_minimind_omni_bundle(
     )
 
 
-def create_bundle(
-    model_id: str,
-    device: str | None = None,
-    **kwargs: Any,
-) -> MinimindBundle:
-    return load_minimind_omni_bundle(model_id=model_id, device=device, **kwargs)
-
-
-def create_stages(model_id: str, device: str | None = None, **kwargs: Any):
-    bundle = create_bundle(model_id, device, **kwargs)
-    return bundle.thinker, bundle.talker, bundle.code2wav
-
-
 # AudioPayload re-exported for convenience; canonical home is
 # ``nanovllm_omni.outputs``.
 __all__ = [
@@ -178,7 +165,5 @@ __all__ = [
     "MIMI_SAMPLE_RATE",
     "MIMI_CODE_VOCAB_LIMIT",
     "MinimindBundle",
-    "create_bundle",
-    "create_stages",
     "load_minimind_omni_bundle",
 ]

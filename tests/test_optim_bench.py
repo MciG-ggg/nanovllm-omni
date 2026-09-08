@@ -519,10 +519,10 @@ def test_trace_profile_markdown_renders_table():
 @pytest.mark.smoke
 def test_seed_determinism():
     """Two ``run_one`` calls with the same ``(prompt, seed)`` produce identical audio bytes."""
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
     from nanovllm_omni.optim.bench import BenchPrompt, run_one
 
-    bundle = create_bundle(
+    bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",
         mimi_model_id="/home/mcig/mimi",
         device="cuda",
@@ -537,10 +537,10 @@ def test_seed_determinism():
 @pytest.mark.smoke
 def test_prompts_complete():
     """All six ``BENCH_PROMPTS`` complete one ``run_one`` without raising."""
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
     from nanovllm_omni.optim.bench import BENCH_PROMPTS, run_one
 
-    bundle = create_bundle(
+    bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",
         mimi_model_id="/home/mcig/mimi",
         device="cuda",
@@ -554,10 +554,10 @@ def test_prompts_complete():
 @pytest.mark.smoke
 def test_timer_envelope():
     """Sum of stage timers is within 5% of a single ``perf_counter`` envelope."""
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
     from nanovllm_omni.optim.bench import BenchPrompt, run_one
 
-    bundle = create_bundle(
+    bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",
         mimi_model_id="/home/mcig/mimi",
         device="cuda",

@@ -43,10 +43,6 @@ def write_csv(results: Iterable[RunResult], path: str | Path) -> Path:
     return p
 
 
-def _median(values: list[float]) -> float:
-    return statistics.median(values) if values else 0.0
-
-
 def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -97,15 +93,15 @@ def markdown_table(results: Sequence[RunResult]) -> str:
         vram = [r.vram_peak_mb for r in rs]
         cells = (
             prompt_id,
-            f"{_median(token):.2f}",
-            f"{_median(gen):.2f}",
-            f"{_median(dec):.2f}",
-            f"{_median(wav):.2f}",
-            f"{_median(tot):.2f}",
+            f"{(statistics.median(token) if token else 0.0):.2f}",
+            f"{(statistics.median(gen) if gen else 0.0):.2f}",
+            f"{(statistics.median(dec) if dec else 0.0):.2f}",
+            f"{(statistics.median(wav) if wav else 0.0):.2f}",
+            f"{(statistics.median(tot) if tot else 0.0):.2f}",
             f"{_percentile(tot, 95):.2f}",
             f"{min(tot):.2f}",
-            f"{int(_median(frames))}",
-            f"{_median(vram):.2f}",
+            f"{int(statistics.median(frames) if frames else 0.0)}",
+            f"{(statistics.median(vram) if vram else 0.0):.2f}",
         )
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
@@ -152,15 +148,15 @@ def markdown_table_detail(results: Sequence[RunResult]) -> str:
         vram = [r.vram_peak_mb for r in rs]
         cells = (
             prompt_id,
-            f"{_median(gen):.2f}",
-            f"{_median(dec):.2f}",
-            f"{_median(tot):.2f}",
-            f"{_median(gen_cuda):.2f}",
-            f"{_median(dec_cuda):.2f}",
-            f"{_median(cpu_disp):.2f}",
-            f"{_median(per_step):.2f}",
-            f"{int(_median(frames))}",
-            f"{_median(vram):.2f}",
+            f"{(statistics.median(gen) if gen else 0.0):.2f}",
+            f"{(statistics.median(dec) if dec else 0.0):.2f}",
+            f"{(statistics.median(tot) if tot else 0.0):.2f}",
+            f"{(statistics.median(gen_cuda) if gen_cuda else 0.0):.2f}",
+            f"{(statistics.median(dec_cuda) if dec_cuda else 0.0):.2f}",
+            f"{(statistics.median(cpu_disp) if cpu_disp else 0.0):.2f}",
+            f"{(statistics.median(per_step) if per_step else 0.0):.2f}",
+            f"{int(statistics.median(frames) if frames else 0.0)}",
+            f"{(statistics.median(vram) if vram else 0.0):.2f}",
         )
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"

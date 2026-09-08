@@ -102,10 +102,6 @@ def _normalize_prompt(prompt: BenchPrompt | str) -> BenchPrompt:
     return BenchPrompt(id="ad-hoc", text=str(prompt))
 
 
-def _ms_since(t0: float) -> float:
-    return (time.perf_counter() - t0) * 1000.0
-
-
 def _cuda_event_pair() -> tuple[Any, Any]:
     """Return ``(start_event, end_event)`` or ``(None, None)`` if CUDA is unavailable."""
     import torch
@@ -183,7 +179,7 @@ def run_one(
         else:
             input_ids = tokenize_for_generate(bundle.tokenizer, p.text, open_thinking)
         input_ids = input_ids.to(bundle.device)
-        t_tokenize_ms = _ms_since(t0)
+        t_tokenize_ms = (time.perf_counter() - t0) * 1000.0
 
         gen_start, gen_end = _cuda_event_pair()
         if gen_start is not None:
@@ -200,7 +196,7 @@ def run_one(
             use_thinker_cuda_graph=use_thinker_cuda_graph,
             seed=seed,
         )
-        t_generate_ms = _ms_since(t0)
+        t_generate_ms = (time.perf_counter() - t0) * 1000.0
         if gen_end is not None:
             gen_end.record()
         t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
@@ -214,7 +210,7 @@ def run_one(
                 dec_start.record()
             t0 = time.perf_counter()
             samples = decode_audio(bundle.mimi, frames, bundle.device)
-            t_decode_ms = _ms_since(t0)
+            t_decode_ms = (time.perf_counter() - t0) * 1000.0
             if dec_end is not None:
                 dec_end.record()
             t_decode_cuda_ms = _measure_cuda_ms(dec_start, dec_end)
@@ -228,7 +224,7 @@ def run_one(
     if frames and samples is not None:
         t0 = time.perf_counter()
         wav_bytes = encode_wav(samples)
-        t_wav_ms = _ms_since(t0)
+        t_wav_ms = (time.perf_counter() - t0) * 1000.0
     else:
         wav_bytes, t_wav_ms = b"", 0.0
 
@@ -289,9 +285,9 @@ def run_one_full(
                 top_p=top_p,
             ),
         )
-        t_generate_ms = _ms_since(t0)
+        t_generate_ms = (time.perf_counter() - t0) * 1000.0
     except Exception:
-        t_generate_ms = _ms_since(t0)
+        t_generate_ms = (time.perf_counter() - t0) * 1000.0
         return RunResult(
             prompt_id=p.id,
             seed=seed,
@@ -332,7 +328,6 @@ def run_one_full(
     frames = 0
     if audio is not None and getattr(audio, "data", None):
         wav_bytes = bytes(audio.data)
-        # WAV header is 44 bytes; mono 16-bit PCM -> bytes_per_frame = 1920 * 2.
         data_bytes = max(len(wav_bytes) - 44, 0)
         frames = data_bytes // (1920 * 2)
 

@@ -146,7 +146,7 @@ def test_main_gpu_path_uses_run_n(tmp_path: Path) -> None:
     import sys
 
     fake_model_module = mock.MagicMock()
-    fake_model_module.create_bundle = fake_create_bundle
+    fake_model_module.load_minimind_omni_bundle = fake_create_bundle
 
     # run_n is imported at module top (`from .runner import run_n`), so we
     # patch the name on bench_minimind directly; the fake model module goes

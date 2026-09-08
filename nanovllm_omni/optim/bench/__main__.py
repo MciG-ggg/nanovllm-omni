@@ -29,12 +29,12 @@ from .trace import (
 
 
 def _load_bundle(args: argparse.Namespace):
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
 
     kwargs: dict[str, object] = {}
     if args.mimi:
         kwargs["mimi_model_id"] = args.mimi
-    bundle = create_bundle(model_id=args.model, device=args.device, **kwargs)
+    bundle = load_minimind_omni_bundle(model_id=args.model, device=args.device, **kwargs)
     return bundle
 
 

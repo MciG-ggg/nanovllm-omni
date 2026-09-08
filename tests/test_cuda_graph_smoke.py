@@ -31,9 +31,9 @@ skip_no_weights = pytest.mark.skipif(not _HAS_WEIGHTS, reason="model weights not
 def bundle():
     if not _HAS_CUDA or not _HAS_WEIGHTS:
         pytest.skip("CUDA + weights required")
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
 
-    return create_bundle(model_id=_MODEL, mimi_model_id=_MIMI)
+    return load_minimind_omni_bundle(model_id=_MODEL, mimi_model_id=_MIMI)
 
 
 @pytest.fixture(scope="module")

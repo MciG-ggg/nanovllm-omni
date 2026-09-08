@@ -174,10 +174,10 @@ def test_thinker_stage_attaches_deploy_flag() -> None:
         # stage factory must attach it from deploy.
         return types.SimpleNamespace(device="cpu", use_thinker_cuda_graph=None)
 
-    orig_create = th.create_bundle
+    orig_create = th.load_minimind_omni_bundle
 
     try:
-        th.create_bundle = fake_create  # type: ignore[attr-defined]
+        th.load_minimind_omni_bundle = fake_create  # type: ignore[attr-defined]
         # Build three stages -- the bundle construction line runs at
         # factory time, so we don't need to call the closure.
         b1 = th._thinker_stage(deploy_on, args)
@@ -186,12 +186,12 @@ def test_thinker_stage_attaches_deploy_flag() -> None:
         # Closure exists; bundle was attached at factory time.
         _ = (b1, b2, b3)
         # Re-run with capturing to inspect the produced bundle.
-        # Easier: run create_bundle directly through the patched name, since
+        # Easier: run load_minimind_omni_bundle directly through the patched name, since
         # the factory's assignment is on the namespace returned by it.
         # Capture via a side-channel: instrument fake_create to record.
         seen.append(b1)  # placeholder; we verify via source below.
     finally:
-        th.create_bundle = orig_create  # type: ignore[attr-defined]
+        th.load_minimind_omni_bundle = orig_create  # type: ignore[attr-defined]
 
     # Source-level guard: the factory must read deploy.use_thinker_cuda_graph and
     # assign it onto the bundle. This catches the regression (the absence

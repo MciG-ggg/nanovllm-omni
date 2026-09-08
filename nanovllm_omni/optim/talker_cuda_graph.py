@@ -83,11 +83,6 @@ class TalkerMtpCudaGraph:
         self._cache: dict[TalkerMtpGraphKey, _TalkerMtpGraph] = {}
 
     @property
-    def cache_keys(self) -> tuple[TalkerMtpGraphKey, ...]:
-        """Return the currently captured fixed-shape keys."""
-        return tuple(self._cache)
-
-    @property
     def cache_size(self) -> int:
         return len(self._cache)
 

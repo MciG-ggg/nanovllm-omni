@@ -24,7 +24,7 @@ import torch
 sys.path.insert(0, "/home/mcig/nanovllm-omni")
 from transformers import AutoTokenizer
 
-from nanovllm_omni.models.minimind_omni import create_bundle
+from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
 from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
 
 MODEL = "/home/mcig/minimind-3o"
@@ -38,7 +38,7 @@ def main() -> int:
         print("no CUDA")
         return 2
     torch.manual_seed(42)
-    bundle = create_bundle(model_id=MODEL, mimi_model_id=MIMI)
+    bundle = load_minimind_omni_bundle(model_id=MODEL, mimi_model_id=MIMI)
     tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     ids = tok("Hello, how are you?", return_tensors="pt").input_ids.cuda()
     model = bundle.model

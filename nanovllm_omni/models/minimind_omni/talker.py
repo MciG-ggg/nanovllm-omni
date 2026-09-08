@@ -23,9 +23,6 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Output envelope (local replacement for vllm-omni's OmniOutput template)
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -40,9 +37,6 @@ class TalkerOutput:
     multimodal_outputs: dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Public class
-# ---------------------------------------------------------------------------
 
 
 class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
@@ -174,9 +168,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         self._stop_pending_by_req: dict[str, bool] = {}
         self._build_code_layer_masks()
 
-    # ------------------------------------------------------------------
-    # Construction helpers
-    # ------------------------------------------------------------------
 
     def _build_code_layer_masks(self) -> None:
         """Precompute the [num_code_layers+1, num_code_layers] active mask.
@@ -194,9 +185,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             persistent=False,
         )
 
-    # ------------------------------------------------------------------
-    # Input / output helpers (port from vllm-omni talker)
-    # ------------------------------------------------------------------
 
     def _audio_ids_from_layer0(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Split ``[B, T]`` text-style input ids into ``[B, num_code_layers, T]``.
@@ -432,9 +420,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             audio_codes = audio_codes.masked_fill(~active, self.audio_pad_token)
         return audio_codes
 
-    # ------------------------------------------------------------------
-    # LLM_AR interface (mirrors vllm-omni's stage contract)
-    # ------------------------------------------------------------------
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Pre-thinker-vllm helper: text-style embed for codec tokens.
@@ -635,9 +620,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             self._stop_pending_by_req.pop(request_id, None)
         return sampled
 
-    # ------------------------------------------------------------------
-    # Frame alignment (delayed diagonal MTP)
-    # ------------------------------------------------------------------
 
     def _normalise_audio_code_rows(
         self,
@@ -694,9 +676,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             return None
         return torch.stack(frames, dim=0).to(dtype=torch.long)
 
-    # ------------------------------------------------------------------
-    # Post-forward / lifecycle / output / checkpoint loading
-    # ------------------------------------------------------------------
 
     def postprocess(self, hidden_states: torch.Tensor, **kwargs: Any) -> dict[str, Any]:
         """Post-forward: stash last hidden state, detect audio_stop, build code history.
@@ -829,9 +808,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         return loaded_weights
 
 
-# ---------------------------------------------------------------------------
-# Bundle wiring
-# ---------------------------------------------------------------------------
 
 
 def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
@@ -853,9 +829,6 @@ def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
     return wrapped
 
 
-# ---------------------------------------------------------------------------
-# Pipeline factory / process_input shims (glue layer preserved)
-# ---------------------------------------------------------------------------
 
 
 def _drive_talker_generation(
@@ -1040,9 +1013,9 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
             if talker is None:
                 talker = wrap_talker(injected_bundle)
         else:
-            from .bundle import create_bundle
+            from .bundle import load_minimind_omni_bundle
 
-            bundle = create_bundle(
+            bundle = load_minimind_omni_bundle(
                 model_id=args.model,
                 device=args.device,
                 trust_remote_code=getattr(args, "trust_remote_code", True),

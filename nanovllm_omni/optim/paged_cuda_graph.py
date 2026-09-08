@@ -131,7 +131,6 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         self._text_finished = False
         self._seq: Any = None
 
-    # -- cache lifecycle --------------------------------------------------
     def _required_blocks(self, prompt_len: int) -> int:
         '''Block-table columns needed for ``prompt_len + n_steps`` tokens.
 
@@ -183,24 +182,23 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         if self.cache is not None and self.cache.kv_cache is not None:
             self.cache.kv_cache.zero_()
 
-    # -- context sync (mirrors fork's prepare_prefill / prepare_decode) ----
     def _sync_prefill_ctx(self, prompt_len: int) -> None:
-        ctx = self.cache._ctx
-        ctx.is_prefill = True
+        context = self.cache._ctx
+        context.is_prefill = True
         bt = self._seq.block_table
         slots = [
             bt[i // self.block_size] * self.block_size + (i % self.block_size)
             for i in range(prompt_len)
         ]
-        ctx.slot_mapping.fill_(-1)
-        ctx.slot_mapping[:prompt_len] = torch.tensor(
-            slots, dtype=ctx.slot_mapping.dtype, device=ctx.slot_mapping.device
+        context.slot_mapping.fill_(-1)
+        context.slot_mapping[:prompt_len] = torch.tensor(
+            slots, dtype=context.slot_mapping.dtype, device=context.slot_mapping.device
         )
-        ctx.context_lens.zero_()
-        ctx.context_lens[0] = prompt_len
-        ctx.block_tables.zero_()
-        ctx.block_tables[0, : len(bt)] = torch.tensor(
-            bt, dtype=ctx.block_tables.dtype, device=ctx.block_tables.device
+        context.context_lens.zero_()
+        context.context_lens[0] = prompt_len
+        context.block_tables.zero_()
+        context.block_tables[0, : len(bt)] = torch.tensor(
+            bt, dtype=context.block_tables.dtype, device=context.block_tables.device
         )
 
     def _sync_decode_ctx(self) -> None:
@@ -211,20 +209,19 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         fresh values every step -- this is what makes replay-many work.
         '''
         seq = self._seq
-        ctx = self.cache._ctx
-        ctx.is_prefill = False
+        context = self.cache._ctx
+        context.is_prefill = False
         slot = seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
-        ctx.slot_mapping.fill_(-1)
-        ctx.slot_mapping[0] = slot
-        ctx.context_lens.zero_()
-        ctx.context_lens[0] = len(seq)
+        context.slot_mapping.fill_(-1)
+        context.slot_mapping[0] = slot
+        context.context_lens.zero_()
+        context.context_lens[0] = len(seq)
         bt = seq.block_table
-        ctx.block_tables.zero_()
-        ctx.block_tables[0, : len(bt)] = torch.tensor(
-            bt, dtype=ctx.block_tables.dtype, device=ctx.block_tables.device
+        context.block_tables.zero_()
+        context.block_tables[0, : len(bt)] = torch.tensor(
+            bt, dtype=context.block_tables.dtype, device=context.block_tables.device
         )
 
-    # -- prefill / capture ------------------------------------------------
     def _prefill(self, input_ids: Any) -> Any:
         prompt = input_ids.reshape(-1).tolist()
         prompt_len = len(prompt)
@@ -299,7 +296,6 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
             self._max_blocks_per_seq,
         )
 
-    # -- decode loop ------------------------------------------------------
     def generate_tokens(
         self,
         input_ids: Any,
@@ -331,7 +327,7 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         gen = torch.Generator(device=prefill_logits.device)
         gen.manual_seed(seed if seed is not None else torch.initial_seed())
 
-        tok = sample_text_token(
+        token_id = sample_text_token(
             prefill_logits,
             history_ids=history,
             temperature=self.temperature,
@@ -339,17 +335,17 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
             rp=self.rp,
             gen=gen,
         )
-        text_codes = [tok]
+        text_codes = [token_id]
         audio_codes = [[self.audio_pad] for _ in range(num_layers)]
-        history = history + [tok]
-        next_token = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
+        history = history + [token_id]
+        next_token = torch.tensor([[token_id]], device=prefill_logits.device, dtype=torch.long)
 
         # Token 0 joins the sequence before capture so the captured
         # context describes a real decode step.
-        self.cache.append_token(self._seq, tok)
+        self.cache.append_token(self._seq, token_id)
         self._capture(next_token)
 
-        if self._should_stop(tok, audio_codes):
+        if self._should_stop(token_id, audio_codes):
             return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
 
         out = self.graph_output
@@ -371,7 +367,7 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
                 ) from exc
 
             was_text_finished = self._text_finished
-            tok = sample_text_token(
+            token_id = sample_text_token(
                 out.logits[0, -1],
                 history_ids=history,
                 temperature=self.temperature,
@@ -380,9 +376,9 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
                 gen=gen,
             )
             if was_text_finished:
-                tok = self._next_post_eos_token()
-            text_codes.append(tok)
-            history = history + [tok]
+                token_id = self._next_post_eos_token()
+            text_codes.append(token_id)
+            history = history + [token_id]
 
             audio_logits = getattr(out, "audio_logits", None)
             for layer in range(num_layers):
@@ -397,16 +393,16 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
                 else:
                     audio_codes[layer].append(self.audio_pad)
 
-            next_token = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
+            next_token = torch.tensor([[token_id]], device=out.logits.device, dtype=torch.long)
             if return_bridge and self.graph_bridge is not None:
                 bridge_states.append(
                     self.graph_bridge[0, 0].detach().to(device="cpu", dtype=torch.float32).clone()
                 )
             # Grow the sequence so the next _sync_decode_ctx points at the
             # right slot (and allocates a block on boundary crossings).
-            self.cache.append_token(self._seq, tok)
+            self.cache.append_token(self._seq, token_id)
 
-            if self._should_stop(tok, audio_codes):
+            if self._should_stop(token_id, audio_codes):
                 break
 
         return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)

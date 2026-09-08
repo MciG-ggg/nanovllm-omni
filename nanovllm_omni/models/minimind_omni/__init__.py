@@ -1,7 +1,7 @@
 """MiniMind-Omni aligned model package exports.
 
 Public surface is preserved from the previous single-file layout:
-``MinimindBundle``, ``create_bundle``, ``generate_audio``, etc. all still
+``MinimindBundle``, ``load_minimind_omni_bundle``, ``generate_audio``, etc. all still
 import from ``nanovllm_omni.models.minimind_omni``. The internals are now
 split per stage (``bundle.py`` / ``thinker.py`` / ``talker.py`` /
 ``code2wav.py``).
@@ -12,8 +12,6 @@ from .bundle import (
     DEFAULT_MINIMIND_MODEL_ID,
     MIMI_SAMPLE_RATE,
     MinimindBundle,
-    create_bundle,
-    create_stages,
     load_minimind_omni_bundle,
 )
 from .code2wav import MiniMindOmniCode2Wav, decode_audio, encode_wav, load_mimi_codec
@@ -35,8 +33,6 @@ __all__ = [
     "MINIMIND_OMNI_PIPELINE",
     "MinimindBundle",
     "PIPELINE",
-    "create_bundle",
-    "create_stages",
     "decode_audio",
     "encode_wav",
     "load_mimi_codec",

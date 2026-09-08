@@ -204,7 +204,7 @@ def test_stop_initial_state_does_not_stop() -> None:
     stop; flag must stay False."""
     dec = _make_decoder()
     codes = _pad_audio_codes()
-    assert dec._should_stop(tok=11, audio_codes=codes) is False
+    assert dec._should_stop(token_id=11, audio_codes=codes) is False
     assert dec._text_finished is False
 
 
@@ -214,12 +214,12 @@ def test_stop_text_eos_only_does_not_stop() -> None:
     must keep going -- mirrors eager: ``step_finished`` requires BOTH."""
     dec = _make_decoder()
     codes = _pad_audio_codes()
-    assert dec._should_stop(tok=dec.eos_token_id, audio_codes=codes) is False
+    assert dec._should_stop(token_id=dec.eos_token_id, audio_codes=codes) is False
     # flag flipped on EOS sample
     assert dec._text_finished is True
     # subsequent calls with no audio_stop still do not stop
     codes[7][-1] = 2051  # still pad
-    assert dec._should_stop(tok=42, audio_codes=codes) is False
+    assert dec._should_stop(token_id=42, audio_codes=codes) is False
 
 
 def test_stop_text_eos_and_audio_stop_stops() -> None:
@@ -228,10 +228,10 @@ def test_stop_text_eos_and_audio_stop_stops() -> None:
     dec = _make_decoder()
     codes = _pad_audio_codes()
     # 1st call: EOS observed, flag flips, audio_codes[7][-1] still pad -> False
-    assert dec._should_stop(tok=dec.eos_token_id, audio_codes=codes) is False
+    assert dec._should_stop(token_id=dec.eos_token_id, audio_codes=codes) is False
     # 2nd call: last-layer stop code now present, text_finished is True
     codes[7][-1] = dec.audio_stop_token
-    assert dec._should_stop(tok=42, audio_codes=codes) is True
+    assert dec._should_stop(token_id=42, audio_codes=codes) is True
 
 
 def test_stop_audio_stop_alone_does_not_stop() -> None:
@@ -240,15 +240,15 @@ def test_stop_audio_stop_alone_does_not_stop() -> None:
     dec = _make_decoder()
     codes = _pad_audio_codes()
     codes[7][-1] = dec.audio_stop_token  # audio stop but no text EOS yet
-    assert dec._should_stop(tok=42, audio_codes=codes) is False
+    assert dec._should_stop(token_id=42, audio_codes=codes) is False
     assert dec._text_finished is False
     # then text EOS arrives: still no stop because we just appended pad
     # (audio_codes[7][-1] is still pad after this step, not audio_stop).
     codes[7].append(2051)
-    assert dec._should_stop(tok=dec.eos_token_id, audio_codes=codes) is False
+    assert dec._should_stop(token_id=dec.eos_token_id, audio_codes=codes) is False
     # finally audio_codes[7][-1] = audio_stop with text_finished=True
     codes[7][-1] = dec.audio_stop_token
-    assert dec._should_stop(tok=11, audio_codes=codes) is True
+    assert dec._should_stop(token_id=11, audio_codes=codes) is True
 
 
 def test_stop_budget_exhaustion_path_keeps_loop_running() -> None:
@@ -261,7 +261,7 @@ def test_stop_budget_exhaustion_path_keeps_loop_running() -> None:
     codes = _pad_audio_codes(num_steps=n + 1)
     for _ in range(n):
         # never observe EOS, never append audio_stop on layer 7
-        assert dec._should_stop(tok=11, audio_codes=codes) is False
+        assert dec._should_stop(token_id=11, audio_codes=codes) is False
     assert dec._text_finished is False
 
 

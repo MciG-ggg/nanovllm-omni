@@ -36,7 +36,7 @@ args = types.SimpleNamespace(
     model=MODEL, device="cuda", trust_remote_code=True, dtype=None, extra={}
 )
 captured: list = []
-orig_create = th.create_bundle
+orig_create = th.load_minimind_omni_bundle
 
 
 def fake_create_record(model_id, **kw):
@@ -47,11 +47,11 @@ def fake_create_record(model_id, **kw):
 
 try:
     t0 = time.time()
-    th.create_bundle = fake_create_record  # type: ignore[attr-defined]
+    th.load_minimind_omni_bundle = fake_create_record  # type: ignore[attr-defined]
     stage = th._thinker_stage(deploy, args)
     print(f"stage built in {time.time()-t0:.1f}s")
 finally:
-    th.create_bundle = orig_create  # type: ignore[attr-defined]
+    th.load_minimind_omni_bundle = orig_create  # type: ignore[attr-defined]
 
 if not captured:
     print("ERROR: no bundle captured")
@@ -67,10 +67,10 @@ print("PASS: stage bundle honors deploy.use_thinker_cuda_graph=True")
 deploy_off = DeployConfig(use_thinker_cuda_graph=False)
 captured.clear()
 try:
-    th.create_bundle = fake_create_record  # type: ignore[attr-defined]
+    th.load_minimind_omni_bundle = fake_create_record  # type: ignore[attr-defined]
     th._thinker_stage(deploy_off, args)
 finally:
-    th.create_bundle = orig_create  # type: ignore[attr-defined]
+    th.load_minimind_omni_bundle = orig_create  # type: ignore[attr-defined]
 b2 = captured[0]
 print(
     f"deploy.use_thinker_cuda_graph=False -> bundle.use_thinker_cuda_graph = {b2.use_thinker_cuda_graph}"

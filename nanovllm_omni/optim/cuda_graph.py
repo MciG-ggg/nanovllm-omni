@@ -123,7 +123,6 @@ class CudaGraphDecoder:
         self.n_steps = n_steps
         self.temperature = DEFAULT_TEXT_TEMPERATURE
         self.top_p = DEFAULT_TEXT_TOP_P
-        # rp = repetition_penalty (1.0 = no penalty; matches SamplingParams.repetition_penalty).
         self.rp = 1.0
         self.audio_pad = int(model.config.audio_pad_token)
         # Stop parity with BatchedThinkerRunner.step_finished (defect B fix):
@@ -154,7 +153,6 @@ class CudaGraphDecoder:
         self._captured_n_steps = -1
         self._prefill_len = -1
         self._last_input_ids = None
-        # defect B: text EOS state flag, flips on first sampled EOS token.
         self._text_finished = False
 
     def _reset_pos(self) -> None:
@@ -195,7 +193,6 @@ class CudaGraphDecoder:
 
             bridge = _read_bridge_capture(self.model, self._bridge_layer)
             self._prefill_bridge = bridge[0].detach().to(device="cpu", dtype=torch.float32).clone()
-        # text row is the last channel: logits[0, -1] is the last text position
         return out.logits[0, -1].clone()
 
     def _enable_bridge_capture(self) -> None:
@@ -296,7 +293,6 @@ class CudaGraphDecoder:
         # a rebuild instead of replaying a stale step set.
         self._captured_n_steps = self.n_steps
 
-    # -- programmatic API -------------------------------------------------
     def _reset_request_state(
         self,
         *,
@@ -326,7 +322,7 @@ class CudaGraphDecoder:
         self._internal_stop_emitted = True
         return self._internal_stop_token_id
 
-    def _should_stop(self, tok: int, audio_codes: list[list[int]]) -> bool:
+    def _should_stop(self, token_id: int, audio_codes: list[list[int]]) -> bool:
         """Defect B fix: parity with ``BatchedThinkerRunner.step_finished``.
 
         Flips ``self._text_finished`` the first time a sampled text token
@@ -336,7 +332,7 @@ class CudaGraphDecoder:
         CPU contract test exercises the real predicate (no hand-replicated
         copy).
         """
-        if not self._text_finished and tok == self.eos_token_id:
+        if not self._text_finished and token_id == self.eos_token_id:
             self._text_finished = True
         if getattr(self, "_post_eos_padding_count", 0) > 0:
             return self._internal_stop_emitted
@@ -367,7 +363,7 @@ class CudaGraphDecoder:
         text. For WAV output the audio codes are returned as well.
 
         Stopping (defect B fix): the main loop checks
-        ``_should_stop(tok, audio_codes)`` after each decode step. With
+        ``_should_stop(token_id, audio_codes)`` after each decode step. With
         post-EOS padding enabled, it emits enter, PAD, and internal-stop
         tokens through the same state machine as
         ``BatchedThinkerRunner``; otherwise it stops at text EOS plus
@@ -388,7 +384,7 @@ class CudaGraphDecoder:
         gen.manual_seed(seed if seed is not None else torch.initial_seed())
 
         # seed0: sampled from prefill logits; audio_step -1 => all audio pad
-        tok = sample_text_token(
+        token_id = sample_text_token(
             prefill_logits,
             history_ids=history,
             temperature=self.temperature,
@@ -396,14 +392,14 @@ class CudaGraphDecoder:
             rp=self.rp,
             gen=gen,
         )
-        text_codes = [tok]
+        text_codes = [token_id]
         audio_codes = [[self.audio_pad] for _ in range(num_layers)]
-        history = history + [tok]
-        next_token = torch.tensor([[tok]], device=prefill_logits.device, dtype=torch.long)
+        history = history + [token_id]
+        next_token = torch.tensor([[token_id]], device=prefill_logits.device, dtype=torch.long)
         self._capture(next_token)
         # seed0 stop check: text_finished may flip here, but no audio code
         # was sampled yet; the post-EOS state machine starts on the next step.
-        if self._should_stop(tok, audio_codes):
+        if self._should_stop(token_id, audio_codes):
             return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
         for k in range(self.n_steps - 1):
             step_index = k + 1  # text token index at this decode step
@@ -429,7 +425,7 @@ class CudaGraphDecoder:
                     "capture state reset — retry will recapture."
                 ) from exc
             was_text_finished = self._text_finished
-            tok = sample_text_token(
+            token_id = sample_text_token(
                 out.logits[0, -1],
                 history_ids=history,
                 temperature=self.temperature,
@@ -438,9 +434,9 @@ class CudaGraphDecoder:
                 gen=gen,
             )
             if was_text_finished:
-                tok = self._next_post_eos_token()
-            text_codes.append(tok)
-            history = history + [tok]
+                token_id = self._next_post_eos_token()
+            text_codes.append(token_id)
+            history = history + [token_id]
             # audio draws (same gen => identical RNG advance to production)
             audio_logits = getattr(out, "audio_logits", None)
             for layer in range(num_layers):
@@ -454,14 +450,12 @@ class CudaGraphDecoder:
                     audio_history[layer].append(code)
                 else:
                     audio_codes[layer].append(self.audio_pad)
-            next_token = torch.tensor([[tok]], device=out.logits.device, dtype=torch.long)
+            next_token = torch.tensor([[token_id]], device=out.logits.device, dtype=torch.long)
             if return_bridge and bridge is not None:
                 bridge_states.append(
                     bridge[0, 0].detach().to(device="cpu", dtype=torch.float32).clone()
                 )
-            # defect B: halt at content-natural end; ``_should_stop`` flips
-            # _text_finished on EOS, returns True once last-layer audio_stop.
-            if self._should_stop(tok, audio_codes):
+            if self._should_stop(token_id, audio_codes):
                 break
         return self._result(text_codes, audio_codes, return_audio, return_bridge, bridge_states)
 

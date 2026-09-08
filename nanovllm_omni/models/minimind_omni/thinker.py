@@ -14,7 +14,7 @@ from typing import Any
 from nanovllm_omni.outputs import AudioPayload
 
 from ._stage import stage
-from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, create_bundle
+from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, load_minimind_omni_bundle
 
 
 def _thinker_stage(deploy: Any, args: Any) -> Any:
@@ -37,7 +37,7 @@ def _thinker_stage(deploy: Any, args: Any) -> Any:
     bundle = (
         provided_bundle
         if provided_bundle is not None
-        else create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+        else load_minimind_omni_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
     )
     if bundle is not None:
         bundle.use_thinker_cuda_graph = bool(getattr(deploy, "use_thinker_cuda_graph", True))

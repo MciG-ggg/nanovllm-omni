@@ -78,14 +78,14 @@ def main() -> int:
 
     from transformers import AutoTokenizer
 
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.bundle import MinimindBundle
     from nanovllm_omni.models.minimind_omni.talker import (
         MiniMindOmniTalkerForConditionalGeneration,
     )
 
     torch.manual_seed(args.seed)
-    bundle: MinimindBundle = create_bundle(model_id=args.model, mimi_model_id=args.mimi)
+    bundle: MinimindBundle = load_minimind_omni_bundle(model_id=args.model, mimi_model_id=args.mimi)
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     ids = tok(_SAMPLE_TEXT, return_tensors="pt").input_ids.cuda()

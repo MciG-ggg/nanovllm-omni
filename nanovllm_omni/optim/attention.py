@@ -18,11 +18,14 @@ _KVBUFFER_MARKER = "_nanovllm_kv_buffer"
 def _import_upstream(module_name: str) -> Any:
     """Resolve the vendored upstream module by dotted name.
 
-    Uses ``__import__`` (not a static import) so this module never
-    couples to the vendored model code at import time; we only touch it
-    when the buffer patch is applied at model load.
+    Kept as a module-level helper because
+    ``tests/test_fixed_kv_buffer_forward.py`` monkey-patches it to inject a
+    stub ``apply_rotary_pos_emb`` / ``repeat_kv`` for the buffered path;
+    inlining the call site would force the test to patch ``__import__``
+    instead, which is harder to scope.
     """
     return __import__(module_name, fromlist=["apply_rotary_pos_emb"])
+
 
 
 def _attention_forward_buffered(

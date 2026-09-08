@@ -90,14 +90,14 @@ def main() -> int:
         return 2
 
     from nanovllm_omni import Omni
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
 
     print(f"torch={torch.__version__}, device={torch.cuda.get_device_name(0)}")
     print(f"model={args.model}, mimi={args.mimi}")
     print()
 
     # Load real bundle (real weights)
-    bundle = create_bundle(model_id=args.model, mimi_model_id=args.mimi)
+    bundle = load_minimind_omni_bundle(model_id=args.model, mimi_model_id=args.mimi)
 
     # --- Eager (use_talker_cuda_graph: false) ---
     deploy_eager = Path("/tmp/minimind_eager.yaml")

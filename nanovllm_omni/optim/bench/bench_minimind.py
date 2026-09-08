@@ -151,12 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    from nanovllm_omni.models.minimind_omni import create_bundle
+    from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
 
     bundle_kwargs: dict[str, Any] = {}
     if args.mimi:
         bundle_kwargs["mimi_model_id"] = args.mimi
-    bundle = create_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
+    bundle = load_minimind_omni_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
 
     results = run_n(
         bundle,

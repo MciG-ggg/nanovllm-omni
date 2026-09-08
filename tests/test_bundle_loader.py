@@ -113,7 +113,7 @@ def test_cast_model_dtype_rejects_unknown_value():
 
 def test_thinker_stage_passes_trust_remote_code_and_dtype_to_bundle(monkeypatch):
     """``OmniEngineArgs.trust_remote_code`` and ``.dtype`` flow from
-    ``_thinker_stage`` into ``create_bundle`` as kwargs."""
+    ``_thinker_stage`` into ``load_minimind_omni_bundle`` as kwargs."""
     from nanovllm_omni.config.params import OmniEngineArgs
     from nanovllm_omni.models.minimind_omni import thinker as thinker_mod
 
@@ -125,7 +125,7 @@ def test_thinker_stage_passes_trust_remote_code_and_dtype_to_bundle(monkeypatch)
         captured.update(kwargs)
         return None  # body of the factory doesn't use the bundle
 
-    monkeypatch.setattr(thinker_mod, "create_bundle", fake_create_bundle)
+    monkeypatch.setattr(thinker_mod, "load_minimind_omni_bundle", fake_create_bundle)
 
     args = OmniEngineArgs(
         model="any",
@@ -154,7 +154,7 @@ def test_thinker_stage_defaults_keep_legacy_bundle_kwargs(monkeypatch):
         captured.update(kwargs)
         return None
 
-    monkeypatch.setattr(thinker_mod, "create_bundle", fake_create_bundle)
+    monkeypatch.setattr(thinker_mod, "load_minimind_omni_bundle", fake_create_bundle)
 
     args = OmniEngineArgs(model="any", device="cpu")
     thinker_mod._thinker_stage(deploy=None, args=args)

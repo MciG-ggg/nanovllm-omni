@@ -40,12 +40,6 @@ def load_mimi_codec(
     return _cast_model_dtype(mimi, dtype, device).to(device)
 
 
-def _is_code2wav_payload(payload: Any) -> bool:
-    from .stage_processors import Code2WavInputPayload
-
-    return isinstance(payload, Code2WavInputPayload)
-
-
 class MiniMindOmniCode2Wav:
     """Decode one full-mode ``Code2WavInputPayload`` into ``AudioPayload``."""
 
@@ -105,9 +99,8 @@ class MiniMindOmniCode2Wav:
         )
 
 
-def _code2wav_stage(deploy: Any, args: Any) -> MiniMindOmniCode2Wav:
+def _code2wav_stage(_deploy: Any, args: Any) -> MiniMindOmniCode2Wav:
     """Construct the local Code2Wav stage without loading the full model."""
-    del deploy
     from .bundle import _cast_model_dtype, _pick_device
 
     extra = dict(getattr(args, "extra", None) or {})

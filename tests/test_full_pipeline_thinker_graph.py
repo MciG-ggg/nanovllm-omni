@@ -23,6 +23,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from nanovllm_omni.engine import cuda_graph as cg  # noqa: E402
 from nanovllm_omni.models.minimind_omni import generation as gen_module  # noqa: E402
 from nanovllm_omni.models.minimind_omni.stage_processors import (  # noqa: E402
     ThinkerStageOutput,
@@ -32,7 +33,6 @@ from nanovllm_omni.models.minimind_omni.thinker import (  # noqa: E402
     _full_thinker_stage,
     run_generate,
 )
-from nanovllm_omni.optim import cuda_graph as cg  # noqa: E402
 from tests._talker_fixtures import make_fake_bundle  # noqa: E402
 from tests.test_full_pipeline import (  # noqa: E402
     FakeMimi,

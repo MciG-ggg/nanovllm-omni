@@ -27,7 +27,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.optim import cuda_graph as cg  # noqa: E402 -- after importorskip
+from nanovllm_omni.engine import cuda_graph as cg  # noqa: E402 -- after importorskip
 
 
 class _FakeConfig:
@@ -206,7 +206,7 @@ def test_position_dependent_by_design() -> None:
     Verify the attention forward uses ``self._kv_pos`` as a host int."""
     import inspect
 
-    from nanovllm_omni.optim import attention
+    from nanovllm_omni.engine import attention
 
     src = inspect.getsource(attention._attention_forward_buffered)
     # _kv_pos is used for Python slicing (host int, baked at capture)
@@ -222,7 +222,7 @@ def test_decoder_wires_buffer_patch_and_input_shape() -> None:
     # constructing directly (the module's enable_cuda_graph already guarded).
     # Verify via the decode helper only, plus that buffer-ization marks land.
 
-    from nanovllm_omni.optim.attention import enable_fixed_kv_buffer
+    from nanovllm_omni.engine.attention import enable_fixed_kv_buffer
 
     model = _StubModel()
     enable_fixed_kv_buffer(model, max_len=32)

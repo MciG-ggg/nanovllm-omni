@@ -27,7 +27,6 @@ def _import_upstream(module_name: str) -> Any:
     return __import__(module_name, fromlist=["apply_rotary_pos_emb"])
 
 
-
 def _attention_forward_buffered(
     self: Any,
     query: Any,

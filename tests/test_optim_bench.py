@@ -1,4 +1,4 @@
-"""Tests for the ``nanovllm_omni.optim.bench`` harness (TK-011).
+"""Tests for the ``nanovllm_omni.engine.bench`` harness (TK-011).
 
 3 unit tests + 3 @pytest.mark.smoke tests, per GitHub issue #23.
 Unit tests run on CPU with a stub bundle so CI does not need the
@@ -114,7 +114,7 @@ def _bundle() -> _FakeBundle:
 
 
 def _short_prompt():
-    from nanovllm_omni.optim.bench import BenchPrompt
+    from nanovllm_omni.engine.bench import BenchPrompt
 
     return BenchPrompt(id="short_test", text="你好。")
 
@@ -126,7 +126,7 @@ def _short_prompt():
 
 def test_stage_times_non_negative():
     """Each ``StageTimes`` field is ``>= 0`` after one ``run_one`` call."""
-    from nanovllm_omni.optim.bench import run_one
+    from nanovllm_omni.engine.bench import run_one
 
     r = run_one(_bundle(), _short_prompt(), max_tokens=4)
     assert r.times.tokenize_ms >= 0
@@ -137,7 +137,7 @@ def test_stage_times_non_negative():
 
 def test_total_equals_sum():
     """``total_ms == sum(tokenize, generate, decode, wav)`` to within 0.01 ms."""
-    from nanovllm_omni.optim.bench import run_one
+    from nanovllm_omni.engine.bench import run_one
 
     r = run_one(_bundle(), _short_prompt(), max_tokens=4)
     expected = r.times.tokenize_ms + r.times.generate_ms + r.times.decode_ms + r.times.wav_ms
@@ -146,7 +146,7 @@ def test_total_equals_sum():
 
 def test_run_one_returns_valid_wav():
     """``run_one`` produces an ``AudioPayload`` whose ``wav_bytes()`` round-trips."""
-    from nanovllm_omni.optim.bench import run_one
+    from nanovllm_omni.engine.bench import run_one
     from nanovllm_omni.outputs import AudioPayload
 
     r = run_one(_bundle(), _short_prompt(), max_tokens=4)
@@ -166,7 +166,7 @@ def test_run_one_full_times_e2e_and_derives_frames():
 
     Uses a stub ``omni`` so CI does not need the MiniMind-O weights.
     """
-    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.engine.bench import run_one_full
     from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
 
     # 2400 16-bit samples @ 24 kHz -> 0.1 s (4800 bytes raw PCM; header added
@@ -211,7 +211,7 @@ def test_run_one_full_records_per_stage_breakdown():
     """
     import json
 
-    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.engine.bench import run_one_full
     from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
 
     raw_pcm = b"\x00\x00" * 2400
@@ -281,7 +281,7 @@ def test_run_one_full_without_executor_keeps_wall_clock_generate():
     Guards the existing ``test_run_one_full_times_e2e_and_derives_frames``
     contract.
     """
-    from nanovllm_omni.optim.bench import run_one_full
+    from nanovllm_omni.engine.bench import run_one_full
     from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
 
     raw_pcm = b"\x00\x00" * 2400
@@ -308,7 +308,7 @@ def test_run_one_full_without_executor_keeps_wall_clock_generate():
 
 def test_stage_times_has_cuda_fields_and_overhead():
     """StageTimes tracks per-stage GPU time and derives CPU dispatch overhead."""
-    from nanovllm_omni.optim.bench import StageTimes, run_one
+    from nanovllm_omni.engine.bench import StageTimes, run_one
 
     r = run_one(_bundle(), _short_prompt(), max_tokens=4)
     # On the CPU stub bundle the cuda fields are 0 (CUDA unavailable).
@@ -332,7 +332,7 @@ def test_stage_times_has_cuda_fields_and_overhead():
 
 def test_run_result_as_csv_row_has_detail_columns():
     """RunResult.as_csv_row emits the four per-stage detail columns."""
-    from nanovllm_omni.optim.bench import run_one
+    from nanovllm_omni.engine.bench import run_one
 
     r = run_one(_bundle(), _short_prompt(), max_tokens=4)
     row = r.as_csv_row()
@@ -351,7 +351,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     import json
     import tempfile
 
-    from nanovllm_omni.optim.bench.trace import parse_kineto_trace
+    from nanovllm_omni.engine.bench.trace import parse_kineto_trace
 
     events = [
         # Stage events (user_annotation, ph=X)
@@ -475,7 +475,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
 
 
 def test_trace_profile_markdown_renders_table():
-    from nanovllm_omni.optim.bench.trace import (
+    from nanovllm_omni.engine.bench.trace import (
         KernelStat,
         StageProfile,
         TraceProfile,
@@ -519,8 +519,8 @@ def test_trace_profile_markdown_renders_table():
 @pytest.mark.smoke
 def test_seed_determinism():
     """Two ``run_one`` calls with the same ``(prompt, seed)`` produce identical audio bytes."""
+    from nanovllm_omni.engine.bench import BenchPrompt, run_one
     from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
-    from nanovllm_omni.optim.bench import BenchPrompt, run_one
 
     bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",
@@ -537,8 +537,8 @@ def test_seed_determinism():
 @pytest.mark.smoke
 def test_prompts_complete():
     """All six ``BENCH_PROMPTS`` complete one ``run_one`` without raising."""
+    from nanovllm_omni.engine.bench import BENCH_PROMPTS, run_one
     from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
-    from nanovllm_omni.optim.bench import BENCH_PROMPTS, run_one
 
     bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",
@@ -554,8 +554,8 @@ def test_prompts_complete():
 @pytest.mark.smoke
 def test_timer_envelope():
     """Sum of stage timers is within 5% of a single ``perf_counter`` envelope."""
+    from nanovllm_omni.engine.bench import BenchPrompt, run_one
     from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
-    from nanovllm_omni.optim.bench import BenchPrompt, run_one
 
     bundle = load_minimind_omni_bundle(
         model_id="/home/mcig/minimind-3o",

@@ -255,7 +255,7 @@ __all__ = [
 
 def test_bench_cli_can_force_each_graph_off() -> None:
     """The full E2E sweep must override YAML defaults in either direction."""
-    from nanovllm_omni.optim.bench.__main__ import build_parser
+    from nanovllm_omni.engine.bench.__main__ import build_parser
 
     parser = build_parser()
     ns = parser.parse_args(
@@ -277,7 +277,7 @@ def test_full_bench_accepts_thinker_cuda_graph_after_eos_fix() -> None:
     must NOT raise SystemExit -- the bench honors the flag on the full path.
     Pins the seam removal in ``optim/bench/__main__.py:cmd_time``.
     """
-    from nanovllm_omni.optim.bench.__main__ import build_parser, cmd_time
+    from nanovllm_omni.engine.bench.__main__ import build_parser, cmd_time
 
     args = build_parser().parse_args(["time", "--pipeline", "full", "--use-thinker-cuda-graph"])
     # Should NOT raise SystemExit (the legacy "post-EOS bridge-state contract"

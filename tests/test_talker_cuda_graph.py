@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.optim.talker_cuda_graph import (  # noqa: E402
+from nanovllm_omni.engine.talker_cuda_graph import (  # noqa: E402
     CudaGraphTalkerDecoder,
     TalkerMtpCudaGraph,
     enable_talker_mtp_cuda_graph,

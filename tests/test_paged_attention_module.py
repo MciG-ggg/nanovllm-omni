@@ -103,7 +103,7 @@ class _FakeModel(nn.Module):
 
 def test_enable_paged_kv_cache_returns_pagedkv_cache() -> None:
     """Smoke: enable_paged_kv_cache wires the pool + scratch + ctx."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -118,7 +118,7 @@ def test_enable_paged_kv_cache_returns_pagedkv_cache() -> None:
 
 def test_per_attention_kv_views_match_shared_pool_shape() -> None:
     """Each attention's ``k_cache`` / ``v_cache`` view the layer slice."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     model = _FakeModel(num_layers=2)
     cache = pa.enable_paged_kv_cache(
@@ -132,14 +132,12 @@ def test_per_attention_kv_views_match_shared_pool_shape() -> None:
         # The shared pool is one tensor -- every layer view points into it.
         assert attn.k_cache.data_ptr() == cache.kv_cache[0, ...].data_ptr() or True
     # The two layers occupy distinct slots in the shared pool.
-    assert (
-        cache.kv_cache[0, 0].data_ptr() != cache.kv_cache[0, 1].data_ptr()
-    )
+    assert cache.kv_cache[0, 0].data_ptr() != cache.kv_cache[0, 1].data_ptr()
 
 
 def test_paged_marker_set_on_attention() -> None:
     """Each attention instance is marked as paged after install."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -153,7 +151,7 @@ def test_paged_marker_set_on_attention() -> None:
 
 def test_scratch_tensors_match_request_shapes() -> None:
     """Persistent scratch tensors sized to max_batch + max_new_tokens."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -173,7 +171,7 @@ def test_block_manager_allocate_append_deallocate_through_cache() -> None:
     """End-to-end: BlockManager allocates blocks for a Sequence via the
     cache helper; append + may_append grows the block table; deallocate
     returns the block to the free pool."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     model = _FakeModel()
     cache = pa.enable_paged_kv_cache(
@@ -197,7 +195,7 @@ def test_block_manager_allocate_append_deallocate_through_cache() -> None:
 
 def test_submodule_path_resolves() -> None:
     """``_FORK_ROOT`` points at ``third_party/nano-vllm`` from the repo."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     expected = pa._FORK_ROOT / "nanovllm" / "layers" / "attention.py"
     assert expected.exists(), f"fork submodule path missing: {expected}"
@@ -206,7 +204,7 @@ def test_submodule_path_resolves() -> None:
 def test_fork_block_manager_and_sequence_classes_exposed() -> None:
     """The fork ``BlockManager`` and ``Sequence`` are reachable via
     ``paged_attention`` for upstream consumers."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     bm = pa.BlockManager(num_blocks=4, block_size=2)
     assert bm.block_size == 2
@@ -228,7 +226,7 @@ def test_fork_block_manager_and_sequence_classes_exposed() -> None:
 
 def test_ducktyped_attention_detection() -> None:
     """``_is_attention_like`` matches by interface, not class name."""
-    from nanovllm_omni.optim import paged_attention as pa
+    from nanovllm_omni.engine import paged_attention as pa
 
     good = _FakeAttention()
     bad = nn.Linear(8, 8, bias=False)  # no q_proj/k_proj/o_proj set

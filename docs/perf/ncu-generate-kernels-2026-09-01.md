@@ -36,7 +36,7 @@ WSL 恢复后会重跑一遍上 3050 的数据更新这张表。
 ## 2. 跨平台稳定的发现（Kineto 在 WSL 3050 + Colab T4 都确认）
 
 `docs/perf/session-1.md` 在 WSL 3050 上记的 generate 阶段 top kernels，本会话
-在 Colab T4 上重跑 `python -m nanovllm_omni.optim.bench profile-detail` 后**完
+在 Colab T4 上重跑 `python -m nanovllm_omni.engine.bench profile-detail` 后**完
 全一致**：
 
 | kernel | WSL 3050 (count, total_us) | Colab T4 (count, total_us) | 备注 |
@@ -214,13 +214,13 @@ small，没有任何"kernel 本身可以优化"的余地。**剩下唯一能挤�
 ```bash
 # 1. 复现基线
 ssh mcigs-wsl "cd ~/nanovllm-omni && \
-  .venv/bin/python -m nanovllm_omni.optim.bench time \
+  .venv/bin/python -m nanovllm_omni.engine.bench time \
     --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
     --max-tokens 16 --runs 5 --warmup 2"
 
 # 2. Kineto top kernel（不需要 ncu）
 ssh mcigs-wsl "cd ~/nanovllm-omni && \
-  .venv/bin/python -m nanovllm_omni.optim.bench profile-detail \
+  .venv/bin/python -m nanovllm_omni.engine.bench profile-detail \
     --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
     --max-tokens 16 --prompts short_03 --warmup 1 --runs 1 \
     --out /tmp/profile-detail"
@@ -232,7 +232,7 @@ sudo -n /usr/local/bin/ncu --target-processes all \
   --section SpeedOfLight --section Occupancy \
   --section SchedulerStats --section MemoryWorkloadAnalysis \
   --export /tmp/gen-k1.ncu \
-  ~/venvs/vllm-omni/bin/python -m nanovllm_omni.optim.bench time \
+  ~/venvs/vllm-omni/bin/python -m nanovllm_omni.engine.bench time \
     --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
     --max-tokens 16 --runs 2 --warmup 1
 # 同理对 k2/k3b/k4 改 regex
@@ -460,7 +460,7 @@ capture**。
 
 ```bash
 # 6 prompt × 5 runs × max_tokens=16, warmup 2
-.venv/bin/python -m nanovllm_omni.optim.bench time \
+.venv/bin/python -m nanovllm_omni.engine.bench time \
   --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
   --max-tokens 16 --runs 5 --warmup 2
 ```
@@ -1510,7 +1510,7 @@ eager `batched_generation.py:119`）。
 
 ### 36.1 Colab T4 ncu（ncu 2025.1.1.0，torch 2.11.0+cu128，Tesla T4）
 
-`python -m nanovllm_omni.optim.bench time --max-tokens 16 --prompts short_03 --runs 2 --warmup 1`，每个 kernel `--launch-count 3`。k3 在 T4 上名字是 `unrolled_elementwise_kernel`（不再带 `direct_copy_kernel_cuda` 子串），regex 改成 `.*unrolled_elementwise_kernel.*`。
+`python -m nanovllm_omni.engine.bench time --max-tokens 16 --prompts short_03 --runs 2 --warmup 1`，每个 kernel `--launch-count 3`。k3 在 T4 上名字是 `unrolled_elementwise_kernel`（不再带 `direct_copy_kernel_cuda` 子串），regex 改成 `.*unrolled_elementwise_kernel.*`。
 
 取每个 `.ncu-rep` 的**第一个 instance**：
 

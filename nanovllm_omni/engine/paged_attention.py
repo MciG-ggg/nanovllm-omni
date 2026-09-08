@@ -105,8 +105,10 @@ def _install_fork_shim() -> None:
     sys.modules.pop("nanovllm", None)
     pkg_root = _FORK_ROOT / "nanovllm"
     if not pkg_root.exists():
-        raise RuntimeError(f"nano-vllm submodule missing at {pkg_root}; "
-                           "did you forget `git submodule update --init`?")
+        raise RuntimeError(
+            f"nano-vllm submodule missing at {pkg_root}; "
+            "did you forget `git submodule update --init`?"
+        )
     # sys.path so the real submodule files resolve.
     fork_root = str(_FORK_ROOT)
     if fork_root not in sys.path:
@@ -130,6 +132,7 @@ def _ensure_xxhash() -> None:
         return
     try:
         import xxhash  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -148,13 +151,48 @@ def _ensure_xxhash() -> None:
     sys.modules["xxhash"] = mod
 
 
-_install_fork_shim()
-_ensure_xxhash()
+# Populated by ``_load_fork_types`` on first call; empty means "not yet
+# loaded". A list (not a plain tuple-or-None) so ``_load_fork_types`` can
+# tell "never called" apart from "loaded, values happen to be falsy".
+_FORK_TYPES_CACHE: list[tuple[type, type]] = []
 
-# Real imports through normal machinery. After the shim is installed and
-# the fork root is on sys.path, these resolve to the genuine fork files.
-from nanovllm.engine.block_manager import BlockManager  # noqa: E402
-from nanovllm.engine.sequence import Sequence  # noqa: E402
+
+def _load_fork_types() -> tuple[type, type]:
+    """Install the fork shim and return ``(BlockManager, Sequence)``.
+
+    Deferred to first call (not module import) so that importing this
+    module -- e.g. as a dependency of ``engine/paged_cuda_graph.py``
+    before any paged path is actually used -- does not pay the
+    ``sys.modules`` rewrite + submodule import cost. Real callers are
+    ``PagedKVCache.new_sequence`` / ``append_token`` / ``release`` and
+    ``enable_paged_kv_cache``; only they need the shim installed.
+
+    Cached after the first successful call: the shim install itself is
+    idempotent, but repeating the two ``import`` statements every call
+    would be wasteful.
+    """
+    if _FORK_TYPES_CACHE:
+        return _FORK_TYPES_CACHE[0]
+    _install_fork_shim()
+    _ensure_xxhash()
+    from nanovllm.engine.block_manager import BlockManager  # noqa: PLC0415
+    from nanovllm.engine.sequence import Sequence  # noqa: PLC0415
+
+    _FORK_TYPES_CACHE.append((BlockManager, Sequence))
+    return _FORK_TYPES_CACHE[0]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy module attribute: ``pa.BlockManager`` / ``pa.Sequence``.
+
+    Lets callers (tests, external consumers) keep writing
+    ``paged_attention.BlockManager`` / ``.Sequence`` without importing
+    the fork at module load time.
+    """
+    if name in ("BlockManager", "Sequence"):
+        block_manager_cls, sequence_cls = _load_fork_types()
+        return block_manager_cls if name == "BlockManager" else sequence_cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class PagedKVContext:
@@ -239,12 +277,16 @@ class PagedKVCache:
         self.scratch: dict[str, torch.Tensor] = {}
         # Batched BlockManager (one global pool, shared across all
         # layers via block IDs). Initialized in ``enable_paged_kv_cache``.
-        self.block_manager: BlockManager | None = None
-        # Active batch's Sequence list, kept on the cache for the
-        # graphed decoder's AR-step bookkeeping.
-        self.active_seqs: list[Sequence] = []
+        self.block_manager: Any = None  # fork BlockManager, loaded lazily
+        # Active batch's fork Sequence list, kept on the cache for the
+        # graphed decoder's AR-step bookkeeping. Typed ``Any`` (not
+        # ``Sequence``) because the fork's class is only resolvable at
+        # runtime via ``_load_fork_types`` -- see module docstring.
+        self.active_seqs: list[Any] = []
 
-    def init_pool(self, attns: list[Any], max_blocks: int, block_size: int, dtype: Any, device: Any) -> torch.Tensor:
+    def init_pool(
+        self, attns: list[Any], max_blocks: int, block_size: int, dtype: Any, device: Any
+    ) -> torch.Tensor:
         """Allocate the ``[2, num_layers, num_blocks, block_size, n_kv, d]``
         pool and bind every attention instance's ``k_cache / v_cache`` to
         its layer view."""
@@ -256,8 +298,15 @@ class PagedKVCache:
         # requires_grad=False is explicit: the pool is storage written
         # in place every step, never a differentiable tensor.
         self.kv_cache = torch.zeros(
-            2, num_layers, max_blocks, block_size, n_kv, d,
-            dtype=dtype, device=device, requires_grad=False,
+            2,
+            num_layers,
+            max_blocks,
+            block_size,
+            n_kv,
+            d,
+            dtype=dtype,
+            device=device,
+            requires_grad=False,
         )
         for layer_id, attn in enumerate(attns):
             attn.k_cache = self.kv_cache[0, layer_id]  # [num_blocks, block_size, n_kv, d]
@@ -276,34 +325,50 @@ class PagedKVCache:
         import torch
 
         self.scratch["slot_mapping"] = torch.full(
-            (max_num_new_tokens,), -1, dtype=torch.int32, device=device,
+            (max_num_new_tokens,),
+            -1,
+            dtype=torch.int32,
+            device=device,
         )
         self.scratch["context_lens"] = torch.zeros(
-            max_batch_size, dtype=torch.int32, device=device,
+            max_batch_size,
+            dtype=torch.int32,
+            device=device,
         )
         self.scratch["block_tables"] = torch.zeros(
-            max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device,
+            max_batch_size,
+            max_blocks_per_seq,
+            dtype=torch.int32,
+            device=device,
         )
         # Prefill-only scratch -- sized for the largest prompt we'll ever
         # see. ``cu_seqlens_*`` start with 0 and end with
         # ``sum(prompt_lens)``; we keep them as ``[max_batch_size + 1]``
         # to cover arbitrary batching.
         self.scratch["cu_seqlens_q"] = torch.zeros(
-            max_batch_size + 1, dtype=torch.int32, device=device,
+            max_batch_size + 1,
+            dtype=torch.int32,
+            device=device,
         )
         self.scratch["cu_seqlens_k"] = torch.zeros(
-            max_batch_size + 1, dtype=torch.int32, device=device,
+            max_batch_size + 1,
+            dtype=torch.int32,
+            device=device,
         )
 
-    def new_sequence(self, token_ids: list[int], block_size: int | None = None) -> Sequence:
-        """Allocate a new ``Sequence`` with blocks from the BlockManager.
+    def new_sequence(self, token_ids: list[int], block_size: int | None = None) -> Any:
+        """Allocate a new fork ``Sequence`` with blocks from the BlockManager.
+
+        Return type is ``Any`` (not ``Sequence``) because the fork's class
+        is only resolvable at runtime via ``_load_fork_types``.
 
         Fork's ``Sequence`` has a class-level ``block_size = 256``; we
         override per-instance to match the cache's block_size so prefix
         hashing and ``num_blocks`` agree with the BlockManager.
         """
         block_size = block_size or self.block_size
-        seq = Sequence(token_ids)
+        _, sequence_cls = _load_fork_types()
+        seq = sequence_cls(token_ids)
         seq.block_size = block_size
         # Compute num_cached_blocks (prefix cache hit count) + allocate.
         num_cached = self.block_manager.can_allocate(seq)  # type: ignore[union-attr]
@@ -315,13 +380,13 @@ class PagedKVCache:
         self.block_manager.allocate(seq, num_cached)  # type: ignore[union-attr]
         return seq
 
-    def append_token(self, seq: Sequence, token_id: int) -> None:
+    def append_token(self, seq: Any, token_id: int) -> None:
         """Append a decoded token to ``seq``; BlockManager may allocate a
         new block if we crossed a block boundary."""
         seq.append_token(token_id)
         self.block_manager.may_append(seq)  # type: ignore[union-attr]
 
-    def release(self, seq: Sequence) -> None:
+    def release(self, seq: Any) -> None:
         self.block_manager.deallocate(seq)  # type: ignore[union-attr]
 
 
@@ -497,6 +562,7 @@ def _paged_attention_forward(
     # flash-attn wheel is installed, so the two kernel paths can be compared on
     # the *same* torch version. Never wired into a production code path.
     import os
+
     use_flash = flash_attn_available() and not os.environ.get("NANOVLLM_DISABLE_FLASH")
     _store_kv_paged(key, value, k_cache, v_cache, ctx.slot_mapping)
 
@@ -634,9 +700,7 @@ def enable_paged_kv_cache(
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         # block_bytes: K + V across num_layers, block_size tokens, n_kv heads, d head_dim
-        block_bytes = (
-            2 * num_layers * block_size * n_kv * d * dtype.itemsize
-        )
+        block_bytes = 2 * num_layers * block_size * n_kv * d * dtype.itemsize
         budget_bytes = int(total * gpu_memory_utilization) - used - peak + current
         num_blocks = max(1, budget_bytes // block_bytes)
 
@@ -664,7 +728,8 @@ def enable_paged_kv_cache(
     )
 
     # 3. BlockManager (one shared allocator).
-    cache.block_manager = BlockManager(num_blocks=num_blocks, block_size=block_size)
+    block_manager_cls, _ = _load_fork_types()
+    cache.block_manager = block_manager_cls(num_blocks=num_blocks, block_size=block_size)
 
     # 4. Rewrite every attention's forward to the paged version + bind
     #    the per-attention ctx pointer (shared across layers).
@@ -709,10 +774,10 @@ def disable_paged_kv_cache(model: Any) -> int:
 
 
 __all__ = [
-    "BlockManager",
+    "BlockManager",  # noqa: F822 -- resolved lazily by __getattr__
     "PagedKVCache",
     "PagedKVContext",
-    "Sequence",
+    "Sequence",  # noqa: F822 -- resolved lazily by __getattr__
     "disable_paged_kv_cache",
     "enable_paged_kv_cache",
     "flash_attn_available",

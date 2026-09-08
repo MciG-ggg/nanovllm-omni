@@ -47,6 +47,7 @@ from typing import Any
 
 import torch
 
+from nanovllm_omni.engine.attention import enable_fixed_kv_buffer
 from nanovllm_omni.models.minimind_omni._sampling import (
     DEFAULT_TEXT_TEMPERATURE,
     DEFAULT_TEXT_TOP_P,
@@ -54,7 +55,6 @@ from nanovllm_omni.models.minimind_omni._sampling import (
     sample_one_audio_layer,
     sample_text_token,
 )
-from nanovllm_omni.optim.attention import enable_fixed_kv_buffer
 
 _log = logging.getLogger(__name__)
 

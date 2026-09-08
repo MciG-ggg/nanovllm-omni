@@ -78,24 +78,25 @@ def main() -> int:
     ap.add_argument("--max-new-tokens", type=int, default=16)
     ap.add_argument("--repeats", type=int, default=10)
     ap.add_argument("--out", default="docs/perf/aligned/paged-v1")
-    ap.add_argument("--no-flash", action="store_true",
-                    help="force torch-native SDPA even when flash-attn is installed; "
-                         "lets you compare kernel paths on the same torch version")
+    ap.add_argument(
+        "--no-flash",
+        action="store_true",
+        help="force torch-native SDPA even when flash-attn is installed; "
+        "lets you compare kernel paths on the same torch version",
+    )
     args = ap.parse_args()
     if args.no_flash:
         os.environ["NANOVLLM_DISABLE_FLASH"] = "1"
 
+    from nanovllm_omni.engine.paged_attention import disable_paged_kv_cache
+    from nanovllm_omni.engine.paged_cuda_graph import enable_paged_cuda_graph
     from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.thinker import (
         run_generate,
         tokenize_for_generate,
     )
-    from nanovllm_omni.optim.paged_attention import disable_paged_kv_cache
-    from nanovllm_omni.optim.paged_cuda_graph import enable_paged_cuda_graph
 
-    bundle = load_minimind_omni_bundle(
-        model_id=args.model, device="cuda", mimi_model_id=args.mimi
-    )
+    bundle = load_minimind_omni_bundle(model_id=args.model, device="cuda", mimi_model_id=args.mimi)
     model, tok = bundle.model, bundle.tokenizer
     eos = tok.eos_token_id
     n = args.max_new_tokens
@@ -105,15 +106,27 @@ def main() -> int:
 
     def _eager(x: Any) -> Any:
         return run_generate(
-            model, x, max_new_tokens=n, temperature=TEMPERATURE, top_p=TOP_P,
-            eos_token_id=eos, open_thinking=False, seed=SEED,
+            model,
+            x,
+            max_new_tokens=n,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            eos_token_id=eos,
+            open_thinking=False,
+            seed=SEED,
             use_thinker_cuda_graph=False,
         )
 
     def _perpos(x: Any) -> Any:
         return run_generate(
-            model, x, max_new_tokens=n, temperature=TEMPERATURE, top_p=TOP_P,
-            eos_token_id=eos, open_thinking=False, seed=SEED,
+            model,
+            x,
+            max_new_tokens=n,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            eos_token_id=eos,
+            open_thinking=False,
+            seed=SEED,
             use_thinker_cuda_graph=True,
         )
 
@@ -128,12 +141,17 @@ def main() -> int:
             t, frames = _time_ms(lambda x=x: _eager(x))
             eager_samples.append(t)
             eager_frames = len(frames)
-    rows.append({
-        "cell": "eager", "graphs": 0, "capture_ms": 0.0, "cold_ms": 0.0,
-        "frames": eager_frames,
-        "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
-        **_stats(eager_samples),
-    })
+    rows.append(
+        {
+            "cell": "eager",
+            "graphs": 0,
+            "capture_ms": 0.0,
+            "cold_ms": 0.0,
+            "frames": eager_frames,
+            "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
+            **_stats(eager_samples),
+        }
+    )
 
     # ---- cell 2: per-position graphs -----------------------------------
     disable_paged_kv_cache(model)
@@ -145,13 +163,17 @@ def main() -> int:
         for _ in range(args.repeats):
             t, frames_pp = _time_ms(lambda x=x: _perpos(x))
             pp_samples.append(t)
-    rows.append({
-        "cell": "perpos", "graphs": max(n - 1, 0),
-        "capture_ms": cold_perpos - statistics.median(pp_samples),
-        "cold_ms": cold_perpos, "frames": len(frames_pp),
-        "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
-        **_stats(pp_samples),
-    })
+    rows.append(
+        {
+            "cell": "perpos",
+            "graphs": max(n - 1, 0),
+            "capture_ms": cold_perpos - statistics.median(pp_samples),
+            "cold_ms": cold_perpos,
+            "frames": len(frames_pp),
+            "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
+            **_stats(pp_samples),
+        }
+    )
 
     # ---- cell 3: paged single graph ------------------------------------
     disable_paged_kv_cache(model)
@@ -171,13 +193,17 @@ def main() -> int:
                 lambda x=x: dec.generate_tokens(x, seed=SEED, return_audio=True)
             )
             pg_samples.append(t)
-    rows.append({
-        "cell": "paged", "graphs": 1,
-        "capture_ms": cold_paged - statistics.median(pg_samples),
-        "cold_ms": cold_paged, "frames": len(audio[0]),
-        "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
-        **_stats(pg_samples),
-    })
+    rows.append(
+        {
+            "cell": "paged",
+            "graphs": 1,
+            "capture_ms": cold_paged - statistics.median(pg_samples),
+            "cold_ms": cold_paged,
+            "frames": len(audio[0]),
+            "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
+            **_stats(pg_samples),
+        }
+    )
 
     # ---- capture invalidation: n_steps must not be a capture shape -----
     window_before = dec._captured_window
@@ -202,13 +228,13 @@ def main() -> int:
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(0),
         "recapture_on_n_steps_change": recaptured,
-        "speedup_vs_eager": {
-            r["cell"]: round(eager_p50 / r["p50"], 3) for r in rows
-        },
+        "speedup_vs_eager": {r["cell"]: round(eager_p50 / r["p50"], 3) for r in rows},
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    print(f"{'cell':8} {'graphs':>7} {'p50':>9} {'cold':>9} {'capture':>9} {'vram_mb':>8} {'frames':>7}")
+    print(
+        f"{'cell':8} {'graphs':>7} {'p50':>9} {'cold':>9} {'capture':>9} {'vram_mb':>8} {'frames':>7}"
+    )
     for r in rows:
         print(
             f"{r['cell']:8} {r['graphs']:7d} {r['p50']:9.1f} {r['cold_ms']:9.1f} "

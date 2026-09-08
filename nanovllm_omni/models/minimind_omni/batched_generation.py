@@ -28,7 +28,7 @@ from nanovllm_omni.engine.runtime_scheduler import (
     RuntimeGroup,
     RuntimeScheduler,
 )
-from nanovllm_omni.engine.sequence import PrefillChunk, Sequence
+from nanovllm_omni.engine.sequence import OmniSequence, PrefillChunk
 
 from ._sampling import (
     AUDIO_VOCAB_BOUNDARY,
@@ -193,7 +193,7 @@ class BatchedThinkerRunner:
         # scheduler-assigned id; we read it back via ``seq.request_id``
         # so callers can index ``self.states`` by the same key.
         rid = request_id or f"req-{len(self.sched.running) + len(self.sched.waiting)}"
-        sequence = Sequence(
+        sequence = OmniSequence(
             request_id=rid,
             token_ids=list(prompt_ids),
             num_tokens=len(prompt_ids),
@@ -395,7 +395,7 @@ class BatchedThinkerRunner:
 
     def decode_group(self, group: RuntimeGroup) -> None:
         """One rectangular [B, 9, 1] forward for a same-KV-length decode group."""
-        # RuntimeGroup.items is list[Sequence] for a decode group; rid is on
+        # RuntimeGroup.items is list[OmniSequence] for a decode group; rid is on
         # each Sequence.request_id.
         req_ids = [sequence.request_id for sequence in group.items]
         inp = self._decode_col(req_ids)

@@ -288,7 +288,7 @@ def run_generate(
             hasattr(model, name)
             for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
         ):
-            from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
+            from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
 
             graph_decoder = enable_cuda_graph(
                 model, n_steps=max_new_tokens, eos_token_id=eos_token_id

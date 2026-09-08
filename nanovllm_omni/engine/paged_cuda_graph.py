@@ -1,4 +1,4 @@
-'''Single-graph paged CUDA Graph decode (one graph, replayed many times).
+"""Single-graph paged CUDA Graph decode (one graph, replayed many times).
 
 This is the position-independent counterpart to ``optim/cuda_graph``.
 
@@ -35,7 +35,7 @@ Sampling, the post-EOS state machine and the stop predicate are
 inherited verbatim from ``CudaGraphDecoder`` so text/audio stopping
 behaviour is identical between the two graph paths. Only KV storage and
 graph capture differ.
-'''
+"""
 
 from __future__ import annotations
 
@@ -46,29 +46,29 @@ from typing import Any
 
 import torch
 
+from nanovllm_omni.engine.cuda_graph import (
+    CudaGraphDecoder,
+    _build_omni_input,
+    _patched_forward,
+)
+from nanovllm_omni.engine.paged_attention import enable_paged_kv_cache
 from nanovllm_omni.models.minimind_omni._sampling import (
     NUM_AUDIO_LAYERS,
     sample_one_audio_layer,
     sample_text_token,
 )
-from nanovllm_omni.optim.cuda_graph import (
-    CudaGraphDecoder,
-    _build_omni_input,
-    _patched_forward,
-)
-from nanovllm_omni.optim.paged_attention import enable_paged_kv_cache
 
 _log = logging.getLogger(__name__)
 
 
 class PagedCudaGraphDecoder(CudaGraphDecoder):
-    '''Capture-once / replay-many decoder over a paged KV cache.
+    """Capture-once / replay-many decoder over a paged KV cache.
 
     Subclasses ``CudaGraphDecoder`` purely to inherit the request-state
     machine (``_reset_request_state`` / ``_next_post_eos_token`` /
     ``_should_stop`` / ``_result``). Storage, capture and the decode
     loop are all replaced.
-    '''
+    """
 
     def __init__(
         self,
@@ -79,10 +79,10 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         eos_token_id: int | None = None,
         audio_stop_token: int | None = None,
         # block_size=256 is forced by flash-attn's varlen kernel: the kernel
-    # asserts `block_size % 256 == 0` for the paged layout. The fork's
-    # ``Sequence.block_size`` default is also 256. Smaller values are
-    # rejected at runtime when flash-attn is on the import path.
-    block_size: int = 256,
+        # asserts `block_size % 256 == 0` for the paged layout. The fork's
+        # ``Sequence.block_size`` default is also 256. Smaller values are
+        # rejected at runtime when flash-attn is on the import path.
+        block_size: int = 256,
         max_batch_size: int = 1,
     ) -> None:
         # NOTE: deliberately does NOT call super().__init__ -- that one
@@ -132,22 +132,22 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         self._seq: Any = None
 
     def _required_blocks(self, prompt_len: int) -> int:
-        '''Block-table columns needed for ``prompt_len + n_steps`` tokens.
+        """Block-table columns needed for ``prompt_len + n_steps`` tokens.
 
         This is the only quantity that can invalidate the captured graph,
         since it sets the gathered-window shape.
-        '''
+        """
         total = prompt_len + self.n_steps + 1
         return (total + self.block_size - 1) // self.block_size
 
     def _ensure_cache(self, prompt_len: int) -> None:
-        '''Install / resize the paged cache for this prompt length.
+        """Install / resize the paged cache for this prompt length.
 
         Sizes the pool tightly (``max_batch_size * blocks_per_seq``)
         rather than by free-VRAM share: one of the reasons to move off
         per-position graphs is to *reduce* VRAM, so we do not want a
         greedy pool here.
-        '''
+        """
         need = self._required_blocks(prompt_len)
         if self.cache is not None and need <= self._max_blocks_per_seq:
             return
@@ -168,12 +168,12 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         self.graph = None
 
     def _reset_blocks(self) -> None:
-        '''Return this request's blocks and zero the pool.
+        """Return this request's blocks and zero the pool.
 
         In-place zero keeps the graph-captured tensor addresses stable
         while guaranteeing a fresh prompt never reads a previous
         request's K/V.
-        '''
+        """
         if self._seq is not None:
             # already-freed is not fatal
             with contextlib.suppress(Exception):
@@ -202,12 +202,12 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         )
 
     def _sync_decode_ctx(self) -> None:
-        '''Point the metadata tensors at the newest token.
+        """Point the metadata tensors at the newest token.
 
         Called immediately before ``graph.replay()``. Writes land in the
         same buffers the captured graph reads, so the single graph sees
         fresh values every step -- this is what makes replay-many work.
-        '''
+        """
         seq = self._seq
         context = self.cache._ctx
         context.is_prefill = False
@@ -241,21 +241,21 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         return out.logits[0, -1].clone()
 
     def _needs_recapture(self) -> bool:
-        '''Only a window-width change invalidates the single graph.
+        """Only a window-width change invalidates the single graph.
 
         Contrast with the per-position decoder, which must also compare
         prompt length AND ``n_steps``.
-        '''
+        """
         return not (self._captured and self._captured_window == self._max_blocks_per_seq)
 
     def _capture(self, next_token: Any) -> None:
-        '''Capture ONE decode graph.
+        """Capture ONE decode graph.
 
         The captured op stream reads ``slot_mapping`` / ``context_lens``
         / ``block_tables`` from fixed addresses, so replaying it after
         rewriting those values advances the request by one token -- for
         any position, without recapture.
-        '''
+        """
         if not self._needs_recapture():
             return
         self.graph = None
@@ -306,12 +306,12 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         post_eos_padding_count: int = 0,
         internal_stop_token_id: int | None = None,
     ) -> Any:
-        '''Prefill eagerly, then replay the SAME graph for every step.
+        """Prefill eagerly, then replay the SAME graph for every step.
 
         Public contract is identical to
         ``CudaGraphDecoder.generate_tokens`` so callers (thinker
         ``run_generate``, benches) are unchanged.
-        '''
+        """
         self._reset_request_state(
             post_eos_padding_count=post_eos_padding_count,
             internal_stop_token_id=internal_stop_token_id,
@@ -417,7 +417,7 @@ def enable_paged_cuda_graph(
     block_size: int = 256,
     max_batch_size: int = 1,
 ) -> PagedCudaGraphDecoder | None:
-    '''Install the paged single-graph decoder.
+    """Install the paged single-graph decoder.
 
     Mirrors ``enable_cuda_graph``'s signature and gating so the two graph
     backends are drop-in swappable at the ``run_generate`` seam.
@@ -428,7 +428,7 @@ def enable_paged_cuda_graph(
 
     Returns ``None`` when CUDA is unavailable or the model is not the
     MiniMind-O shape this integration targets.
-    '''
+    """
     if not torch.cuda.is_available():
         _log.info("enable_paged_cuda_graph: no CUDA; keeping eager path")
         return None

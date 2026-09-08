@@ -23,8 +23,6 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 
-
-
 @dataclass
 class TalkerOutput:
     """Output envelope returned by :meth:`MiniMindOmniTalkerForConditionalGeneration.make_omni_output`.
@@ -35,8 +33,6 @@ class TalkerOutput:
 
     text_hidden_states: torch.Tensor | None = None
     multimodal_outputs: dict[str, Any] = field(default_factory=dict)
-
-
 
 
 class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
@@ -168,7 +164,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         self._stop_pending_by_req: dict[str, bool] = {}
         self._build_code_layer_masks()
 
-
     def _build_code_layer_masks(self) -> None:
         """Precompute the [num_code_layers+1, num_code_layers] active mask.
 
@@ -184,7 +179,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             (step_ids.unsqueeze(-1) >= layer_ids.unsqueeze(0)),
             persistent=False,
         )
-
 
     def _audio_ids_from_layer0(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Split ``[B, T]`` text-style input ids into ``[B, num_code_layers, T]``.
@@ -420,7 +414,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             audio_codes = audio_codes.masked_fill(~active, self.audio_pad_token)
         return audio_codes
 
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Pre-thinker-vllm helper: text-style embed for codec tokens.
 
@@ -620,7 +613,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
             self._stop_pending_by_req.pop(request_id, None)
         return sampled
 
-
     def _normalise_audio_code_rows(
         self,
         audio: Any,
@@ -675,7 +667,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         if not frames:
             return None
         return torch.stack(frames, dim=0).to(dtype=torch.long)
-
 
     def postprocess(self, hidden_states: torch.Tensor, **kwargs: Any) -> dict[str, Any]:
         """Post-forward: stash last hidden state, detect audio_stop, build code history.
@@ -808,8 +799,6 @@ class MiniMindOmniTalkerForConditionalGeneration(nn.Module):
         return loaded_weights
 
 
-
-
 def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
     """Wrap ``bundle.model.talker`` (the HF ``TalkerModule``) into our class.
 
@@ -827,8 +816,6 @@ def wrap_talker(bundle: Any) -> MiniMindOmniTalkerForConditionalGeneration:
     with contextlib.suppress(Exception):
         bundle.talker = wrapped
     return wrapped
-
-
 
 
 def _drive_talker_generation(
@@ -1037,7 +1024,7 @@ def _talker_stage(deploy: Any, args: Any) -> Any:
         talker = _resolve_talker()
         runner = talker
         if use_talker_graph:
-            from nanovllm_omni.optim.talker_cuda_graph import (
+            from nanovllm_omni.engine.talker_cuda_graph import (
                 enable_talker_mtp_cuda_graph,
             )
 

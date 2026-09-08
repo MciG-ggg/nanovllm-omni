@@ -93,7 +93,7 @@ def cmd_time(args: argparse.Namespace) -> int:
         import torch
 
         from nanovllm_omni import Omni
-        from nanovllm_omni.optim.bench.runner import run_n_full
+        from nanovllm_omni.engine.bench.runner import run_n_full
 
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         kwargs = _kwargs(args)
@@ -142,7 +142,7 @@ def cmd_sweep_graphs(args: argparse.Namespace) -> int:
         command = [
             sys.executable,
             "-m",
-            "nanovllm_omni.optim.bench",
+            "nanovllm_omni.engine.bench",
             "time",
             "--pipeline",
             "full",
@@ -322,7 +322,7 @@ def cmd_trace_nsys(args: argparse.Namespace) -> int:
     target = [
         sys.executable,
         "-m",
-        "nanovllm_omni.optim.bench",
+        "nanovllm_omni.engine.bench",
         "_nsys-inner",
         "--out",
         args.csv_out,
@@ -362,7 +362,7 @@ def cmd_nsys_inner(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="nanovllm_omni.optim.bench")
+    p = argparse.ArgumentParser(prog="nanovllm_omni.engine.bench")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     common = argparse.ArgumentParser(add_help=False)

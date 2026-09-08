@@ -47,7 +47,7 @@
 ### Cell A 命令（baseline）
 
 ```bash
-python -m nanovllm_omni.optim.bench time \
+python -m nanovllm_omni.engine.bench time \
     --pipeline full \
     --runs 20 --warmup 2 \
     --max-tokens 16 \
@@ -63,7 +63,7 @@ python -m nanovllm_omni.optim.bench time \
 ### Cell B 命令（fusion only，与现有 628–1038 ms 对照）
 
 ```bash
-python -m nanovllm_omni.optim.bench time \
+python -m nanovllm_omni.engine.bench time \
     --pipeline full \
     --runs 20 --warmup 2 \
     --max-tokens 16 \
@@ -78,7 +78,7 @@ graph 仍然 off。这条**应该**复现 `tk005-rtx3050.md` 的 `628–1038 ms`
 ### Cell C 命令（fusion + thinker graph）
 
 ```bash
-python -m nanovllm_omni.optim.bench time \
+python -m nanovllm_omni.engine.bench time \
     --pipeline full \
     --runs 20 --warmup 2 \
     --max-tokens 16 \
@@ -103,7 +103,7 @@ grep use_talker_cuda_graph nanovllm_omni/deploy/minimind_omni.yaml
 # 期望输出: use_talker_cuda_graph: true
 
 # 2. 跑
-python -m nanovllm_omni.optim.bench time \
+python -m nanovllm_omni.engine.bench time \
     --pipeline full \
     --runs 20 --warmup 2 \
     --max-tokens 16 \

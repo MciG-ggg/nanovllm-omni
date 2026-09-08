@@ -4,7 +4,7 @@
 >
 > 测量基线：`11c3c13`（branch `autoresearch/under500ms`），bench median **320 ms**，stdev 11.6 ms，max 343 ms。
 >
-> 优化栈已合并进 `main`（`d2ebe56 perf(stack): consolidate qkv_fusion + rms_norm + rope into attention.py`，含 per-instance 修复），落地在 `nanovllm_omni/models/minimind_omni/attention.py` + `bundle.py`。在本地 GPU 上运行 `python -m nanovllm_omni.optim.bench time` 即可复现当前数字。历史 session 记录已归档到 `docs/perf/archive/`（gitignored，仅本地）。
+> 优化栈已合并进 `main`（`d2ebe56 perf(stack): consolidate qkv_fusion + rms_norm + rope into attention.py`，含 per-instance 修复），落地在 `nanovllm_omni/models/minimind_omni/attention.py` + `bundle.py`。在本地 GPU 上运行 `python -m nanovllm_omni.engine.bench time` 即可复现当前数字。历史 session 记录已归档到 `docs/perf/archive/`（gitignored，仅本地）。
 
 ## 1. 总览：25 次实验一览
 
@@ -133,7 +133,7 @@ uv run python -m pytest -m "not smoke" -q
 uv run python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
 
 # WSL 性能 bench
-ssh mcigs-wsl "cd ~/nanovllm-omni && .venv/bin/python -m nanovllm_omni.optim.bench time \
+ssh mcigs-wsl "cd ~/nanovllm-omni && .venv/bin/python -m nanovllm_omni.engine.bench time \
   --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \
   --max-tokens 16 --runs 5 --warmup 2"
 ```

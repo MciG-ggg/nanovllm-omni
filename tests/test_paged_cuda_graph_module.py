@@ -43,8 +43,8 @@ _ensure_stub(
 # numpy is a real torch dependency -- never stub it.
 _ensure_stub("xxhash")
 
-from nanovllm_omni.optim import cuda_graph as cg  # noqa: E402
-from nanovllm_omni.optim import paged_cuda_graph as pcg  # noqa: E402
+from nanovllm_omni.engine import cuda_graph as cg  # noqa: E402
+from nanovllm_omni.engine import paged_cuda_graph as pcg  # noqa: E402
 
 
 def test_capture_builds_exactly_one_graph() -> None:
@@ -55,10 +55,10 @@ def test_capture_builds_exactly_one_graph() -> None:
     """
     src = inspect.getsource(pcg.PagedCudaGraphDecoder._capture)
     assert src.count("torch.cuda.CUDAGraph()") == 1, "exactly one graph must be constructed"
-    assert "for " not in src.split("side = torch.cuda.Stream()")[1], (
-        "capture must not iterate over decode positions"
-    )
-    body = src.split("'''")[-1]
+    assert (
+        "for " not in src.split("side = torch.cuda.Stream()")[1]
+    ), "capture must not iterate over decode positions"
+    body = src.split('"""')[-1]
     assert "n_steps" not in body, "n_steps must not influence capture"
 
 
@@ -94,7 +94,7 @@ def test_recapture_is_independent_of_n_steps_and_prompt_len() -> None:
     """
     src = inspect.getsource(pcg.PagedCudaGraphDecoder._needs_recapture)
     # Strip the docstring: it *describes* n_steps, the logic must not use it.
-    body = src.split("'''")[-1]
+    body = src.split('"""')[-1]
     assert "_captured_window" in body
     assert "n_steps" not in body
     assert "_prefill_len" not in body
@@ -108,9 +108,9 @@ def test_paged_decoder_inherits_stop_machine() -> None:
     """
     assert issubclass(pcg.PagedCudaGraphDecoder, cg.CudaGraphDecoder)
     for name in ("_should_stop", "_next_post_eos_token", "_reset_request_state", "_result"):
-        assert name not in pcg.PagedCudaGraphDecoder.__dict__, (
-            f"{name} must be inherited, not overridden"
-        )
+        assert (
+            name not in pcg.PagedCudaGraphDecoder.__dict__
+        ), f"{name} must be inherited, not overridden"
 
 
 @pytest.mark.parametrize(

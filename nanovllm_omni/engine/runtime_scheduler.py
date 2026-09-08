@@ -28,7 +28,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from .sequence import PrefillChunk, Sequence, SequenceStatus
+from .sequence import OmniSequence, PrefillChunk, SequenceStatus
 
 
 @dataclass
@@ -43,7 +43,7 @@ class RuntimeGroup:
     ``decode_groups``).
     """
 
-    items: list[Any] = field(default_factory=list)  # list[PrefillChunk] | list[Sequence]
+    items: list[Any] = field(default_factory=list)  # list[PrefillChunk] | list[OmniSequence]
 
 
 @dataclass
@@ -70,13 +70,13 @@ class RuntimeScheduler:
         if max_num_seqs < 1:
             raise ValueError("max_num_seqs must be >= 1")
         self.max_num_seqs = max_num_seqs
-        self.waiting: deque[Sequence] = deque()
-        self.running: dict[str, Sequence] = {}
-        self.finished: dict[str, Sequence] = {}
+        self.waiting: deque[OmniSequence] = deque()
+        self.running: dict[str, OmniSequence] = {}
+        self.finished: dict[str, OmniSequence] = {}
 
     # -- submission ----------------------------------------------------------
 
-    def add_sequence(self, sequence: Sequence) -> None:
+    def add_sequence(self, sequence: OmniSequence) -> None:
         """Admit a new sequence (typically a freshly-constructed request)."""
         if (
             sequence.request_id in self.running
@@ -91,7 +91,7 @@ class RuntimeScheduler:
     def has_work(self) -> bool:
         return bool(self.waiting or self.running)
 
-    def get(self, rid: str) -> Sequence | None:
+    def get(self, rid: str) -> OmniSequence | None:
         if rid in self.running:
             return self.running[rid]
         return self.finished.get(rid)
@@ -117,7 +117,7 @@ class RuntimeScheduler:
         # prefill (start > 0) is supported by the data structure but not emitted
         # here.
         if self.running:
-            decode_items: list[Sequence] = []
+            decode_items: list[OmniSequence] = []
             prefill_by_len: dict[int, list[PrefillChunk]] = {}
             for sequence in self.running.values():
                 if sequence.status is SequenceStatus.PREFILL:
@@ -129,7 +129,7 @@ class RuntimeScheduler:
             for _n_pos, chunks in sorted(prefill_by_len.items()):
                 out.prefill_groups.append(RuntimeGroup(items=chunks))
             # Decode groups: identical num_tokens -> one rectangular forward.
-            by_len: dict[int, list[Sequence]] = {}
+            by_len: dict[int, list[OmniSequence]] = {}
             for sequence in decode_items:
                 by_len.setdefault(sequence.num_tokens, []).append(sequence)
             for _num_tokens, group in sorted(by_len.items()):

@@ -36,9 +36,9 @@ def main() -> int:
         print("No CUDA.")
         return 1
 
+    from nanovllm_omni.engine.cuda_graph import enable_cuda_graph
     from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.generation import stream_generate
-    from nanovllm_omni.optim.cuda_graph import enable_cuda_graph
 
     bundle = load_minimind_omni_bundle(model_id=args.model, mimi_model_id=args.mimi)
     model = bundle.model

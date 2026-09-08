@@ -27,8 +27,8 @@ sys.path.insert(0, "/home/mcig/nanovllm-omni")
 import torch
 from transformers import AutoTokenizer
 
+from nanovllm_omni.engine.bench.prompts import BENCH_PROMPTS
 from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle, run_generate
-from nanovllm_omni.optim.bench.prompts import BENCH_PROMPTS
 
 MODEL = "/home/mcig/minimind-3o"
 MIMI = "/home/mcig/mimi"

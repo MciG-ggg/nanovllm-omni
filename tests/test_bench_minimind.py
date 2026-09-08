@@ -1,4 +1,4 @@
-"""Tests for nanovllm_omni.optim.bench.bench_minimind (TK-012).
+"""Tests for nanovllm_omni.engine.bench.bench_minimind (TK-012).
 
 The script's CPU-only path is exercised end-to-end (no real model load,
 no GPU). The GPU path is verified by mocking ``run_n`` + the bundle
@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
-from nanovllm_omni.optim.bench import bench_minimind
-from nanovllm_omni.optim.bench.bench_minimind import (
+from nanovllm_omni.engine.bench import bench_minimind
+from nanovllm_omni.engine.bench.bench_minimind import (
     CSV_COLUMNS,
     DEFAULT_N,
     FIXED_MAX_TOKENS,
@@ -111,7 +111,7 @@ def test_markdown_table_format() -> None:
 def test_main_cpu_path_writes_csv(tmp_path: Path) -> None:
     """On a CPU host the script still writes a (zero-valued) CSV row."""
     csv_path = tmp_path / "bench.csv"
-    with mock.patch("nanovllm_omni.optim.bench.bench_minimind.gpu_label", return_value="cpu"):
+    with mock.patch("nanovllm_omni.engine.bench.bench_minimind.gpu_label", return_value="cpu"):
         rc = bench_minimind.main(["--n", "5", "--out", str(csv_path)])
     assert rc == 0
     assert csv_path.exists()
@@ -160,7 +160,7 @@ def test_main_gpu_path_uses_run_n(tmp_path: Path) -> None:
                 "nanovllm_omni.models.minimind_omni": fake_model_module,
             },
         ),
-        mock.patch("nanovllm_omni.optim.bench.bench_minimind.gpu_label", return_value="RTX 3050"),
+        mock.patch("nanovllm_omni.engine.bench.bench_minimind.gpu_label", return_value="RTX 3050"),
     ):
         rc = bench_minimind.main(["--n", "3", "--warmup", "1", "--out", str(csv_path)])
     assert rc == 0

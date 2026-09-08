@@ -1,9 +1,16 @@
 """Per-request sequence state for the per-stage continuous-batching scheduler.
 
 Data structures lifted from the reference's ``Sequence`` / ``PrefillChunk`` shape
-(TK-004). ``Sequence`` is the per-request mutable state a stage's scheduler
-owns; ``PrefillChunk`` marks a sub-range of a prompt being prefilled this
-round so the same scheduler can interleave prefill with decode (Q8a).
+(TK-004). ``OmniSequence`` is the per-request mutable state a stage's
+scheduler owns; ``PrefillChunk`` marks a sub-range of a prompt being
+prefilled this round so the same scheduler can interleave prefill with
+decode (Q8a).
+
+Named ``OmniSequence`` (not ``Sequence``) because it is a different
+dataclass than ``nanovllm.engine.sequence.Sequence`` (the fork's type,
+used by ``engine/paged_attention.py`` via the shim) -- same name would
+collide and mislead ``from .sequence import Sequence`` callers about
+which shape they get.
 
 The fields are deliberately minimal -- PagedAttention, prefix caching, and
 speculative decoding are out of scope.
@@ -31,7 +38,7 @@ class SequenceStatus(enum.Enum):
 
 
 @dataclass
-class Sequence:
+class OmniSequence:
     """Per-request mutable state, owned by a single stage's scheduler.
 
     ``kv_blocks`` is a thin reference into the stage's KV cache (one block
@@ -58,9 +65,9 @@ class PrefillChunk:
     long-prompt workloads (Q8a + Q12).
     """
 
-    sequence: Sequence
+    sequence: OmniSequence
     start: int
     end: int
 
 
-__all__ = ["PrefillChunk", "Sequence", "SequenceStatus"]
+__all__ = ["OmniSequence", "PrefillChunk", "SequenceStatus"]

@@ -16,16 +16,16 @@ from nanovllm_omni.engine.runtime_scheduler import (
     RuntimeScheduler,
     RuntimeSchedulerOutput,
 )
-from nanovllm_omni.engine.sequence import PrefillChunk, Sequence, SequenceStatus
+from nanovllm_omni.engine.sequence import OmniSequence, PrefillChunk, SequenceStatus
 
 # ---------------------------------------------------------------------------
-# Sequence data structure
+# OmniSequence data structure
 # ---------------------------------------------------------------------------
 
 
 def test_sequence_defaults_to_waiting_with_empty_state() -> None:
-    """Fresh Sequence is WAITING, no tokens, no KV."""
-    sequence = Sequence(request_id="r0")
+    """Fresh OmniSequence is WAITING, no tokens, no KV."""
+    sequence = OmniSequence(request_id="r0")
     assert sequence.request_id == "r0"
     assert sequence.token_ids == []
     assert sequence.num_tokens == 0
@@ -47,7 +47,7 @@ def test_sequence_status_enum_has_four_states() -> None:
 
 def test_prefill_chunk_carries_subrange() -> None:
     """PrefillChunk records a [start, end) slice of a sequence's prompt."""
-    sequence = Sequence(request_id="r0", token_ids=[1, 2, 3, 4, 5], num_tokens=5)
+    sequence = OmniSequence(request_id="r0", token_ids=[1, 2, 3, 4, 5], num_tokens=5)
     chunk = PrefillChunk(sequence=sequence, start=1, end=4)
     assert chunk.sequence is sequence
     assert chunk.start == 1
@@ -63,7 +63,7 @@ def test_scheduler_admits_to_max_num_seqs_then_blocks() -> None:
     """Admission is capped by max_num_seqs (Q8a)."""
     sched = RuntimeScheduler(max_num_seqs=2)
     for i in range(5):
-        sched.add_sequence(Sequence(request_id=f"r{i}", num_tokens=4))
+        sched.add_sequence(OmniSequence(request_id=f"r{i}", num_tokens=4))
 
     out = sched.schedule()
     # First call admits 2; remaining 3 stay WAITING.
@@ -89,7 +89,7 @@ def test_scheduler_prefill_then_decode_then_finished() -> None:
     dropped from running.
     """
     sched = RuntimeScheduler(max_num_seqs=4)
-    sched.add_sequence(Sequence(request_id="r0", num_tokens=3))
+    sched.add_sequence(OmniSequence(request_id="r0", num_tokens=3))
 
     out = sched.schedule()
     assert len(out.prefill_groups) == 1
@@ -114,7 +114,7 @@ def test_scheduler_decode_groups_partition_by_num_tokens() -> None:
     sched = RuntimeScheduler(max_num_seqs=8)
     # 3 sequences at num_tokens=4, 2 at num_tokens=7.
     for rid, n in [("a", 4), ("b", 4), ("c", 4), ("d", 7), ("e", 7)]:
-        sched.add_sequence(Sequence(request_id=rid, num_tokens=n))
+        sched.add_sequence(OmniSequence(request_id=rid, num_tokens=n))
     # First schedule() admits and emits prefill chunks; update_from_output moves
     # them to DECODE; second schedule() emits the decode groups partitioned
     # by num_tokens.
@@ -131,9 +131,9 @@ def test_scheduler_decode_groups_partition_by_num_tokens() -> None:
 
 def test_scheduler_rejects_duplicate_request_id() -> None:
     sched = RuntimeScheduler()
-    sched.add_sequence(Sequence(request_id="dup"))
+    sched.add_sequence(OmniSequence(request_id="dup"))
     with pytest.raises(ValueError, match="duplicate request_id"):
-        sched.add_sequence(Sequence(request_id="dup"))
+        sched.add_sequence(OmniSequence(request_id="dup"))
 
 
 def test_scheduler_max_num_seqs_must_be_positive() -> None:

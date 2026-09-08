@@ -54,7 +54,7 @@ class _StubModel(torch.nn.Module):
 def _make_decoder() -> object:
     """Construct a CudaGraphDecoder without CUDA: only to inspect the
     re-capture decision via its state fields."""
-    from nanovllm_omni.optim import cuda_graph as cg
+    from nanovllm_omni.engine import cuda_graph as cg
 
     # Build without calling enable_cuda_graph (that needs CUDA).
     decoder = object.__new__(cg.CudaGraphDecoder)
@@ -94,7 +94,7 @@ def _apply_invalidation(decoder) -> None:
 def test_prefill_records_length_and_resets() -> None:
     import inspect
 
-    from nanovllm_omni.optim import cuda_graph as cg
+    from nanovllm_omni.engine import cuda_graph as cg
 
     src = inspect.getsource(cg.CudaGraphDecoder._prefill)
     # records the prompt length (defect #5 re-capture key)
@@ -271,7 +271,7 @@ def test_generate_tokens_break_is_wired_into_loop() -> None:
     refactor that drops the break (regression to defect B) fails here."""
     import inspect
 
-    from nanovllm_omni.optim import cuda_graph as cg
+    from nanovllm_omni.engine import cuda_graph as cg
 
     src = inspect.getsource(cg.CudaGraphDecoder.generate_tokens)
     assert "_should_stop" in src, "defect B regression: break predicate missing"
@@ -287,7 +287,7 @@ def test_enable_cuda_graph_threads_stop_kwargs() -> None:
     ``audio_stop_token`` into the decoder (no implicit keyword crash)."""
     import inspect
 
-    from nanovllm_omni.optim import cuda_graph as cg
+    from nanovllm_omni.engine import cuda_graph as cg
 
     sig = inspect.signature(cg.enable_cuda_graph)
     assert "eos_token_id" in sig.parameters

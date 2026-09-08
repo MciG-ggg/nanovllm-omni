@@ -1,7 +1,7 @@
 """Benchmark harness for the four MiniMind-O stages (TK-011).
 
 Public surface used by ``tests/test_optim_bench.py`` and the
-``python -m nanovllm_omni.optim.bench`` CLI:
+``python -m nanovllm_omni.engine.bench`` CLI:
 
 * :data:`BENCH_PROMPTS` / :class:`BenchPrompt` -- the fixed prompt dataclass + set.
 * :class:`StageTimes` / :class:`RunResult` -- timing and result shapes.

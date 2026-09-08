@@ -492,7 +492,12 @@ def _paged_attention_forward(
     k_cache = self.k_cache  # [num_blocks, block_size, n_kv, d]
     v_cache = self.v_cache
 
-    use_flash = flash_attn_available()
+    # ``_force_no_flash`` is a bench-only override set by ``bench_paged_single_graph.py``
+    # via a small env var. It forces the torch-native SDPA path even when a real
+    # flash-attn wheel is installed, so the two kernel paths can be compared on
+    # the *same* torch version. Never wired into a production code path.
+    import os
+    use_flash = flash_attn_available() and not os.environ.get("NANOVLLM_DISABLE_FLASH")
     _store_kv_paged(key, value, k_cache, v_cache, ctx.slot_mapping)
 
     if ctx.is_prefill:

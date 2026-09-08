@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import statistics
 import time
 from pathlib import Path
@@ -77,7 +78,12 @@ def main() -> int:
     ap.add_argument("--max-new-tokens", type=int, default=16)
     ap.add_argument("--repeats", type=int, default=10)
     ap.add_argument("--out", default="docs/perf/aligned/paged-v1")
+    ap.add_argument("--no-flash", action="store_true",
+                    help="force torch-native SDPA even when flash-attn is installed; "
+                         "lets you compare kernel paths on the same torch version")
     args = ap.parse_args()
+    if args.no_flash:
+        os.environ["NANOVLLM_DISABLE_FLASH"] = "1"
 
     from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.thinker import (

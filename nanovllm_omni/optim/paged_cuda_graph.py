@@ -78,7 +78,11 @@ class PagedCudaGraphDecoder(CudaGraphDecoder):
         *,
         eos_token_id: int | None = None,
         audio_stop_token: int | None = None,
-        block_size: int = 16,
+        # block_size=256 is forced by flash-attn's varlen kernel: the kernel
+    # asserts `block_size % 256 == 0` for the paged layout. The fork's
+    # ``Sequence.block_size`` default is also 256. Smaller values are
+    # rejected at runtime when flash-attn is on the import path.
+    block_size: int = 256,
         max_batch_size: int = 1,
     ) -> None:
         # NOTE: deliberately does NOT call super().__init__ -- that one
@@ -414,7 +418,7 @@ def enable_paged_cuda_graph(
     *,
     eos_token_id: int | None = None,
     audio_stop_token: int | None = None,
-    block_size: int = 16,
+    block_size: int = 256,
     max_batch_size: int = 1,
 ) -> PagedCudaGraphDecoder | None:
     '''Install the paged single-graph decoder.

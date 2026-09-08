@@ -83,9 +83,25 @@ _PAGEDKV_MARKER = "_nanovllm_paged_kv"
 _FORK_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "nano-vllm"
 
 
-def _stub_module(name: str, **attrs: Any) -> types.ModuleType:
-    """Register a stub ``sys.modules[name]`` with the given attrs so an
-    import path resolves without touching the real package."""
+def _stub_module(name: str, *, force: bool = False, **attrs: Any) -> types.ModuleType | None:
+    """Register a stub ``sys.modules[name]`` so an import path resolves.
+
+    Refuses to shadow a package that is genuinely installed. This is not
+    a nicety: on the GPU box ``triton`` ships with torch, and replacing
+    it with a partial stub broke *transformers* -- its lazy module graph
+    hit ``triton.language`` on the stub and failed to import
+    ``AutoModelForCausalLM``. A stub must only ever fill a real absence.
+
+    Returns the stub, or ``None`` when the real module exists.
+    """
+    if name in sys.modules:
+        return None
+    if not force:
+        try:
+            if importlib.util.find_spec(name) is not None:
+                return None  # real package present -- never shadow it
+        except (ImportError, ValueError, ModuleNotFoundError):
+            pass  # unimportable parent -> genuinely absent, stub it
     mod = types.ModuleType(name)
     for k, v in attrs.items():
         setattr(mod, k, v)
@@ -120,7 +136,11 @@ def _load_fork_module(
     if "triton" not in sys.modules:
         _stub_module("triton", jit=(lambda *a, **kw: (lambda fn: fn)))
     if "triton.language" not in sys.modules:
-        _stub_module("triton.language", constexpr=type("constexpr", (), {}))
+        _tl = _stub_module("triton.language", constexpr=type("constexpr", (), {}))
+        if _tl is not None and "triton" in sys.modules:
+            # A sys.modules entry alone does not satisfy ``triton.language``
+            # attribute access; bind it on the parent module object too.
+            sys.modules["triton"].language = _tl
     if "flash_attn" not in sys.modules:
         _stub_module(
             "flash_attn",
@@ -130,13 +150,13 @@ def _load_fork_module(
 
     # 2) Stub nanovllm package tree so cross-module imports resolve.
     if "nanovllm" not in sys.modules:
-        pkg = _stub_module("nanovllm")
+        pkg = _stub_module("nanovllm", force=True)
         pkg.__path__ = [str(_FORK_ROOT / "nanovllm")]  # type: ignore[attr-defined]
     if "nanovllm.utils" not in sys.modules:
-        utils_pkg = _stub_module("nanovllm.utils")
+        utils_pkg = _stub_module("nanovllm.utils", force=True)
         utils_pkg.__path__ = [str(_FORK_ROOT / "nanovllm" / "utils")]  # type: ignore[attr-defined]
     if "nanovllm.engine" not in sys.modules:
-        eng_pkg = _stub_module("nanovllm.engine")
+        eng_pkg = _stub_module("nanovllm.engine", force=True)
         eng_pkg.__path__ = [str(_FORK_ROOT / "nanovllm" / "engine")]  # type: ignore[attr-defined]
 
     # 3) Per-file stubs before exec_module. Only register stubs for
@@ -151,6 +171,15 @@ def _load_fork_module(
             _maybe_stub(full_name, attrs)
     _maybe_stub("xxhash", {})
     _maybe_stub("numpy", {})
+
+    # Track which external stubs *we* created, so we can withdraw them
+    # after exec. Leaving them in sys.modules poisons the rest of the
+    # process: transformers probes ``find_spec("flash_attn")``, and a
+    # stub module has ``__spec__ is None``, which raises ValueError and
+    # breaks importing AutoModelForCausalLM entirely.
+    _ours = [n for n in ("triton", "triton.language", "flash_attn", "xxhash", "numpy")
+             if isinstance(sys.modules.get(n), types.ModuleType)
+             and getattr(sys.modules[n], "__spec__", None) is None]
 
     spec = importlib.util.spec_from_file_location(short_name, str(_FORK_ROOT / rel_path))
     if spec is None or spec.loader is None:
@@ -181,6 +210,14 @@ def _load_fork_module(
                 return _StubHash()
 
             xxhash_mod.xxh64 = _xxh64  # type: ignore[attr-defined]
+
+    # 5) Withdraw our external stubs. The fork module already bound the
+    #    names it needs at exec time, so removing the sys.modules entries
+    #    costs it nothing -- and it leaves the process clean for every
+    #    other library that probes for these packages.
+    for name in _ours:
+        if getattr(sys.modules.get(name), "__spec__", "missing") is None:
+            del sys.modules[name]
 
     return mod
 
@@ -327,9 +364,11 @@ class PagedKVCache:
         n_kv = attns[0].n_local_kv_heads
         d = attns[0].head_dim
         num_layers = len(attns)
+        # requires_grad=False is explicit: the pool is storage written
+        # in place every step, never a differentiable tensor.
         self.kv_cache = torch.zeros(
             2, num_layers, max_blocks, block_size, n_kv, d,
-            dtype=dtype, device=device,
+            dtype=dtype, device=device, requires_grad=False,
         )
         for layer_id, attn in enumerate(attns):
             attn.k_cache = self.kv_cache[0, layer_id]  # [num_blocks, block_size, n_kv, d]
@@ -436,17 +475,23 @@ def _store_kv_paged(
 
     n_kv = key.shape[-2]
     d = key.shape[-1]
-    k_flat = key.reshape(-1, n_kv, d)
-    v_flat = value.reshape(-1, n_kv, d)
-    # Pool view as a flat slot table: [num_blocks * block_size, n_kv, d].
-    k_slots = k_cache.view(-1, n_kv, d)
-    v_slots = v_cache.view(-1, n_kv, d)
-    slots = slot_mapping[: k_flat.shape[0]].to(torch.long)
-    # Route -1 (padding) to a scratch row so the write stays shape-static
-    # instead of branching -- block 0 is reserved as the sentinel block.
-    safe = torch.where(slots >= 0, slots, torch.zeros_like(slots))
-    k_slots.index_copy_(0, safe, k_flat)
-    v_slots.index_copy_(0, safe, v_flat)
+    # no_grad + detach: the cache is plain storage, never an autograd
+    # leaf. Without this, writing projection outputs (which carry
+    # requires_grad from the model params) into the pool raises
+    # "a leaf Variable that requires grad is being used in an in-place
+    # operation" on any call path not already under inference_mode.
+    with torch.no_grad():
+        k_flat = key.detach().reshape(-1, n_kv, d)
+        v_flat = value.detach().reshape(-1, n_kv, d)
+        # Pool view as a flat slot table: [num_blocks*block_size, n_kv, d].
+        k_slots = k_cache.view(-1, n_kv, d)
+        v_slots = v_cache.view(-1, n_kv, d)
+        slots = slot_mapping[: k_flat.shape[0]].to(torch.long)
+        # Route -1 (padding) to a scratch row so the write stays
+        # shape-static instead of branching -- block 0 is the sentinel.
+        safe = torch.where(slots >= 0, slots, torch.zeros_like(slots))
+        k_slots.index_copy_(0, safe, k_flat)
+        v_slots.index_copy_(0, safe, v_flat)
 
 
 def _gather_paged_kv(
@@ -737,11 +782,44 @@ def enable_paged_kv_cache(
     return cache
 
 
+def disable_paged_kv_cache(model: Any) -> int:
+    """Uninstall paged attention, restoring the upstream ``forward``.
+
+    ``_attach_paged_kv`` rebinds ``forward`` per *instance*, shadowing
+    the class method; deleting the instance attribute restores the
+    original implementation.
+
+    This exists because the install is global to the model: once paged
+    attention is bound, every path through that model -- eager
+    ``stream_generate`` included -- routes through it. A benchmark that
+    compares eager vs per-position-graph vs paged in one process must be
+    able to put the model back, otherwise the "eager" cell is silently
+    measuring the paged path with stale context.
+
+    Returns the number of attention instances restored.
+    """
+    restored = 0
+    for module in model.modules():
+        if not getattr(module, _PAGEDKV_MARKER, False):
+            continue
+        with suppress(AttributeError):
+            del module.forward
+        for attr in ("k_cache", "v_cache", "_paged_kv_ctx"):
+            with suppress(AttributeError):
+                delattr(module, attr)
+        setattr(module, _PAGEDKV_MARKER, False)
+        restored += 1
+    with suppress(AttributeError):
+        del model._nanovllm_paged_graph_decoder
+    return restored
+
+
 __all__ = [
     "BlockManager",
     "PagedKVCache",
     "PagedKVContext",
     "Sequence",
+    "disable_paged_kv_cache",
     "enable_paged_kv_cache",
     "flash_attn_available",
     "store_kvcache",

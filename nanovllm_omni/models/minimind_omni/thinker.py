@@ -170,27 +170,32 @@ class MiniMindThinker(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(
-        self,
-        vocab_size: int = 6400,
-        hidden_size: int = 768,
-        num_layers: int = 8,
-        num_heads: int = 8,
-        num_kv_heads: int = 2,
-        intermediate_size: int | None = None,
-        max_position: int = 4096,
-        rms_norm_eps: float = 1e-6,
-        rope_theta: float = 10000,
-        bridge_layer: int = 3,
-        audio_vocab_size: int = 2048,
-        num_audio_heads: int = 8,
-    ) -> None:
+    def __init__(self, config) -> None:
+        """HF config in, same contract as ``Qwen3ForCausalLM(hf_config)``.
+
+        ``ModelRunner`` always calls ``model_class(hf_config)``. Keyword
+        construction is gone on purpose — a second signature would drift
+        from the fork.
+        """
         super().__init__()
+        vocab_size = config.vocab_size
+        hidden_size = config.hidden_size
+        num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", num_heads)
+        intermediate_size = getattr(config, "intermediate_size", None)
         if intermediate_size is None:
             intermediate_size = math.ceil(hidden_size * 8 / 3 / 256) * 256
-        self.bridge_layer = bridge_layer
-        self.num_audio_heads = num_audio_heads
-        self.audio_vocab_size = audio_vocab_size
+        max_position = getattr(config, "max_position_embeddings", 4096)
+        rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
+        rope_theta = getattr(config, "rope_theta", 10000)
+        head_dim = getattr(config, "head_dim", None)
+        self.bridge_layer = getattr(config, "bridge_layer", 3)
+        self.num_audio_heads = getattr(config, "num_audio_heads", 8)
+        self.audio_vocab_size = getattr(config, "audio_vocab_size", 2048)
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
         self.layers = nn.ModuleList(
@@ -201,7 +206,7 @@ class MiniMindThinker(nn.Module):
                     num_kv_heads,
                     intermediate_size,
                     max_position,
-                    None,
+                    head_dim,
                     rms_norm_eps,
                     rope_theta,
                 )
@@ -210,7 +215,9 @@ class MiniMindThinker(nn.Module):
         )
         self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.lm_head = ParallelLMHead(vocab_size, hidden_size)
-        self.audio_head = nn.Linear(hidden_size, num_audio_heads * audio_vocab_size, bias=False)
+        self.audio_head = nn.Linear(
+            hidden_size, self.num_audio_heads * self.audio_vocab_size, bias=False
+        )
         self._bridge_hidden: torch.Tensor | None = None
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

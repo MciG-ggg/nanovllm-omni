@@ -20,6 +20,7 @@ pipeline topology file is now fully declarative.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -116,14 +117,18 @@ class StageConfig:
                 f"StageConfig.factory must be a dotted-path string "
                 f"('package.module:attr'), got {type(self.factory).__name__}"
             )
-        resolve_stage_factory(self.factory)
+        # On macOS, nanovllm.layers requires triton (Linux only).
+        # Defer ImportError to first actual use on WSL/GPU.
+        with contextlib.suppress(ImportError):
+            resolve_stage_factory(self.factory)
         if self.process_input is not None:
             if not isinstance(self.process_input, str):
                 raise TypeError(
                     f"StageConfig.process_input must be a dotted-path "
                     f"string or None, got {type(self.process_input).__name__}"
                 )
-            resolve_stage_factory(self.process_input)
+            with contextlib.suppress(ImportError):
+                resolve_stage_factory(self.process_input)
 
 
 @dataclass(frozen=True)

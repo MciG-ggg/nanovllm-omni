@@ -93,9 +93,7 @@ def _bench_decode(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        input_ids = torch.randint(
-            0, vocab_size, (batch_size, prefill_len), device=device
-        )
+        input_ids = torch.randint(0, vocab_size, (batch_size, prefill_len), device=device)
         positions = torch.arange(prefill_len, device=device).expand(batch_size, prefill_len)
 
         with torch.no_grad():
@@ -133,8 +131,10 @@ def main() -> int:
     thinker, device = _load_thinker(args.model_path)
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"torch: {torch.__version__}")
-    print(f"batch_size={args.batch_size} num_repeats={args.num_repeats} "
-          f"max_tokens={args.max_tokens}")
+    print(
+        f"batch_size={args.batch_size} num_repeats={args.num_repeats} "
+        f"max_tokens={args.max_tokens}"
+    )
 
     result = _bench_decode(
         thinker=thinker,

@@ -16,6 +16,7 @@ def _get_engine():
     """Lazy import — only runs inside test functions, not at collection time."""
     try:
         import nanovllm_omni.models.minimind_omni._engine as mod
+
         return mod
     except Exception:
         return None
@@ -25,18 +26,18 @@ def test_shared_block_manager_exposed() -> None:
     engine = _get_engine()
     if engine is None:
         pytest.skip("_engine.py not importable (Phase 3 not landed or triton broken)")
-    assert hasattr(engine, "SharedBlockManager"), (
-        "Expected SharedBlockManager in _engine (ADR-002: shared block table)"
-    )
+    assert hasattr(
+        engine, "SharedBlockManager"
+    ), "Expected SharedBlockManager in _engine (ADR-002: shared block table)"
 
 
 def test_stage_runner_exposed() -> None:
     engine = _get_engine()
     if engine is None:
         pytest.skip("_engine.py not importable")
-    assert hasattr(engine, "StageRunner"), (
-        "Expected StageRunner in _engine (ADR-002: per-stage runner)"
-    )
+    assert hasattr(
+        engine, "StageRunner"
+    ), "Expected StageRunner in _engine (ADR-002: per-stage runner)"
 
 
 def test_stage_runner_lifecycle_methods() -> None:
@@ -47,9 +48,7 @@ def test_stage_runner_lifecycle_methods() -> None:
     runner_cls = engine.StageRunner
     for name in ("set_context", "forward", "sample", "reset_context"):
         assert hasattr(runner_cls, name), f"StageRunner missing method {name!r}"
-        assert callable(getattr(runner_cls, name)), (
-            f"StageRunner.{name} is not callable"
-        )
+        assert callable(getattr(runner_cls, name)), f"StageRunner.{name} is not callable"
 
 
 def test_stage_runner_constructs_with_mocked_runner() -> None:
@@ -106,6 +105,4 @@ def test_forward_calls_underlying_runner() -> None:
         is_prefill=False,
     )
     assert out is not None
-    assert inner.run_model.called, (
-        "StageRunner.forward did not route to ModelRunner.run_model"
-    )
+    assert inner.run_model.called, "StageRunner.forward did not route to ModelRunner.run_model"

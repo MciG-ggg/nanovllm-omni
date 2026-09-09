@@ -101,6 +101,7 @@ docs/design-grill.md
 docs/specs/
 docs/review/
 docs/dev/
+docs/perf/
 
 # OS
 Thumbs.db

@@ -2187,10 +2187,35 @@ wheels = [
 ]
 
 [[package]]
+name = "nano-vllm"
+version = "0.2.0"
+source = { editable = "third_party/nano-vllm" }
+dependencies = [
+    { name = "torch", version = "2.7.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "transformers" },
+    { name = "xxhash" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "flash-attn", marker = "extra == 'cuda'" },
+    { name = "torch", specifier = ">=2.4.0" },
+    { name = "transformers", specifier = ">=4.51.0" },
+    { name = "triton", marker = "extra == 'cuda'", specifier = ">=3.0.0" },
+    { name = "xxhash" },
+]
+provides-extras = ["cuda"]
+
+[package.metadata.requires-dev]
+dev = []
+
+[[package]]
 name = "nanovllm-omni"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "nano-vllm" },
     { name = "pyyaml" },
 ]
 
@@ -2252,6 +2277,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'smolvla'", specifier = ">=0.20" },
     { name = "lerobot", marker = "extra == 'smolvla'", specifier = ">=0.3" },
     { name = "librosa", marker = "extra == 'minimind'", specifier = ">=0.10" },
+    { name = "nano-vllm", editable = "third_party/nano-vllm" },
     { name = "numpy", marker = "extra == 'smolvla'", specifier = ">=1.24" },
     { name = "onnxruntime", marker = "extra == 'minimind'", specifier = ">=1.16" },
     { name = "pillow", marker = "extra == 'smolvla'", specifier = ">=10.0" },

@@ -22,9 +22,6 @@ Run on WSL: cd ~/nanovllm-omni && PYTHONPATH=.  \\
 from __future__ import annotations
 
 import hashlib
-import sys
-
-sys.path.insert(0, "/home/mcig/nanovllm-omni")
 
 from nanovllm_omni import Omni, SamplingParams
 

@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0",
+    "nano-vllm",
 ]
 
 [project.optional-dependencies]
@@ -97,6 +98,9 @@ Issues = "https://github.com/MciG-ggg/nanovllm-omni/issues"
 # uses `pip install -e ".[dev]"` which only reads
 # `[project.optional-dependencies]`, never `[dependency-groups]`.
 default-groups = ["minimind"]
+
+[tool.uv.sources]
+nano-vllm = { path = "third_party/nano-vllm", editable = true }
 
 [tool.setuptools]
 packages = [

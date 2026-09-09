@@ -20,6 +20,10 @@ available on a CPU-only host. The factory functions (``_thinker_stage``
 ``ModelRunner`` constructor; smoke tests that only import the factory
 function symbols don't trigger the fork import.
 
+nano-vllm is installed as an editable package via ``uv``
+(``[tool.uv.sources]`` in the root ``pyproject.toml``), so ``from nanovllm...``
+resolves through the normal package mechanism.
+
 Why a module-level cache for ``SharedBlockManager``: ``ThinkerStage`` and
 ``TalkerStage`` are constructed by independent factory calls in
 ``PipelineRunner._ensure_stages``. Without a shared handle the second
@@ -29,44 +33,7 @@ IDs would collide.
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Any
-
-# ---------------------------------------------------------------------------
-# Fork import plumbing (lazy).
-# ---------------------------------------------------------------------------
-#
-# The fork submodule lives at ``third_party/nano-vllm`` and is *not*
-# installed as a package (no ``pyproject.toml`` for it at the project
-# root). Inserting its directory onto ``sys.path`` is the simplest way
-# to make ``from nanovllm.engine.model_runner import ModelRunner``
-# resolve. Only done once, on first fork import inside this module.
-
-_FORK_PATH = os.path.normpath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "..",
-        "third_party",
-        "nano-vllm",
-    )
-)
-
-
-def _ensure_fork_on_path() -> str:
-    """Insert the fork submodule directory into ``sys.path`` once.
-
-    Returns the resolved absolute path so callers can detect duplicates.
-    Importing the fork eagerly here would pull in ``triton`` (via
-    ``nanovllm.layers.attention``) — leave that to the call sites that
-    actually need it.
-    """
-    if _FORK_PATH not in sys.path:
-        sys.path.insert(0, _FORK_PATH)
-    return _FORK_PATH
-
 
 # ---------------------------------------------------------------------------
 # SharedBlockManager.
@@ -89,8 +56,6 @@ class SharedBlockManager:
     """
 
     def __init__(self, num_blocks: int, block_size: int) -> None:
-        # Lazy: only touch the fork when an instance is actually built.
-        _ensure_fork_on_path()
         from nanovllm.engine.block_manager import BlockManager
 
         self._bm = BlockManager(num_blocks, block_size)
@@ -167,12 +132,37 @@ _stage_configs: dict[str, Any] = {}
 
 
 def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
-    """Return the fork ``Config`` for one stage (lazy, cached)."""
+    """Return the fork ``Config`` for one stage (lazy, cached).
+
+    Fork ``Config.__post_init__`` calls ``AutoConfig.from_pretrained``
+    without ``trust_remote_code``. MiniMind's config.json has ``auto_map``,
+    so we patch that one call. After load, coerce ``hf_config.dtype`` to
+    a ``torch.dtype`` — ModelRunner does ``torch.set_default_dtype(hf_config.dtype)``.
+    """
     if stage_name not in _stage_configs:
-        _ensure_fork_on_path()
+        import torch
+        from transformers import AutoConfig
+
         from nanovllm.config import Config
 
-        _stage_configs[stage_name] = Config(model=model_path, **kwargs)
+        orig = AutoConfig.from_pretrained
+
+        def _trusted(*args, **kw):
+            kw.setdefault("trust_remote_code", True)
+            return orig(*args, **kw)
+
+        AutoConfig.from_pretrained = _trusted  # type: ignore[method-assign]
+        try:
+            cfg = Config(model=model_path, **kwargs)
+        finally:
+            AutoConfig.from_pretrained = orig  # type: ignore[method-assign]
+
+        dt = getattr(cfg.hf_config, "dtype", None)
+        if isinstance(dt, str):
+            cfg.hf_config.dtype = getattr(torch, dt, torch.float16)
+        elif dt is None:
+            cfg.hf_config.dtype = getattr(cfg.hf_config, "torch_dtype", None) or torch.float16
+        _stage_configs[stage_name] = cfg
     return _stage_configs[stage_name]
 
 
@@ -214,7 +204,6 @@ class StageRunner:
     ) -> None:
         # Lazy: importing ``ModelRunner`` pulls in ``nanovllm.layers.attention``
         # which requires ``triton``. Defer to the call site.
-        _ensure_fork_on_path()
         from nanovllm.engine.model_runner import ModelRunner
         from nanovllm.layers.sampler import Sampler
 
@@ -253,7 +242,6 @@ class StageRunner:
         to clear stale tensors (the fork ``Attention`` reads the
         context globals at every forward).
         """
-        _ensure_fork_on_path()
         from nanovllm.utils.context import set_context as _set_context
 
         _set_context(
@@ -291,7 +279,6 @@ class StageRunner:
 
     def reset_context(self) -> None:
         """Clear the fork module-level ``Context``."""
-        _ensure_fork_on_path()
         from nanovllm.utils.context import reset_context as _reset_context
 
         _reset_context()
@@ -383,39 +370,23 @@ class ThinkerStage:
 
 
 class TalkerStage:
-    """Stage 1 — MiniMind talker MTP via fork ``ModelRunner``.
+    """Stage 1 placeholder — Talker is not a text AR LM.
 
-    Consumes ``TalkerInputPayload`` (bridge hidden states + text token
-    alignment) produced by ``thinker2talker``. Phase 3 stops at
-    ModelRunner construction; the MTP decode loop is Phase 4.
+    ``MiniMindTalker.forward(bridge, text_codes, positions)`` does not
+    match ``ModelRunner.run_model`` which calls
+    ``model(input_ids, positions)`` then ``compute_logits``. A second
+    ``ModelRunner`` would also re-init NCCL. Don't construct one.
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
-        from .talker import MiniMindTalker
-
         self.deploy = deploy
         self.args = args
-        self.config = get_stage_config(
-            "talker",
-            model_path=_resolve_model_path(args),
-            **_stage_kwargs_from_args(args),
-        )
-        # Reuses the ThinkerStage's SharedBlockManager.
-        self.shared_block_manager = get_shared_block_manager(
-            num_blocks=self.config.num_kvcache_blocks,
-            block_size=self.config.kvcache_block_size,
-        )
-        self.stage_runner = StageRunner(
-            model_class=MiniMindTalker,
-            config=self.config,
-            shared_block_manager=self.shared_block_manager,
-        )
+        self.stage_runner = None
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         raise NotImplementedError(
-            "TalkerStage.__call__ (MTP decode loop + audio code emission) "
-            "is Phase 4 territory. Phase 3 stops at ModelRunner construction; "
-            "see docs/dev/nanovllm-omni-rewrite.md §7."
+            "Talker MTP is not ModelRunner.forward(input_ids, positions); "
+            "see MiniMindTalker.forward."
         )
 
 

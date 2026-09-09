@@ -28,8 +28,8 @@ from pathlib import Path
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
+# Add tests/ to sys.path for test helper imports (_talker_fixtures, etc.)
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 from _talker_fixtures import make_fake_bundle, span_bridge  # noqa: E402

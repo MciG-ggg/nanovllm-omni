@@ -245,8 +245,10 @@ def test_enable_bridge_capture_patches_bridge_layer() -> None:
     patched = enable_bridge_capture(model, bridge_idx)
     assert patched == bridge_idx
     assert getattr(block, "_nanovllm_bridge_patched", False) is True
-    # Now invoke the patched forward and verify _bridge_capture is set.
-    block.forward(torch.randn(2, 3, 8))
+    # ``register_forward_hook`` fires on ``__call__``, not on a direct
+    # ``forward`` invocation -- invoke the module the way the model
+    # framework does.
+    block(torch.randn(2, 3, 8))
     assert hasattr(block, "_bridge_capture")
 
 
@@ -254,11 +256,13 @@ def test_enable_bridge_capture_is_idempotent() -> None:
     model = FakeMiniMindOmniWithBridge(num_thinker_layers=4, hidden_size=8)
     enable_bridge_capture(model, model.config.bridge_layer)
     first_block = model.thinker.layers[model.config.bridge_layer]
-    first_forward = first_block.forward
+    first_func = first_block.forward.__func__
     enable_bridge_capture(model, model.config.bridge_layer)
-    second_forward = first_block.forward
-    # Same bound method (re-patch is a no-op).
-    assert first_forward.__func__ is second_forward.__func__
+    second_func = first_block.forward.__func__
+    # ``register_forward_hook`` does not rebind ``forward``; the
+    # underlying function identity is preserved across re-installation
+    # (re-install is a no-op).
+    assert first_func is second_func
 
 
 def test_enable_bridge_capture_returns_minus_one_for_missing_thinker() -> None:

@@ -1,36 +1,32 @@
 #!/usr/bin/env python3
-"""Bench: single-graph paged decode vs per-position graph vs eager.
+"""Bench: single-graph paged decode vs eager.
 
-Three cells, one process, same prompts / seed / token budget:
+Two cells, one process, same prompts / seed / token budget:
 
 1. ``eager``   -- no CUDA Graph at all
-2. ``perpos``  -- ``optim/cuda_graph``: ``n_steps - 1`` graphs, one per
-   decode position (the previously shipped path)
-3. ``paged``   -- ``optim/paged_cuda_graph``: ONE graph, replayed for
+2. ``paged``   -- ``optim/paged_cuda_graph``: ONE graph, replayed for
    every decode step, over a paged KV cache
 
 What this is actually measuring
 -------------------------------
-The interesting number is *not* only hot latency -- the per-position
-path already wins there. It is the **cost of getting into** the hot
-state:
+The interesting number is the **cost of getting into** the hot state:
 
-- ``capture_ms``: per-position pays ``n_steps - 1`` captures, paged pays 1
-- ``graphs``: VRAM holds ``n_steps - 1`` graphs vs 1
-- ``recapture on n_steps change``: per-position must recapture when the
-  token budget changes, paged must not (n_steps is not a capture shape)
+- ``capture_ms``: paged pays one capture
+- ``graphs``: VRAM holds 1 graph
+- ``recapture on n_steps change``: paged must not recapture when the
+  token budget changes (n_steps is not a capture shape)
 
 Cell isolation
 --------------
-``enable_paged_kv_cache`` rebinds attention ``forward`` on the model
-itself, so it must be uninstalled between cells or the "eager" cell
-silently measures the paged path. ``disable_paged_kv_cache`` is called
-before every cell for that reason.
+``enable_paged_kv_cache`` swaps wrapper modules into the model, so it
+must be uninstalled between cells or the "eager" cell silently measures
+the paged path. ``disable_paged_kv_cache`` is called before every cell
+for that reason (a no-op on a fresh model).
 
 Usage:
     python tools/bench_paged_single_graph.py \\
         --model /home/mcig/minimind-3o --mimi /home/mcig/mimi \\
-        --max-new-tokens 16 --repeats 10 --out docs/perf/aligned/paged-v1
+        --max-new-tokens 16 --repeats 20 --out docs/perf/aligned/paged-v2
 """
 
 from __future__ import annotations
@@ -117,20 +113,6 @@ def main() -> int:
             use_thinker_cuda_graph=False,
         )
 
-    def _perpos(x: Any) -> Any:
-        return run_generate(
-            model,
-            x,
-            max_new_tokens=n,
-            temperature=TEMPERATURE,
-            top_p=TOP_P,
-            eos_token_id=eos,
-            open_thinking=False,
-            seed=SEED,
-            use_thinker_cuda_graph=True,
-            graph_backend="perpos",
-        )
-
     # ---- cell 1: eager -------------------------------------------------
     disable_paged_kv_cache(model)
     torch.cuda.empty_cache()
@@ -154,29 +136,7 @@ def main() -> int:
         }
     )
 
-    # ---- cell 2: per-position graphs -----------------------------------
-    disable_paged_kv_cache(model)
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    cold_perpos, frames_pp = _time_ms(lambda: _perpos(ids[0]))
-    pp_samples = []
-    for x in ids:
-        for _ in range(args.repeats):
-            t, frames_pp = _time_ms(lambda x=x: _perpos(x))
-            pp_samples.append(t)
-    rows.append(
-        {
-            "cell": "perpos",
-            "graphs": max(n - 1, 0),
-            "capture_ms": cold_perpos - statistics.median(pp_samples),
-            "cold_ms": cold_perpos,
-            "frames": len(frames_pp),
-            "vram_mb": torch.cuda.max_memory_allocated() / 2**20,
-            **_stats(pp_samples),
-        }
-    )
-
-    # ---- cell 3: paged single graph ------------------------------------
+    # ---- cell 2: paged single graph ------------------------------------
     disable_paged_kv_cache(model)
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()

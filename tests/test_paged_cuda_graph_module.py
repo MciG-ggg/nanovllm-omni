@@ -43,7 +43,6 @@ _ensure_stub(
 # numpy is a real torch dependency -- never stub it.
 _ensure_stub("xxhash")
 
-from nanovllm_omni.models.minimind_omni import cuda_graph as cg  # noqa: E402
 from nanovllm_omni.models.minimind_omni import paged_attention as pa  # noqa: E402
 from nanovllm_omni.models.minimind_omni import paged_cuda_graph as pcg  # noqa: E402
 
@@ -63,16 +62,22 @@ def test_capture_builds_exactly_one_graph() -> None:
     assert "n_steps" not in body, "n_steps must not influence capture"
 
 
-def test_per_position_decoder_still_captures_n_steps_minus_one() -> None:
-    """Guard the contrast: the old decoder is genuinely per-position.
+def test_paged_decoder_owns_state_machine_directly() -> None:
+    """The state machine helpers live directly on PagedCudaGraphDecoder.
 
-    If this ever stops being true, the comparison this work is based on
-    (and the numbers reported from it) would be describing something
-    else.
+    The prior ``CudaGraphDecoder`` base class is gone -- these methods
+    must be present on the paged class itself for parity with
+    ``BatchedThinkerRunner``.
     """
-    src = inspect.getsource(cg.CudaGraphDecoder._capture)
-    assert "num_decode_graphs = max(self.n_steps - 1, 0)" in src
-    assert "for _ in range(num_decode_graphs):" in src
+    for name in (
+        "_reset_request_state",
+        "_next_post_eos_token",
+        "_should_stop",
+        "_result",
+    ):
+        assert name in pcg.PagedCudaGraphDecoder.__dict__, (
+            f"{name} must be defined on PagedCudaGraphDecoder, not inherited"
+        )
 
 
 def test_decode_loop_replays_the_same_graph_object() -> None:
@@ -94,24 +99,10 @@ def test_recapture_is_independent_of_n_steps_and_prompt_len() -> None:
     per-position decoder but must not be for this one.
     """
     src = inspect.getsource(pcg.PagedCudaGraphDecoder._needs_recapture)
-    # Strip the docstring: it *describes* n_steps, the logic must not use it.
     body = src.split('"""')[-1]
     assert "_captured_window" in body
     assert "n_steps" not in body
     assert "_prefill_len" not in body
-
-
-def test_paged_decoder_inherits_stop_machine() -> None:
-    """Stop parity with the per-position decoder is by inheritance.
-
-    Re-implementing the post-EOS state machine would silently change
-    frame counts and make the two graph paths incomparable.
-    """
-    assert issubclass(pcg.PagedCudaGraphDecoder, cg.CudaGraphDecoder)
-    for name in ("_should_stop", "_next_post_eos_token", "_reset_request_state", "_result"):
-        assert (
-            name not in pcg.PagedCudaGraphDecoder.__dict__
-        ), f"{name} must be inherited, not overridden"
 
 
 @pytest.mark.parametrize(

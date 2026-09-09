@@ -11,9 +11,7 @@ from __future__ import annotations
 import math
 
 import torch
-from torch import nn
 import torch.distributed as dist
-
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
@@ -23,6 +21,7 @@ from nanovllm.layers.linear import (
     RowParallelLinear,
 )
 from nanovllm.layers.rotary_embedding import get_rope
+from torch import nn
 
 
 class TalkerAttention(nn.Module):

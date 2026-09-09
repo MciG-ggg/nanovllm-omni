@@ -45,6 +45,11 @@ from typing import Any
 
 import torch
 
+# Fork layers use @torch.compile on RMSNorm/SiluAndMul/RotaryEmbedding.
+# torch._dynamo can fail on shape inference in these; suppress and fall back
+to eager.  Same pattern as the WSL GPU test in the previous session.
+torch._dynamo.config.suppress_errors = True
+
 DEFAULT_HF_PATH = (
     "/home/mcig/.cache/huggingface/hub/models--jingyaogong--minimind-3o/"
     "snapshots/ee3febbd08cc5b2bd41c039c825a8934232fee33/"

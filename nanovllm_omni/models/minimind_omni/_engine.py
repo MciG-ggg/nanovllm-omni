@@ -176,20 +176,38 @@ def reset_stage_configs() -> None:
 # ---------------------------------------------------------------------------
 
 
+_DIST_PATCHED = False
+
+
 def _ensure_dist() -> None:
-    """Initialize the fork's NCCL process group once, if not already done.
+    """Initialize the fork's NCCL process group once, monkey-patch subsequent calls.
 
     The fork's ``ModelRunner.__init__`` unconditionally calls
     ``dist.init_process_group("nccl", ...)``.  Creating two
     ``ModelRunner`` instances (thinker + talker) would crash on the
-    second call.  We guard with ``dist.is_initialized()`` so the
-    first ``ModelRunner`` goes through and the second's call is a
-    harmless no-op (caught and ignored).
+    second call.  We monkey-patch ``dist.init_process_group`` to a
+    no-op when ``dist.is_initialized()``, so the first ``ModelRunner``
+    goes through and the second's call is harmless.
     """
+    global _DIST_PATCHED
+    if _DIST_PATCHED:
+        return
     import torch.distributed as dist
 
     if not dist.is_initialized():
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=1, rank=0)
+
+    # Monkey-patch dist.init_process_group so fork ModelRunner.__init__
+    # does not crash on the second instance.
+    _orig_init = dist.init_process_group
+
+    def _safe_init(*args, **kwargs):
+        if dist.is_initialized():
+            return None
+        return _orig_init(*args, **kwargs)
+
+    dist.init_process_group = _safe_init  # type: ignore[assignment]
+    _DIST_PATCHED = True
 
 
 def _patch_store_kvcache(kv_dim: int) -> None:
@@ -342,17 +360,77 @@ class StageRunner:
 def _resolve_model_path(args: Any) -> str:
     """Pull the model directory from ``OmniEngineArgs.model``.
 
-    Fork ``Config.__post_init__`` asserts ``os.path.isdir(self.model)``
-    so we surface the missing-arg case as a clearer error before
-    hitting the fork assertion.
+    Fork ``Config.__post_init__`` asserts ``os.path.isdir(self.model)``.
+    Resolves Hub IDs (``jingyaogong/minimind-3o``) to a local snapshot
+    via ``_resolve_snapshot`` from ``bundle``. Local paths pass through.
+
+    For the fork ``load_model`` to skip non-thinker weights, the
+    directory needs only ``model.safetensors`` containing tensors
+    MiniMindThinker actually consumes (with the ``model.`` prefix
+    stripped). The full HF dump also ships ``audio_proj.*`` and other
+    talker weights; ``load_model`` calls ``get_parameter`` for every
+    key and crashes on unknowns.
     """
+    from .bundle import _resolve_snapshot
+
     model = getattr(args, "model", None)
     if not model:
         raise ValueError(
             "OmniEngineArgs.model is required to construct a StageRunner "
             "(fork Config validates the model path is a real directory)."
         )
-    return model
+    return _thinker_only_dir(_resolve_snapshot(model))
+
+
+def _thinker_only_dir(src: str) -> str:
+    """Build a sibling directory with only thinker-shaped weights.
+
+    Mirrors ``tools/verify_phase4_wire.py::_thinker_only_dir``: strip
+    ``model.`` prefix, drop tensors MiniMindThinker does not consume
+    (``audio_proj.*``, ``audio_head.*``, ...), copy other config files.
+    Cached by source path so repeat invocations reuse the same files.
+    """
+    import glob
+    import hashlib
+    import os
+    import shutil
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    src = os.path.abspath(src)
+    cache_key = hashlib.sha1(src.encode()).hexdigest()[:12]
+    dst = os.path.join("/tmp", f"minimind-thinker-only-{cache_key}")
+    target = os.path.join(dst, "model.safetensors")
+
+    if os.path.isfile(target):
+        return dst
+
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(src):
+        if name.endswith((".json", ".py", ".jinja", ".md", ".txt")):
+            shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+
+    keep_prefix = ("embed_tokens.", "layers.", "norm.", "lm_head.")
+    tensors: dict = {}
+    seen: set = set()
+    src_files = glob.glob(os.path.join(src, "*.safetensors"))
+    if not src_files:
+        raise FileNotFoundError(f"no safetensors in {src}")
+    with safe_open(src_files[0], framework="pt", device="cpu") as f:
+        for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
+            name = k[6:] if k.startswith("model.") else k
+            if not name.startswith(keep_prefix):
+                continue
+            v = f.get_tensor(k)
+            ptr = v.untyped_storage().data_ptr()
+            if ptr in seen:
+                v = v.clone()
+            else:
+                seen.add(ptr)
+            tensors[name] = v.contiguous()
+    save_file(tensors, target)
+    return dst
 
 
 def _stage_kwargs_from_args(args: Any) -> dict[str, Any]:
@@ -402,6 +480,11 @@ class ThinkerStage:
             model_path=_resolve_model_path(args),
             **_stage_kwargs_from_args(args),
         )
+        # Patch store_kvcache if thinker head_dim * num_kv_heads is not power of 2.
+        hf = self.config.hf_config
+        thinker_num_kv_heads = getattr(hf, "num_key_value_heads", None) or 4
+        thinker_head_dim = getattr(hf, "head_dim", None) or hf.hidden_size // hf.num_attention_heads
+        _patch_store_kvcache(thinker_num_kv_heads * thinker_head_dim)
         # The first ``get_shared_block_manager`` call wins; the
         # talker's later call reuses this same instance.
         self.shared_block_manager = get_shared_block_manager(
@@ -474,15 +557,18 @@ class ThinkerStage:
             temperatures = runner.prepare_sample(seqs)
             logits = runner.run_model(input_ids, positions, is_prefill)
 
-            # Extract bridge hidden on prefill (first forward pass).
-            if is_prefill and bridge_hidden is None:
-                bh = model.get_bridge_hidden()
-                if bh is not None:
-                    bridge_hidden = bh.detach().clone()
+            # Extract bridge hidden; accumulate across prefill + each decode step.
+            bh = model.get_bridge_hidden()
+            if bh is not None:
+                bh = bh.detach().clone()
+                if is_prefill:
+                    bridge_hidden = bh
+                elif bridge_hidden is not None:
+                    bridge_hidden = torch.cat([bridge_hidden, bh], dim=0)
 
             token_id_list = runner.sampler(logits, temperatures).tolist()
             scheduler.postprocess(seqs, token_id_list, is_prefill)
-            runner.reset_context()
+            self.stage_runner.reset_context()
 
             new_id = token_id_list[0]
             generated.append(new_id)

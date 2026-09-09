@@ -28,9 +28,14 @@ class TalkerAttention(nn.Module):
     """Attention for the talker MTP blocks."""
 
     def __init__(
-        self, hidden_size: int, num_heads: int, num_kv_heads: int,
-        max_position: int = 4096, head_dim: int | None = None,
-        rms_norm_eps: float = 1e-6, rope_theta: float = 10000,
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000,
     ) -> None:
         super().__init__()
         tp_size = dist.get_world_size()
@@ -43,21 +48,31 @@ class TalkerAttention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size, self.head_dim,
-            self.total_num_heads, self.total_num_kv_heads, bias=False,
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
         )
         self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim, hidden_size, bias=False,
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
         )
         self.rotary_emb = get_rope(
-            self.head_dim, rotary_dim=self.head_dim,
-            max_position=max_position, base=rope_theta,
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position,
+            base=rope_theta,
         )
         self.attn = Attention(
-            self.num_heads, self.head_dim, self.scaling, self.num_kv_heads,
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -81,7 +96,9 @@ class TalkerMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False,
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
         )
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
         self.act_fn = SiluAndMul()
@@ -94,22 +111,34 @@ class TalkerBlock(nn.Module):
     """Pre-norm transformer block for talker MTP."""
 
     def __init__(
-        self, hidden_size: int, num_heads: int, num_kv_heads: int,
-        intermediate_size: int, max_position: int = 4096,
-        head_dim: int | None = None, rms_norm_eps: float = 1e-6,
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        intermediate_size: int,
+        max_position: int = 4096,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000,
     ) -> None:
         super().__init__()
         self.self_attn = TalkerAttention(
-            hidden_size, num_heads, num_kv_heads, max_position,
-            head_dim, rms_norm_eps, rope_theta,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            max_position,
+            head_dim,
+            rms_norm_eps,
+            rope_theta,
         )
         self.mlp = TalkerMLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
     def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
@@ -138,11 +167,17 @@ class MiniMindTalker(nn.Module):
     }
 
     def __init__(
-        self, hidden_size: int = 768, num_layers: int = 4,
-        num_heads: int = 8, num_kv_heads: int = 2,
-        intermediate_size: int | None = None, max_position: int = 4096,
-        rms_norm_eps: float = 1e-6, rope_theta: float = 10000,
-        audio_vocab_size: int = 2048, num_audio_heads: int = 8,
+        self,
+        hidden_size: int = 768,
+        num_layers: int = 4,
+        num_heads: int = 8,
+        num_kv_heads: int = 2,
+        intermediate_size: int | None = None,
+        max_position: int = 4096,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000,
+        audio_vocab_size: int = 2048,
+        num_audio_heads: int = 8,
         talker_hidden_size: int | None = None,
     ) -> None:
         super().__init__()
@@ -155,22 +190,34 @@ class MiniMindTalker(nn.Module):
         self.audio_scale = nn.Parameter(torch.ones(1))
         self.embed_tokens = nn.Embedding(audio_vocab_size, self.talker_hidden_size)
 
-        self.layers = nn.ModuleList([
-            TalkerBlock(
-                self.talker_hidden_size, num_heads, num_kv_heads,
-                intermediate_size, max_position, None, rms_norm_eps, rope_theta,
-            )
-            for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                TalkerBlock(
+                    self.talker_hidden_size,
+                    num_heads,
+                    num_kv_heads,
+                    intermediate_size,
+                    max_position,
+                    None,
+                    rms_norm_eps,
+                    rope_theta,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.norm = RMSNorm(self.talker_hidden_size, eps=rms_norm_eps)
         self.audio_head = nn.Linear(
-            self.talker_hidden_size, num_audio_heads * audio_vocab_size, bias=False,
+            self.talker_hidden_size,
+            num_audio_heads * audio_vocab_size,
+            bias=False,
         )
         self.num_audio_heads = num_audio_heads
         self.audio_vocab_size = audio_vocab_size
 
     def forward(
-        self, hidden_states: torch.Tensor, text_codes: torch.Tensor,
+        self,
+        hidden_states: torch.Tensor,
+        text_codes: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         """Run talker MTP.
@@ -193,9 +240,19 @@ class MiniMindTalker(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Stage factory stubs (called by pipeline.py via dotted-path resolution)
+#  Stage factory (called by pipeline.py via dotted-path resolution)
 # ---------------------------------------------------------------------------
 
-def _talker_stage(deploy: object, args: object) -> object:
-    """Stage 1 factory — placeholder, will be wired to fork ModelRunner."""
-    raise NotImplementedError("Talker stage not yet wired to fork ModelRunner")
+
+def _talker_stage(deploy, args):
+    """Stage 1 factory — fork ``ModelRunner`` + shared ``SharedBlockManager``.
+
+    Returns a ``TalkerStage`` that reuses the thinker's ``SharedBlockManager``
+    (per ADR-002: logical block IDs are shared across stages; physical KV
+    tensors are per-stage because thinker and talker have different layer
+    counts). The MTP decode loop that consumes ``TalkerInputPayload`` and
+    emits audio codes is Phase 4 territory.
+    """
+    from ._engine import TalkerStage
+
+    return TalkerStage(deploy, args)

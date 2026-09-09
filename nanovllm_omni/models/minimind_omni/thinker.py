@@ -49,21 +49,31 @@ class ThinkerAttention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size, self.head_dim,
-            self.total_num_heads, self.total_num_kv_heads, bias=False,
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
         )
         self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim, hidden_size, bias=False,
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
         )
         self.rotary_emb = get_rope(
-            self.head_dim, rotary_dim=self.head_dim,
-            max_position=max_position, base=rope_theta,
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position,
+            base=rope_theta,
         )
         self.attn = Attention(
-            self.num_heads, self.head_dim, self.scaling, self.num_kv_heads,
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -87,7 +97,9 @@ class ThinkerMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False,
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
         )
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
         self.act_fn = SiluAndMul()
@@ -100,22 +112,34 @@ class ThinkerBlock(nn.Module):
     """Pre-norm transformer block."""
 
     def __init__(
-        self, hidden_size: int, num_heads: int, num_kv_heads: int,
-        intermediate_size: int, max_position: int = 4096,
-        head_dim: int | None = None, rms_norm_eps: float = 1e-6,
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        intermediate_size: int,
+        max_position: int = 4096,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000,
     ) -> None:
         super().__init__()
         self.self_attn = ThinkerAttention(
-            hidden_size, num_heads, num_kv_heads, max_position,
-            head_dim, rms_norm_eps, rope_theta,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            max_position,
+            head_dim,
+            rms_norm_eps,
+            rope_theta,
         )
         self.mlp = ThinkerMLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
     def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
@@ -169,13 +193,21 @@ class MiniMindThinker(nn.Module):
         self.audio_vocab_size = audio_vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
-        self.layers = nn.ModuleList([
-            ThinkerBlock(
-                hidden_size, num_heads, num_kv_heads, intermediate_size,
-                max_position, None, rms_norm_eps, rope_theta,
-            )
-            for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                ThinkerBlock(
+                    hidden_size,
+                    num_heads,
+                    num_kv_heads,
+                    intermediate_size,
+                    max_position,
+                    None,
+                    rms_norm_eps,
+                    rope_theta,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.lm_head = ParallelLMHead(vocab_size, hidden_size)
         self.audio_head = nn.Linear(hidden_size, num_audio_heads * audio_vocab_size, bias=False)
@@ -204,9 +236,19 @@ class MiniMindThinker(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Stage factory stubs (called by pipeline.py via dotted-path resolution)
+#  Stage factory (called by pipeline.py via dotted-path resolution)
 # ---------------------------------------------------------------------------
 
-def _thinker_stage(deploy: object, args: object) -> object:
-    """Stage 0 factory — placeholder, will be wired to fork ModelRunner."""
-    raise NotImplementedError("Thinker stage not yet wired to fork ModelRunner")
+
+def _thinker_stage(deploy, args):
+    """Stage 0 factory — fork ``ModelRunner`` + ``SharedBlockManager`` wiring.
+
+    Returns a ``ThinkerStage`` whose ``ModelRunner`` already has its KV
+    tensors allocated and CUDA graphs captured. The actual decode loop
+    (prefill + autoregressive text decode + bridge extraction into
+    ``ThinkerStageOutput``) is Phase 4 territory; see
+    ``docs/dev/nanovllm-omni-rewrite.md`` §7.
+    """
+    from ._engine import ThinkerStage
+
+    return ThinkerStage(deploy, args)

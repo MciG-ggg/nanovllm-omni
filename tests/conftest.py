@@ -31,20 +31,9 @@ def _ensure_stub(name: str) -> None:
 
 
 # Stub triton + flash_attn + flash_attn CUDA kernels.
-for _mod in ("triton", "triton.language", "flash_attn", "flash_attn.flash_attn_varlen_func", "flash_attn.flash_attn_with_kvcache"):
+# Only stub modules that aren't already installed (triton is real on WSL).
+for _mod in ("flash_attn", "flash_attn.flash_attn_varlen_func", "flash_attn.flash_attn_with_kvcache"):
     _ensure_stub(_mod)
-
-# triton.language is used as `tl` in store_kvcache_kernel; give it a
-# minimal JIT decorator so the kernel definition doesn't blow up.
-_tl = sys.modules["triton.language"]
-_tl.constexpr = lambda *a, **kw: (lambda f: f)  # type: ignore[attr-defined]
-_tl.program_id = lambda *a, **kw: 0  # type: ignore[attr-defined]
-_tl.load = lambda *a, **kw: 0  # type: ignore[attr-defined]
-_tl.store = lambda *a, **kw: None  # type: ignore[attr-defined]
-_tl.arange = lambda *a, **kw: None  # type: ignore[attr-defined]
-
-_triton = sys.modules["triton"]
-_triton.jit = lambda *a, **kw: (lambda f: f)  # type: ignore[attr-defined]
 
 
 @pytest.fixture(autouse=True)

@@ -357,19 +357,42 @@ class StageRunner:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_model_path(args: Any) -> str:
+_THINKER_KEEP_PREFIX = ("embed_tokens.", "layers.", "norm.", "lm_head.")
+# Talker keys all live under submodules (``lm_head.base.`` /
+# ``lm_head.adapters.`` / ...) — the bare ``lm_head.weight`` key
+# belongs to the thinker's text head (shape 6400) and must be
+# skipped. We match the dot-separated prefix and require at least
+# one intermediate segment for ``lm_head``. ``speaker_proj.``
+# replaces the vendor's ``spk_proj.`` (the fork loader substring
+# replaces ``k_proj`` inside ``spk_proj``, which corrupts the path).
+_TALKER_KEEP_PREFIX = (
+    "embed_proj.",
+    "codec_proj.",
+    "embed_tokens.",
+    "layers.",
+    "norm.",
+    "lm_head.base.",
+    "lm_head.adapters.",
+    "text_scale",
+    "audio_scale",
+    "speaker_proj.",
+)
+# Keys whose tail we rename while copying (src -> dst).
+_TALKER_RENAME = {"spk_proj.weight": "speaker_proj.weight"}
+
+
+def _resolve_model_path(args: Any, stage: str = "thinker") -> str:
     """Pull the model directory from ``OmniEngineArgs.model``.
 
     Fork ``Config.__post_init__`` asserts ``os.path.isdir(self.model)``.
     Resolves Hub IDs (``jingyaogong/minimind-3o``) to a local snapshot
     via ``_resolve_snapshot`` from ``bundle``. Local paths pass through.
 
-    For the fork ``load_model`` to skip non-thinker weights, the
-    directory needs only ``model.safetensors`` containing tensors
-    MiniMindThinker actually consumes (with the ``model.`` prefix
-    stripped). The full HF dump also ships ``audio_proj.*`` and other
-    talker weights; ``load_model`` calls ``get_parameter`` for every
-    key and crashes on unknowns.
+    The directory is then shaped to the stage: ``_thinker_only_dir``
+    keeps only the keys MiniMindThinker consumes; ``_talker_only_dir``
+    keeps only the keys MiniMindTalker consumes. Fork ``load_model``
+    walks every key and crashes on unknowns, so the two stages cannot
+    share a single safetensors file.
     """
     from .bundle import _resolve_snapshot
 
@@ -379,28 +402,45 @@ def _resolve_model_path(args: Any) -> str:
             "OmniEngineArgs.model is required to construct a StageRunner "
             "(fork Config validates the model path is a real directory)."
         )
-    return _thinker_only_dir(_resolve_snapshot(model))
+    snapshot = _resolve_snapshot(model)
+    if stage == "thinker":
+        return _thinker_only_dir(snapshot)
+    if stage == "talker":
+        return _talker_only_dir(snapshot)
+    raise ValueError(f"unknown stage: {stage!r}")
 
 
-def _thinker_only_dir(src: str) -> str:
-    """Build a sibling directory with only thinker-shaped weights.
+def _filter_only_dir(
+    src: str,
+    dst_prefix: str,
+    keep_prefix: tuple[str, ...],
+    stage_prefix: str,
+) -> str:
+    """Shared implementation for thinker / talker only-dir builds.
 
-    Mirrors ``tools/verify_phase4_wire.py::_thinker_only_dir``: strip
-    ``model.`` prefix, drop tensors MiniMindThinker does not consume
-    (``audio_proj.*``, ``audio_head.*``, ...), copy other config files.
-    Cached by source path so repeat invocations reuse the same files.
+    Strips ``stage_prefix`` (e.g. ``model.`` or ``talker.``) from each
+    key, drops anything whose stripped name does not start with one
+    of ``keep_prefix``, and writes a single ``model.safetensors``
+    into a hash-keyed sibling directory under ``/tmp``.  Reuses the
+    cache if it already exists.
+
+    ``stage_prefix`` is also used as a *filter*: a key is only kept
+    if it starts with ``stage_prefix``.  This prevents thinker layers
+    (``model.layers.4-7.*``) from leaking into the talker build,
+    since the talker's layer prefix is ``talker.layers.``.
     """
     import glob
     import hashlib
     import os
     import shutil
 
+    import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
 
     src = os.path.abspath(src)
     cache_key = hashlib.sha1(src.encode()).hexdigest()[:12]
-    dst = os.path.join("/tmp", f"minimind-thinker-only-{cache_key}")
+    dst = os.path.join("/tmp", f"{dst_prefix}-{cache_key}")
     target = os.path.join(dst, "model.safetensors")
 
     if os.path.isfile(target):
@@ -411,26 +451,71 @@ def _thinker_only_dir(src: str) -> str:
         if name.endswith((".json", ".py", ".jinja", ".md", ".txt")):
             shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
 
-    keep_prefix = ("embed_tokens.", "layers.", "norm.", "lm_head.")
+    def _name(k: str) -> str | None:
+        if not k.startswith(stage_prefix):
+            return None
+        name = k[len(stage_prefix) :]
+        return _TALKER_RENAME.get(name, name)
+
+    def _accept(name: str) -> bool:
+        return name.startswith(keep_prefix)
+
     tensors: dict = {}
     seen: set = set()
-    src_files = glob.glob(os.path.join(src, "*.safetensors"))
+    src_files = sorted(glob.glob(os.path.join(src, "*.safetensors")))
     if not src_files:
-        raise FileNotFoundError(f"no safetensors in {src}")
-    with safe_open(src_files[0], framework="pt", device="cpu") as f:
-        for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-            name = k[6:] if k.startswith("model.") else k
-            if not name.startswith(keep_prefix):
+        src_bin = os.path.join(src, "pytorch_model.bin")
+        if not os.path.isfile(src_bin):
+            raise FileNotFoundError(f"no safetensors or pytorch_model.bin in {src}")
+        state = torch.load(src_bin, map_location="cpu", weights_only=True)
+        for k, v in state.items():
+            if not torch.is_tensor(v):
                 continue
-            v = f.get_tensor(k)
+            name = _name(k)
+            if name is None or not _accept(name):
+                continue
             ptr = v.untyped_storage().data_ptr()
             if ptr in seen:
                 v = v.clone()
             else:
                 seen.add(ptr)
             tensors[name] = v.contiguous()
+        save_file(tensors, target)
+        return dst
+
+    for src_file in src_files:
+        with safe_open(src_file, framework="pt", device="cpu") as f:
+            for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                name = _name(k)
+                if name is None or not _accept(name):
+                    continue
+                v = f.get_tensor(k)
+                ptr = v.untyped_storage().data_ptr()
+                if ptr in seen:
+                    v = v.clone()
+                else:
+                    seen.add(ptr)
+                tensors[name] = v.contiguous()
     save_file(tensors, target)
     return dst
+
+
+def _thinker_only_dir(src: str) -> str:
+    """Build a sibling directory with only thinker-shaped weights."""
+    return _filter_only_dir(src, "minimind-thinker-only", _THINKER_KEEP_PREFIX, "model.")
+
+
+def _talker_only_dir(src: str) -> str:
+    """Build a sibling directory with only talker-shaped weights.
+
+    Mirrors ``_thinker_only_dir`` but keeps the talker's keys
+    (``codec_proj.*``, ``embed_proj.*``, ``embed_tokens.*``,
+    ``layers.*``, ``norm.*``, ``lm_head.base.*``, ``lm_head.adapters.*``,
+    ``text_scale``, ``audio_scale``, ``spk_proj.*``). ``talker.``
+    prefix stripped; the bare ``lm_head.weight`` (thinker text head)
+    is filtered out by the prefix list.
+    """
+    return _filter_only_dir(src, "minimind-talker-only", _TALKER_KEEP_PREFIX, "talker.")
 
 
 def _stage_kwargs_from_args(args: Any) -> dict[str, Any]:
@@ -477,7 +562,7 @@ class ThinkerStage:
         self.args = args
         self.config = get_stage_config(
             "thinker",
-            model_path=_resolve_model_path(args),
+            model_path=_resolve_model_path(args, stage="thinker"),
             **_stage_kwargs_from_args(args),
         )
         # Patch store_kvcache if thinker head_dim * num_kv_heads is not power of 2.
@@ -517,7 +602,7 @@ class ThinkerStage:
         from .stage_processors import ThinkerStageOutput
 
         prompt = str(payload)
-        tokenizer = _load_tokenizer(_resolve_model_path(self.args))
+        tokenizer = _load_tokenizer(_resolve_model_path(self.args, stage="thinker"))
         token_ids = tokenizer.encode(prompt, add_special_tokens=False)
         if not token_ids:
             token_ids = [tokenizer.eos_token_id or 0]
@@ -598,17 +683,28 @@ class ThinkerStage:
 
 @dataclass
 class TalkerOutput:
-    """Simple wrapper for talker audio codes consumed by ``talker2code2wav``."""
+    """Talker output: per-frame audio codes consumed by ``talker2code2wav``."""
 
     audio_codes: Any  # torch.Tensor [frames, 8]
+
+
+# Vendor constant — single channel of the audio-buffer pad (model_omni.py).
+_AUDIO_PAD_TOKEN = 2049
+_AUDIO_STOP_TOKEN = 2050
+_AUDIO_SPK_TOKEN = 2051
+_AUDIO_VENDOR_TEMPERATURE = 0.2
+_AUDIO_REPETITION_PENALTY = 1.05
 
 
 class TalkerStage:
     """Stage 1 — MiniMind talker MTP decode (custom, not via ModelRunner).
 
-    ``MiniMindTalker.forward(hidden_states, text_codes, positions)`` has
-    a different signature from ``ModelRunner.run_model(input_ids, positions)``,
-    so we load the model directly and manage the forward loop ourselves.
+    ``MiniMindTalker.forward`` does not match ``ModelRunner.run_model``
+    (it takes ``(bridge_states, audio_codes, positions)``, not
+    ``(input_ids, positions)``), so we load the model directly and
+    manage the forward loop ourselves. Eager full-sequence path — no
+    KV cache, no CUDA graph. The vendor uses paged KV cache for
+    speed; we skip it for code-size parity with the teaching goal.
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
@@ -619,122 +715,56 @@ class TalkerStage:
         self._config: Any = None
 
     def _ensure_model(self) -> Any:
-        """Lazily load the talker model + assign KV cache (once)."""
+        """Lazily load the talker model from the talker-only safetensors."""
         if self._model is not None:
             return self._model
 
         import torch
-        from nanovllm.config import Config
         from nanovllm.utils.loader import load_model
         from transformers import AutoConfig
 
         from .talker import MiniMindTalker
 
-        model_path = _resolve_model_path(self.args)
-        kwargs = _stage_kwargs_from_args(self.args)
+        model_path = _resolve_model_path(self.args, stage="talker")
 
-        # Create talker config (may differ from thinker in memory util).
-        orig = AutoConfig.from_pretrained
-
-        def _trusted(*args, **kw):
-            kw.setdefault("trust_remote_code", True)
-            return orig(*args, **kw)
-
-        AutoConfig.from_pretrained = _trusted  # type: ignore[method-assign]
-        try:
-            cfg = Config(model=model_path, **kwargs)
-        finally:
-            AutoConfig.from_pretrained = orig  # type: ignore[method-assign]
-
-        dt = getattr(cfg.hf_config, "dtype", None)
+        # The HF config in the talker-only dir is the full Omni config
+        # (copied verbatim). Re-use it as the model constructor input.
+        hf_cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        dt = getattr(hf_cfg, "dtype", None)
         if isinstance(dt, str):
-            cfg.hf_config.dtype = getattr(torch, dt, torch.float16)
+            hf_cfg.dtype = getattr(torch, dt, torch.float16)
         elif dt is None:
-            cfg.hf_config.dtype = getattr(cfg.hf_config, "torch_dtype", None) or torch.float16
+            hf_cfg.dtype = getattr(hf_cfg, "torch_dtype", None) or torch.float16
 
-        self._config = cfg
-
-        # Patch Triton KV store for non-power-of-2 D if needed.
-        hf = cfg.hf_config
-        talker_hidden = getattr(hf, "talker_hidden_size", None) or getattr(hf, "hidden_size", 768)
-        talker_num_heads = getattr(hf, "talker_num_heads", None) or getattr(
-            hf, "num_attention_heads", 8
-        )
-        talker_num_kv_heads = getattr(hf, "talker_num_kv_heads", None) or getattr(
-            hf, "num_key_value_heads", 2
-        )
-        talker_head_dim = talker_hidden // talker_num_heads
-        kv_dim = talker_num_kv_heads * talker_head_dim
-        _patch_store_kvcache(kv_dim)
+        self._config = hf_cfg
 
         # Ensure dist is ready (may already be from thinker's ModelRunner).
         _ensure_dist()
 
-        # Load talker model (uses fork's weight loader for packed_modules_mapping).
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(cfg.hf_config.dtype)
+        torch.set_default_dtype(hf_cfg.dtype)
         torch.set_default_device("cuda")
-        model = MiniMindTalker(
-            hidden_size=talker_hidden,
-            num_layers=getattr(hf, "talker_num_layers", None)
-            or getattr(hf, "num_hidden_layers", 4),
-            num_heads=talker_num_heads,
-            num_kv_heads=talker_num_kv_heads,
-            intermediate_size=getattr(hf, "talker_intermediate_size", None),
-            max_position=getattr(hf, "max_position_embeddings", 4096),
-            rms_norm_eps=getattr(hf, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(hf, "rope_theta", 10000),
-            audio_vocab_size=getattr(hf, "audio_vocab_size", 2048),
-            num_audio_heads=getattr(hf, "num_audio_heads", 8),
-            talker_hidden_size=talker_hidden,
-        )
+        try:
+            model = MiniMindTalker(hf_cfg)
+            load_model(model, model_path)
+        finally:
+            torch.set_default_device("cpu")
+            torch.set_default_dtype(default_dtype)
 
-        load_model(model, cfg.model)
-        torch.set_default_device("cpu")
-        torch.set_default_dtype(default_dtype)
-
-        # Allocate KV cache and assign to attention layers.
-        free, total = torch.cuda.mem_get_info()
-        used = total - free
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        current = torch.cuda.memory_stats()["allocated_bytes.current"]
-        num_kv_heads = talker_num_kv_heads // cfg.tensor_parallel_size
-        head_dim = talker_head_dim
-        block_bytes = (
-            2
-            * getattr(hf, "num_hidden_layers", 4)
-            * cfg.kvcache_block_size
-            * num_kv_heads
-            * head_dim
-            * cfg.hf_config.dtype.itemsize
-        )
-        cfg.num_kvcache_blocks = (
-            int(total * cfg.gpu_memory_utilization - used - peak + current) // block_bytes
-        )
-        assert (
-            cfg.num_kvcache_blocks > 0
-        ), f"Talker KV cache: not enough GPU memory ({cfg.num_kvcache_blocks} blocks)"
-        kv_cache = torch.empty(
-            2,
-            getattr(hf, "num_hidden_layers", 4),
-            cfg.num_kvcache_blocks,
-            cfg.kvcache_block_size,
-            num_kv_heads,
-            head_dim,
-        )
-        layer_id = 0
-        for module in model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = kv_cache[0, layer_id]
-                module.v_cache = kv_cache[1, layer_id]
-                layer_id += 1
-
+        model.eval()
         self._model = model
         self._device = "cuda"
         return model
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Run the Talker: AR decode audio codes from bridge hidden states.
+
+        Mirrors ``MiniMindOmni.stream_generate`` (vendor model_omni.py):
+        at each step we run one forward (full sequence, no KV cache),
+        sample one code per codebook from the 8 returned logit tensors
+        using the vendor's staggered schedule (``audio_codes[i]`` lags
+        codebook ``i`` by one position), and stop once codebook 7 has
+        emitted ``audio_stop_token``.
 
         Args:
             payload: TalkerInputPayload (from thinker2talker processor).
@@ -750,77 +780,93 @@ class TalkerStage:
         model = self._ensure_model()
         device = self._device
 
-        # Extract inputs from the payload.
-        if isinstance(payload, TalkerInputPayload):
-            bridge = payload.bridge_states
-            text_codes = list(payload.text_token_ids)
-        else:
+        # ---- Extract & validate inputs ----
+        if not isinstance(payload, TalkerInputPayload):
             raise TypeError(
                 f"TalkerStage expected TalkerInputPayload, got {type(payload).__name__}"
             )
-
+        bridge = payload.bridge_states
+        text_codes = list(payload.text_token_ids)
         if bridge is None or (isinstance(bridge, torch.Tensor) and bridge.numel() == 0):
             raise ValueError("TalkerStage received empty bridge hidden states")
+        if not text_codes:
+            raise ValueError("TalkerStage received empty text_token_ids")
 
-        bridge = bridge.to(device=device, dtype=model.embed_proj.weight.dtype)
-
-        # Talker max steps: number of text tokens (one audio frame per token).
-        max_steps = len(text_codes)
         extra = getattr(sampling, "extra", None) or {}
-        watchdog = extra.get("watchdog_limit")
-        if watchdog is not None:
-            max_steps = min(max_steps, int(watchdog))
-
-        temperature = getattr(sampling, "temperature", None)
-        if temperature is None:
-            temperature = extra.get("temperature", 0.2)
-        temperature = float(temperature)
+        max_steps = min(
+            len(text_codes),
+            int(extra["watchdog_limit"]) if extra.get("watchdog_limit") else len(text_codes),
+        )
+        # Audio temperature is taken from the vendor default (0.2); the
+        # text ``sampling.temperature`` is for the thinker stage.
+        temperature = float(extra.get("audio_temperature", _AUDIO_VENDOR_TEMPERATURE))
         if temperature <= 1e-10:
             temperature = 1e-5
 
-        num_audio_heads = model.num_audio_heads
-        pad_id = 0  # initial audio code (BOS-like)
+        bridge = bridge.unsqueeze(0).to(device=device, dtype=model.embed_proj[0].weight.dtype)
+        # The vendor aligns ``t_audio == t_text`` at every step; we
+        # broaden that to ``t_audio <= t_text`` (we extend audio as
+        # codes are produced) so our eager forward can still match.
 
-        # Generate audio codes autoregressively.
-        # At each step: forward(bridge, audio_codes, positions) -> logits at last pos -> sample.
-        generated_frames: list[torch.Tensor] = []
+        # ---- Staggered decode loop (matches vendor stream_generate) ----
+        # ``audio_codes[i]`` lags codebook i by i+1 steps — i.e. at
+        # ``step=s`` we have sampled ``s - i`` real codes for codebook
+        # ``i`` (or zero when ``s <= i``). Vendor uses pad for the
+        # lag positions; the model learned this pattern.
+        audio_codes: list[list[int]] = [[] for _ in range(8)]
+        audio_stop_pos = [None] * 8
+
         with torch.no_grad():
-            for step in range(max_steps):
-                # Current audio codes: pad for positions not yet generated.
-                num_generated = step
-                audio_len = 1 + num_generated  # 1 pad + generated frames
-                codes = torch.full((audio_len,), pad_id, dtype=torch.long, device=device)
-                if num_generated > 0:
-                    codes[1:] = torch.tensor(
-                        [frame[step - 1] for frame in generated_frames],
-                        dtype=torch.long,
-                        device=device,
-                    )
+            for step in range(1, max_steps + 1):
+                t_audio = step  # vendor invariant: t_audio grows 1:1 with text
+                # Build audio_codes buffer for this step: [1, 8, t_audio].
+                buf = torch.full((1, 8, t_audio), _AUDIO_PAD_TOKEN, dtype=torch.long, device=device)
+                audio_step = step - 1
+                for i in range(8):
+                    fill = min(audio_step + 1, i + 1)  # how many real codes to write
+                    if fill > 0:
+                        buf[0, i, :fill] = torch.tensor(
+                            audio_codes[i][:fill], dtype=torch.long, device=device
+                        )
+                positions = torch.arange(t_audio, dtype=torch.long, device=device)
 
-                positions = torch.arange(audio_len, dtype=torch.long, device=device)
+                logits_list = model(bridge[:, :t_audio, :], buf, positions)
+                # logits_list: 8 tensors of shape [1, t_audio, vocab].
+                # Sample one code per codebook (last position only).
+                for i, logits in enumerate(logits_list):
+                    if audio_step < i:
+                        audio_codes[i].append(_AUDIO_PAD_TOKEN)
+                        continue
+                    last = logits[0, -1, :].clone()
+                    # Vendor repetition penalty on the last 3 sampled codes.
+                    for prev in audio_codes[i][-3:]:
+                        last[prev] /= _AUDIO_REPETITION_PENALTY
+                    last = last / temperature
+                    # Vendor samples from the top-50 to avoid the long tail.
+                    top_vals, top_idx = last.topk(50)
+                    code = top_idx[torch.multinomial(torch.softmax(top_vals, dim=-1), 1)].item()
+                    audio_codes[i].append(code)
+                    if audio_stop_pos[i] is None and code >= 2048:
+                        audio_stop_pos[i] = len(audio_codes[i]) - 1
 
-                # Forward: bridge is always [T, H] (full text length).
-                # The model projects bridge + adds audio embeddings for audio_len positions.
-                logits = model(bridge, codes, positions)  # [audio_len, 8, vocab]
-                # Sample from the last position.
-                last_logits = logits[-1]  # [8, vocab]
+                # Stop once codebook 7 emits the stop token.
+                if audio_codes[7] and audio_codes[7][-1] == _AUDIO_STOP_TOKEN:
+                    break
 
-                # Temperature sampling per codebook head.
-                if temperature > 0 and temperature < 1.0:
-                    probs = torch.softmax(last_logits / temperature, dim=-1)
-                    frame = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [8]
-                else:
-                    frame = last_logits.argmax(dim=-1)  # [8]
-
-                generated_frames.append(frame.cpu())
-
-        if not generated_frames:
-            # Degenerate case: return a single empty frame.
-            audio_codes = torch.zeros(1, num_audio_heads, dtype=torch.long)
+        # ---- Pack output ----
+        # audio_codes: list of 8 lists, each length = max_steps (or fewer
+        # if we broke out early). Truncate to the shortest codebook to
+        # form a square [frames, 8] tensor.
+        n_frames = min(len(c) for c in audio_codes)
+        if n_frames == 0:
+            audio_codes_tensor = torch.zeros(1, 8, dtype=torch.long)
         else:
-            audio_codes = torch.stack(generated_frames, dim=0)  # [frames, 8]
-
-        return TalkerOutput(audio_codes=audio_codes)
+            audio_codes_tensor = (
+                torch.tensor([c[:n_frames] for c in audio_codes], dtype=torch.long, device=device)
+                .t()
+                .contiguous()
+            )  # [frames, 8]
+        return TalkerOutput(audio_codes=audio_codes_tensor.cpu())
 
 
 __all__ = [

@@ -93,26 +93,125 @@ def _need_cuda() -> None:
 
 
 def _load_stages(model_path: str) -> tuple[Any, Any, Any, torch.device]:
-    """Return ``(bundle, thinker, talker, device)``.
+    """Return ``(None, thinker, talker, device)``.
 
-    ``bundle.thinker`` / ``bundle.talker`` must be ``MiniMindThinker`` /
-    ``MiniMindTalker`` instances after Phase 3.  We refuse to construct
-    them from scratch here: weights come from the HF snapshot, and the
-    snapshot's weight-loader adapter is Phase 3's deliverable.
+    Directly constructs ``MiniMindThinker`` / ``MiniMindTalker`` from
+    the HF config + weights, bypassing the old vendor bundle.  The fork's
+    ``load_model`` handles weight mapping via ``packed_modules_mapping``.
     """
-    from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle
+    import json as _json
+
+    import torch.distributed as dist
+    from transformers import AutoConfig
+
     from nanovllm_omni.models.minimind_omni.talker import MiniMindTalker
     from nanovllm_omni.models.minimind_omni.thinker import MiniMindThinker
 
-    bundle = load_minimind_omni_bundle(model_id=model_path, device="cuda")
-    thinker, talker = bundle.thinker, bundle.talker
-    if not isinstance(thinker, MiniMindThinker) or not isinstance(talker, MiniMindTalker):
-        raise SystemExit(
-            "bundle.thinker/talker are not MiniMindThinker/MiniMindTalker "
-            f"(got {type(thinker).__name__} / {type(talker).__name__}); "
-            "Phase 3 wiring incomplete"
+    device = torch.device("cuda")
+
+    # Fork layers (VocabParallelEmbedding, ParallelLMHead) call
+    # dist.get_rank() at __init__ time.  Initialize a single-process
+    # gloo group so those calls succeed.
+    if not dist.is_initialized():
+        dist.init_process_group("gloo", rank=0, world_size=1)
+
+    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+    # --- Thinker ---
+    thinker = MiniMindThinker(
+        vocab_size=getattr(cfg, "vocab_size", 6400),
+        hidden_size=cfg.hidden_size,
+        num_layers=getattr(cfg, "num_hidden_layers", 12),
+        num_heads=getattr(cfg, "num_attention_heads", 12),
+        num_kv_heads=getattr(cfg, "num_key_value_heads", 2),
+        intermediate_size=getattr(cfg, "intermediate_size", None),
+        max_position=getattr(cfg, "max_position_embeddings", 4096),
+        rms_norm_eps=getattr(cfg, "rms_norm_eps", 1e-6),
+        rope_theta=getattr(cfg, "rope_theta", 10000),
+        bridge_layer=getattr(cfg, "bridge_layer", 3),
+        audio_vocab_size=getattr(cfg, "audio_vocab_size", 2048),
+        num_audio_heads=getattr(cfg, "num_audio_heads", 8),
+    ).to(device=device, dtype=torch.float16)
+    _load_weights(thinker, model_path)
+
+    # --- Talker ---
+    talker = MiniMindTalker(
+        audio_vocab_size=getattr(cfg, "audio_vocab_size", 2048),
+        num_audio_heads=getattr(cfg, "num_audio_heads", 8),
+        hidden_size=getattr(cfg, "audio_hidden_size", 512),
+        num_layers=4,
+        num_heads=4,
+        num_kv_heads=2,
+        max_position=getattr(cfg, "max_position_embeddings", 4096),
+        rms_norm_eps=getattr(cfg, "rms_norm_eps", 1e-6),
+        rope_theta=getattr(cfg, "rope_theta", 10000),
+    ).to(device=device, dtype=torch.float16)
+
+    return None, thinker, talker, device
+
+
+def _load_weights(model: torch.nn.Module, model_path: str) -> None:
+    """Load HF weights into a fork-layer model.
+
+    Handles both ``*.safetensors`` (fork ``load_model``) and
+    ``pytorch_model.bin`` (``torch.load`` + manual mapping).
+    """
+    import os
+    from glob import glob
+
+    from torch import nn
+
+    _ensure_fork_path()
+
+    safetensors = glob(os.path.join(model_path, "*.safetensors"))
+    if safetensors:
+        from nanovllm.utils.loader import load_model as _fork_load_model
+        _fork_load_model(model, model_path)
+        return
+
+    # Fallback: pytorch_model.bin
+    bin_path = os.path.join(model_path, "pytorch_model.bin")
+    if not os.path.isfile(bin_path):
+        raise FileNotFoundError(
+            f"No safetensors or pytorch_model.bin in {model_path}"
         )
-    return bundle, thinker, talker, torch.device("cuda")
+
+    state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+    packed = getattr(model, "packed_modules_mapping", {})
+
+    for weight_name, loaded_tensor in state_dict.items():
+        param_name = weight_name
+        shard_id = None
+        for k, (v, sid) in packed.items():
+            if k in weight_name:
+                param_name = weight_name.replace(k, v)
+                shard_id = sid
+                break
+
+        try:
+            param = model.get_parameter(param_name)
+        except AttributeError:
+            # Skip mismatched keys silently (e.g. talker weights in thinker)
+            continue
+
+        weight_loader = getattr(param, "weight_loader", None)
+        if weight_loader is not None and shard_id is not None:
+            weight_loader(param, loaded_tensor, shard_id)
+        elif weight_loader is not None:
+            weight_loader(param, loaded_tensor)
+        else:
+            param.data.copy_(loaded_tensor)
+
+
+def _ensure_fork_path() -> None:
+    """Make ``third_party/nano-vllm`` importable."""
+    import os, sys as _sys
+
+    fork = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "third_party", "nano-vllm")
+    )
+    if fork not in _sys.path:
+        _sys.path.insert(0, fork)
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +466,8 @@ def main() -> int:
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"torch: {torch.__version__}")
 
-    bundle, thinker, talker, _device = _load_stages(args.model_path)
-    print(f"loaded bundle from {args.model_path} "
+    _unused, thinker, talker, device = _load_stages(args.model_path)
+    print(f"loaded thinker+talker from {args.model_path} "
           f"(thinker={type(thinker).__name__}, talker={type(talker).__name__})")
 
     report = Report(meta={

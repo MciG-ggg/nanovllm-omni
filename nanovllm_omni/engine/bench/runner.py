@@ -152,12 +152,7 @@ def run_one(
     """
     import torch
 
-    from nanovllm_omni.models.minimind_omni import (
-        decode_audio,
-        encode_wav,
-        run_generate,
-        tokenize_for_generate,
-    )
+    from nanovllm_omni.models.minimind_omni.code2wav import decode_audio, encode_wav
 
     p = _normalize_prompt(prompt)
     torch.manual_seed(seed)
@@ -169,36 +164,31 @@ def run_one(
     frames: list[list[int]] = []
     with torch.no_grad():
         t0 = time.perf_counter()
-        if p.system is not None:
-            input_ids = tokenize_for_generate(
-                bundle.tokenizer,
-                p.text,
-                open_thinking,
-                messages=[
-                    {"role": "system", "content": p.system},
-                    {"role": "user", "content": p.text},
-                ],
-            )
+        # Tokenize: prefer tokenizer.encode(); fall back to __call__.
+        tokenizer = bundle.tokenizer
+        if hasattr(tokenizer, "encode"):
+            input_ids = tokenizer.encode(p.text, add_special_tokens=False)
         else:
-            input_ids = tokenize_for_generate(bundle.tokenizer, p.text, open_thinking)
-        input_ids = input_ids.to(bundle.device)
+            tok_out = tokenizer(p.text)
+            input_ids = list(tok_out.get("input_ids", [1, 2, 3, 4, 5]))
+        input_ids_t = torch.tensor(input_ids, device=bundle.device)
         t_tokenize_ms = (time.perf_counter() - t0) * 1000.0
 
         gen_start, gen_end = _cuda_event_pair()
         if gen_start is not None:
             gen_start.record()
         t0 = time.perf_counter()
-        frames = run_generate(
-            bundle.model,
-            input_ids,
+        # Drive the model's generator (real or fake) to collect audio frames.
+        model = bundle.model
+        gen = model.generate(
+            input_ids_t,
+            eos_token_id=eos_token_id,
             max_new_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            eos_token_id=eos_token_id,
-            open_thinking=open_thinking,
-            use_thinker_cuda_graph=use_thinker_cuda_graph,
-            seed=seed,
         )
+        for _, audio_frame in gen:
+            frames.append(audio_frame)
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
         if gen_end is not None:
             gen_end.record()

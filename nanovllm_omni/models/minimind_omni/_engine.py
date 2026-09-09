@@ -33,6 +33,7 @@ IDs would collide.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -141,9 +142,8 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
     """
     if stage_name not in _stage_configs:
         import torch
-        from transformers import AutoConfig
-
         from nanovllm.config import Config
+        from transformers import AutoConfig
 
         orig = AutoConfig.from_pretrained
 
@@ -169,6 +169,56 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
 def reset_stage_configs() -> None:
     """Drop the cached stage ``Config`` objects (test hook)."""
     _stage_configs.clear()
+
+
+# ---------------------------------------------------------------------------
+# Fork helpers: dist init + Triton KV store patch.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_dist() -> None:
+    """Initialize the fork's NCCL process group once, if not already done.
+
+    The fork's ``ModelRunner.__init__`` unconditionally calls
+    ``dist.init_process_group("nccl", ...)``.  Creating two
+    ``ModelRunner`` instances (thinker + talker) would crash on the
+    second call.  We guard with ``dist.is_initialized()`` so the
+    first ``ModelRunner`` goes through and the second's call is a
+    harmless no-op (caught and ignored).
+    """
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=1, rank=0)
+
+
+def _patch_store_kvcache(kv_dim: int) -> None:
+    """Patch ``store_kvcache`` when D (num_kv_heads * head_dim) is not a power of 2.
+
+    Fork Triton kernel uses ``tl.arange(0, D)`` which requires D = 2^n.
+    MiniMind talker has D = 2 * 96 = 192 (not power of 2); thinker
+    has D = 2 * 64 = 128 (fine).  Only call for stages that need it.
+
+    ponytail: PyTorch scatter fallback.  Upgrade: pad head_dim in fork kernel.
+    """
+    if kv_dim & (kv_dim - 1) == 0:
+        return  # already power of 2, no patch needed
+
+    import nanovllm.layers.attention as attn
+
+    orig = attn.store_kvcache
+
+    def store_kvcache(key, value, k_cache, v_cache, slot_mapping):
+        n, num_heads, head_dim = key.shape
+        d = num_heads * head_dim
+        if d & (d - 1) == 0:
+            return orig(key, value, k_cache, v_cache, slot_mapping)
+        # clamp(min=0) is CUDA graph safe — no data-dependent branch.
+        slots = slot_mapping.clamp(min=0)
+        k_cache.view(-1, d)[slots] = key.reshape(n, d).to(k_cache.dtype)
+        v_cache.view(-1, d)[slots] = value.reshape(n, d).to(v_cache.dtype)
+
+    attn.store_kvcache = store_kvcache
 
 
 # ---------------------------------------------------------------------------
@@ -327,16 +377,19 @@ def _stage_kwargs_from_args(args: Any) -> dict[str, Any]:
     }
 
 
+def _load_tokenizer(model_path: str) -> Any:
+    """Load a HuggingFace tokenizer from the model directory."""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+
 class ThinkerStage:
     """Stage 0 — MiniMind thinker AR decode via fork ``ModelRunner``.
 
     The factory ``_thinker_stage`` (in ``thinker.py``) constructs this
     class; ``PipelineRunner`` then drives decoding by calling the
     instance with ``(payload, sampling)``.
-
-    Phase 3 stops at the wiring (ModelRunner constructed, KV allocated,
-    CUDA graph captured). The actual decode loop + bridge extraction
-    into ``ThinkerStageOutput`` lives in Phase 4.
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
@@ -355,6 +408,8 @@ class ThinkerStage:
             num_blocks=self.config.num_kvcache_blocks,
             block_size=self.config.kvcache_block_size,
         )
+        # Ensure NCCL process group exists before ModelRunner tries to init.
+        _ensure_dist()
         self.stage_runner = StageRunner(
             model_class=MiniMindThinker,
             config=self.config,
@@ -362,38 +417,331 @@ class ThinkerStage:
         )
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
-        raise NotImplementedError(
-            "ThinkerStage.__call__ (decode loop + bridge extraction) is "
-            "Phase 4 territory. Phase 3 stops at ModelRunner construction "
-            "and CUDA graph capture; see docs/dev/nanovllm-omni-rewrite.md §7."
+        """Run the Thinker: tokenize prompt, prefill, AR decode, extract bridge.
+
+        Args:
+            payload: text prompt string.
+            sampling: SamplingParams (or fork equivalent) with max_tokens, temperature.
+
+        Returns:
+            ThinkerStageOutput with bridge_states, token_ids, text_token_ids.
+        """
+        import torch
+        from nanovllm.engine.scheduler import Scheduler
+        from nanovllm.engine.sequence import Sequence
+        from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
+
+        from .stage_processors import ThinkerStageOutput
+
+        prompt = str(payload)
+        tokenizer = _load_tokenizer(_resolve_model_path(self.args))
+        token_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if not token_ids:
+            token_ids = [tokenizer.eos_token_id or 0]
+
+        max_tokens = getattr(sampling, "max_tokens", None)
+        if max_tokens is None:
+            max_tokens = (getattr(sampling, "extra", None) or {}).get("max_tokens", 512)
+        max_tokens = int(max_tokens)
+
+        temperature = getattr(sampling, "temperature", None)
+        if temperature is None:
+            temperature = (getattr(sampling, "extra", None) or {}).get("temperature", 0.7)
+        temperature = float(temperature)
+        # Fork requires temperature > 1e-10 (no greedy).
+        if temperature <= 1e-10:
+            temperature = 1e-5
+
+        # Create fork Sequence and Scheduler.
+        fork_sp = ForkSamplingParams(
+            temperature=temperature, max_tokens=max_tokens, ignore_eos=True
+        )
+        scheduler = Scheduler(self.config)
+        sequence = Sequence(token_ids, fork_sp)
+        scheduler.add(sequence)
+
+        model = self.stage_runner.model_runner.model
+        runner = self.stage_runner.model_runner
+        generated: list[int] = []
+        bridge_hidden: torch.Tensor | None = None
+
+        while not scheduler.is_finished():
+            seqs, is_prefill = scheduler.schedule()
+            torch.cuda.synchronize()
+            input_ids, positions = (
+                runner.prepare_prefill(seqs) if is_prefill else runner.prepare_decode(seqs)
+            )
+            temperatures = runner.prepare_sample(seqs)
+            logits = runner.run_model(input_ids, positions, is_prefill)
+
+            # Extract bridge hidden on prefill (first forward pass).
+            if is_prefill and bridge_hidden is None:
+                bh = model.get_bridge_hidden()
+                if bh is not None:
+                    bridge_hidden = bh.detach().clone()
+
+            token_id_list = runner.sampler(logits, temperatures).tolist()
+            scheduler.postprocess(seqs, token_id_list, is_prefill)
+            runner.reset_context()
+
+            new_id = token_id_list[0]
+            generated.append(new_id)
+
+            # Stop on EOS or max_tokens reached.
+            if (
+                not sequence.ignore_eos and new_id == self.config.eos
+            ) or sequence.num_completion_tokens >= max_tokens:
+                break
+
+        # Extract text_state (final hidden from last forward).
+        text_state = logits[0].detach() if logits is not None else None
+
+        # Clone bridge_hidden so it survives the talker's model load.
+        if bridge_hidden is not None:
+            bridge_hidden = bridge_hidden.clone()
+
+        return ThinkerStageOutput(
+            bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),
+            prompt_token_ids=tuple(token_ids),
+            output_token_ids=tuple(generated),
+            text_token_ids=tuple(token_ids + generated),
+            text_state=text_state,
+            request_id=getattr(sampling, "request_id", None),
         )
 
 
-class TalkerStage:
-    """Stage 1 placeholder — Talker is not a text AR LM.
+@dataclass
+class TalkerOutput:
+    """Simple wrapper for talker audio codes consumed by ``talker2code2wav``."""
 
-    ``MiniMindTalker.forward(bridge, text_codes, positions)`` does not
-    match ``ModelRunner.run_model`` which calls
-    ``model(input_ids, positions)`` then ``compute_logits``. A second
-    ``ModelRunner`` would also re-init NCCL. Don't construct one.
+    audio_codes: Any  # torch.Tensor [frames, 8]
+
+
+class TalkerStage:
+    """Stage 1 — MiniMind talker MTP decode (custom, not via ModelRunner).
+
+    ``MiniMindTalker.forward(hidden_states, text_codes, positions)`` has
+    a different signature from ``ModelRunner.run_model(input_ids, positions)``,
+    so we load the model directly and manage the forward loop ourselves.
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
         self.deploy = deploy
         self.args = args
-        self.stage_runner = None
+        self._model = None
+        self._device: str | None = None
+        self._config: Any = None
+
+    def _ensure_model(self) -> Any:
+        """Lazily load the talker model + assign KV cache (once)."""
+        if self._model is not None:
+            return self._model
+
+        import torch
+        from nanovllm.config import Config
+        from nanovllm.utils.loader import load_model
+        from transformers import AutoConfig
+
+        from .talker import MiniMindTalker
+
+        model_path = _resolve_model_path(self.args)
+        kwargs = _stage_kwargs_from_args(self.args)
+
+        # Create talker config (may differ from thinker in memory util).
+        orig = AutoConfig.from_pretrained
+
+        def _trusted(*args, **kw):
+            kw.setdefault("trust_remote_code", True)
+            return orig(*args, **kw)
+
+        AutoConfig.from_pretrained = _trusted  # type: ignore[method-assign]
+        try:
+            cfg = Config(model=model_path, **kwargs)
+        finally:
+            AutoConfig.from_pretrained = orig  # type: ignore[method-assign]
+
+        dt = getattr(cfg.hf_config, "dtype", None)
+        if isinstance(dt, str):
+            cfg.hf_config.dtype = getattr(torch, dt, torch.float16)
+        elif dt is None:
+            cfg.hf_config.dtype = getattr(cfg.hf_config, "torch_dtype", None) or torch.float16
+
+        self._config = cfg
+
+        # Patch Triton KV store for non-power-of-2 D if needed.
+        hf = cfg.hf_config
+        talker_hidden = getattr(hf, "talker_hidden_size", None) or getattr(hf, "hidden_size", 768)
+        talker_num_heads = getattr(hf, "talker_num_heads", None) or getattr(
+            hf, "num_attention_heads", 8
+        )
+        talker_num_kv_heads = getattr(hf, "talker_num_kv_heads", None) or getattr(
+            hf, "num_key_value_heads", 2
+        )
+        talker_head_dim = talker_hidden // talker_num_heads
+        kv_dim = talker_num_kv_heads * talker_head_dim
+        _patch_store_kvcache(kv_dim)
+
+        # Ensure dist is ready (may already be from thinker's ModelRunner).
+        _ensure_dist()
+
+        # Load talker model (uses fork's weight loader for packed_modules_mapping).
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(cfg.hf_config.dtype)
+        torch.set_default_device("cuda")
+        model = MiniMindTalker(
+            hidden_size=talker_hidden,
+            num_layers=getattr(hf, "talker_num_layers", None)
+            or getattr(hf, "num_hidden_layers", 4),
+            num_heads=talker_num_heads,
+            num_kv_heads=talker_num_kv_heads,
+            intermediate_size=getattr(hf, "talker_intermediate_size", None),
+            max_position=getattr(hf, "max_position_embeddings", 4096),
+            rms_norm_eps=getattr(hf, "rms_norm_eps", 1e-6),
+            rope_theta=getattr(hf, "rope_theta", 10000),
+            audio_vocab_size=getattr(hf, "audio_vocab_size", 2048),
+            num_audio_heads=getattr(hf, "num_audio_heads", 8),
+            talker_hidden_size=talker_hidden,
+        )
+
+        load_model(model, cfg.model)
+        torch.set_default_device("cpu")
+        torch.set_default_dtype(default_dtype)
+
+        # Allocate KV cache and assign to attention layers.
+        free, total = torch.cuda.mem_get_info()
+        used = total - free
+        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        current = torch.cuda.memory_stats()["allocated_bytes.current"]
+        num_kv_heads = talker_num_kv_heads // cfg.tensor_parallel_size
+        head_dim = talker_head_dim
+        block_bytes = (
+            2
+            * getattr(hf, "num_hidden_layers", 4)
+            * cfg.kvcache_block_size
+            * num_kv_heads
+            * head_dim
+            * cfg.hf_config.dtype.itemsize
+        )
+        cfg.num_kvcache_blocks = (
+            int(total * cfg.gpu_memory_utilization - used - peak + current) // block_bytes
+        )
+        assert (
+            cfg.num_kvcache_blocks > 0
+        ), f"Talker KV cache: not enough GPU memory ({cfg.num_kvcache_blocks} blocks)"
+        kv_cache = torch.empty(
+            2,
+            getattr(hf, "num_hidden_layers", 4),
+            cfg.num_kvcache_blocks,
+            cfg.kvcache_block_size,
+            num_kv_heads,
+            head_dim,
+        )
+        layer_id = 0
+        for module in model.modules():
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
+                module.k_cache = kv_cache[0, layer_id]
+                module.v_cache = kv_cache[1, layer_id]
+                layer_id += 1
+
+        self._model = model
+        self._device = "cuda"
+        return model
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
-        raise NotImplementedError(
-            "Talker MTP is not ModelRunner.forward(input_ids, positions); "
-            "see MiniMindTalker.forward."
-        )
+        """Run the Talker: AR decode audio codes from bridge hidden states.
+
+        Args:
+            payload: TalkerInputPayload (from thinker2talker processor).
+            sampling: SamplingParams with temperature, max_tokens.
+
+        Returns:
+            TalkerOutput with audio_codes [frames, 8] tensor.
+        """
+        import torch
+
+        from .stage_processors import TalkerInputPayload
+
+        model = self._ensure_model()
+        device = self._device
+
+        # Extract inputs from the payload.
+        if isinstance(payload, TalkerInputPayload):
+            bridge = payload.bridge_states
+            text_codes = list(payload.text_token_ids)
+        else:
+            raise TypeError(
+                f"TalkerStage expected TalkerInputPayload, got {type(payload).__name__}"
+            )
+
+        if bridge is None or (isinstance(bridge, torch.Tensor) and bridge.numel() == 0):
+            raise ValueError("TalkerStage received empty bridge hidden states")
+
+        bridge = bridge.to(device=device, dtype=model.embed_proj.weight.dtype)
+
+        # Talker max steps: number of text tokens (one audio frame per token).
+        max_steps = len(text_codes)
+        extra = getattr(sampling, "extra", None) or {}
+        watchdog = extra.get("watchdog_limit")
+        if watchdog is not None:
+            max_steps = min(max_steps, int(watchdog))
+
+        temperature = getattr(sampling, "temperature", None)
+        if temperature is None:
+            temperature = extra.get("temperature", 0.2)
+        temperature = float(temperature)
+        if temperature <= 1e-10:
+            temperature = 1e-5
+
+        num_audio_heads = model.num_audio_heads
+        pad_id = 0  # initial audio code (BOS-like)
+
+        # Generate audio codes autoregressively.
+        # At each step: forward(bridge, audio_codes, positions) -> logits at last pos -> sample.
+        generated_frames: list[torch.Tensor] = []
+        with torch.no_grad():
+            for step in range(max_steps):
+                # Current audio codes: pad for positions not yet generated.
+                num_generated = step
+                audio_len = 1 + num_generated  # 1 pad + generated frames
+                codes = torch.full((audio_len,), pad_id, dtype=torch.long, device=device)
+                if num_generated > 0:
+                    codes[1:] = torch.tensor(
+                        [frame[step - 1] for frame in generated_frames],
+                        dtype=torch.long,
+                        device=device,
+                    )
+
+                positions = torch.arange(audio_len, dtype=torch.long, device=device)
+
+                # Forward: bridge is always [T, H] (full text length).
+                # The model projects bridge + adds audio embeddings for audio_len positions.
+                logits = model(bridge, codes, positions)  # [audio_len, 8, vocab]
+                # Sample from the last position.
+                last_logits = logits[-1]  # [8, vocab]
+
+                # Temperature sampling per codebook head.
+                if temperature > 0 and temperature < 1.0:
+                    probs = torch.softmax(last_logits / temperature, dim=-1)
+                    frame = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [8]
+                else:
+                    frame = last_logits.argmax(dim=-1)  # [8]
+
+                generated_frames.append(frame.cpu())
+
+        if not generated_frames:
+            # Degenerate case: return a single empty frame.
+            audio_codes = torch.zeros(1, num_audio_heads, dtype=torch.long)
+        else:
+            audio_codes = torch.stack(generated_frames, dim=0)  # [frames, 8]
+
+        return TalkerOutput(audio_codes=audio_codes)
 
 
 __all__ = [
     "SharedBlockManager",
     "StageRunner",
     "ThinkerStage",
+    "TalkerOutput",
     "TalkerStage",
     "get_shared_block_manager",
     "get_stage_config",

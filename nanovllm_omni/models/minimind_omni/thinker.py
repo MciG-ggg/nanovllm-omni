@@ -1,451 +1,213 @@
 """MiniMind-O thinker stage.
 
-Owns the ``_thinker_stage`` factory, the ``generate_audio`` end-to-end
-wrapper, and its ``tokenize_for_generate`` / ``run_generate`` helpers.
-Public symbols: ``_thinker_stage``, ``generate_audio``, ``run_generate``,
-``tokenize_for_generate``.
+Owns the ``ThinkerAttention``, ``ThinkerBlock``, and ``MiniMindThinker``
+model components using fork layers (``nanovllm.layers.*``).
+
+Public symbols: ``MiniMindThinker``, ``_thinker_stage``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+import math
 
-from nanovllm_omni.outputs import AudioPayload
+import torch
+from torch import nn
+import torch.distributed as dist
 
-from ._stage import stage
-from .bundle import MIMI_SAMPLE_RATE, MinimindBundle, load_minimind_omni_bundle
+from nanovllm.layers.activation import SiluAndMul
+from nanovllm.layers.attention import Attention
+from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
+from nanovllm.layers.layernorm import RMSNorm
+from nanovllm.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from nanovllm.layers.rotary_embedding import get_rope
 
 
-def _thinker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: runs the bridge-capturing thinker for the talker.
+class ThinkerAttention(nn.Module):
+    """Multi-head attention with paged KV cache (via fork's Attention)."""
 
-    Emits a ``ThinkerStageOutput`` carrying bridge hidden states + text span
-    that ``thinker2talker`` converts for the talker stage.
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096,
+        head_dim: int | None = None,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000,
+    ) -> None:
+        super().__init__()
+        tp_size = dist.get_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        assert self.total_num_kv_heads % tp_size == 0
+        self.num_kv_heads = self.total_num_kv_heads // tp_size
+        self.head_dim = head_dim or hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim ** -0.5
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size, self.head_dim,
+            self.total_num_heads, self.total_num_kv_heads, bias=False,
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim, hidden_size, bias=False,
+        )
+        self.rotary_emb = get_rope(
+            self.head_dim, rotary_dim=self.head_dim,
+            max_position=max_position, base=rope_theta,
+        )
+        self.attn = Attention(
+            self.num_heads, self.head_dim, self.scaling, self.num_kv_heads,
+        )
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(-1, self.num_heads, self.head_dim)
+        k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+        v = v.reshape(-1, self.num_kv_heads, self.head_dim)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        q, k = self.rotary_emb(positions, q, k)
+        o = self.attn(q, k, v)
+        return self.o_proj(o.flatten(1, -1))
+
+
+class ThinkerMLP(nn.Module):
+    """SwiGLU MLP with fused gate+up projection."""
+
+    def __init__(self, hidden_size: int, intermediate_size: int) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2, bias=False,
+        )
+        self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(self.act_fn(self.gate_up_proj(x)))
+
+
+class ThinkerBlock(nn.Module):
+    """Pre-norm transformer block."""
+
+    def __init__(
+        self, hidden_size: int, num_heads: int, num_kv_heads: int,
+        intermediate_size: int, max_position: int = 4096,
+        head_dim: int | None = None, rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000,
+    ) -> None:
+        super().__init__()
+        self.self_attn = ThinkerAttention(
+            hidden_size, num_heads, num_kv_heads, max_position,
+            head_dim, rms_norm_eps, rope_theta,
+        )
+        self.mlp = ThinkerMLP(hidden_size, intermediate_size)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+
+    def forward(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+
+class MiniMindThinker(nn.Module):
+    """MiniMind thinker stage using fork layers.
+
+    Produces text logits for AR decoding and exposes bridge hidden states
+    for the talker stage.  No vendor code, no host reads, CUDA-graph safe.
+
+    ``packed_modules_mapping`` enables HF weight loading via the fork's
+    weight loader mechanism.
     """
-    extra_args = dict(getattr(args, "extra", None) or {})
-    mimi_model_id = extra_args.pop("mimi_model_id", None) or extra_args.pop("mimi", None)
-    provided_bundle = extra_args.pop("bundle", None)
-    bundle_kwargs: dict[str, Any] = {
-        "trust_remote_code": getattr(args, "trust_remote_code", True),
-        "dtype": getattr(args, "dtype", None),
+
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
     }
-    if mimi_model_id:
-        bundle_kwargs["mimi_model_id"] = mimi_model_id
-    # ``extra["bundle"]`` lets offline tests / bench harnesses inject a
-    # prebuilt bundle so the factory never touches the network.
-    bundle = (
-        provided_bundle
-        if provided_bundle is not None
-        else load_minimind_omni_bundle(model_id=args.model, device=args.device, **bundle_kwargs)
-    )
-    if bundle is not None:
-        bundle.use_thinker_cuda_graph = bool(getattr(deploy, "use_thinker_cuda_graph", True))
 
-    return _full_thinker_stage(bundle, deploy)
+    def __init__(
+        self,
+        vocab_size: int = 6400,
+        hidden_size: int = 768,
+        num_layers: int = 8,
+        num_heads: int = 8,
+        num_kv_heads: int = 2,
+        intermediate_size: int | None = None,
+        max_position: int = 4096,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000,
+        bridge_layer: int = 3,
+        audio_vocab_size: int = 2048,
+        num_audio_heads: int = 8,
+    ) -> None:
+        super().__init__()
+        if intermediate_size is None:
+            intermediate_size = math.ceil(hidden_size * 8 / 3 / 256) * 256
+        self.bridge_layer = bridge_layer
+        self.num_audio_heads = num_audio_heads
+        self.audio_vocab_size = audio_vocab_size
 
-
-def _full_thinker_stage(bundle: Any, deploy: Any) -> Any:
-    """Full-mode stage 0: emit a ``ThinkerStageOutput`` with bridge states.
-
-    Runs the bridge-capturing generation with the deploy layer's post-EOS
-    sequence and internal-stop token, then hands the aligned bridge +
-    token ids to ``thinker2talker``. The thinker does NOT decode audio
-    here -- that is the code2wav stage's job.
-    """
-    post_eos_padding_count = int(getattr(deploy, "post_eos_padding_count", 128) or 0)
-    internal_stop_token_id = getattr(deploy, "internal_stop_token_id", None)
-
-    def thinker_forward_full(payload: Any, sampling: Any) -> Any:
-        import uuid
-
-        import torch
-
-        from .stage_processors import ThinkerStageOutput
-
-        if isinstance(payload, str):
-            prompt = payload
-        elif isinstance(payload, dict):
-            prompt = payload.get("prompt", "")
-        else:
-            prompt = str(payload)
-        extra = (
-            dict(getattr(sampling, "extra", None) or {})
-            if sampling is not None and hasattr(sampling, "extra")
-            else {}
-        )
-        if extra.get("audio") is not None:
-            raise NotImplementedError(
-                "MiniMind full pipeline is text-to-audio only; audio input "
-                "(ASR) is not supported on the three-stage path."
+        self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
+        self.layers = nn.ModuleList([
+            ThinkerBlock(
+                hidden_size, num_heads, num_kv_heads, intermediate_size,
+                max_position, None, rms_norm_eps, rope_theta,
             )
-        eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
-        audio_special_token = getattr(
-            getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
-        )
-        request_id = f"mmo-full-{uuid.uuid4().hex[:12]}"
-        # ``use_thinker_cuda_graph`` is attached to the bundle by the
-        # stage factory from ``deploy.use_thinker_cuda_graph`` (see
-        # ``_thinker_stage``). When True, route through ``run_generate``
-        # so the graph decoder's main decode engages on GPU, including the
-        # post-EOS state machine. When False, run ``stream_generate`` directly
-        # (the historical eager path).
-        use_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
-        with torch.no_grad():
-            input_ids = tokenize_for_generate(
-                bundle.tokenizer,
-                prompt,
-                bool(extra.get("open_thinking", False)),
-                audio_special_token=audio_special_token,
-            ).to(bundle.device)
-            captured_bridge: list[torch.Tensor] = []
-            output_tokens: list[int] = []
-            if use_graph:
-                # Graph path: ``run_generate`` owns the complete decode,
-                # including enter/PAD/internal-stop post-EOS handling.
-                frames = run_generate(
-                    bundle.model,
-                    input_ids,
-                    eos_token_id=eos_token_id,
-                    max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
-                    temperature=float(sampling.temperature) if sampling is not None else 0.7,
-                    top_p=float(sampling.top_p) if sampling is not None else 0.9,
-                    open_thinking=bool(extra.get("open_thinking", False)),
-                    use_thinker_cuda_graph=True,
-                    capture_bridge_states=True,
-                    bridge_state_callback=captured_bridge.append,
-                    text_token_callback=lambda tokens: output_tokens.__setitem__(
-                        slice(None), tokens
-                    ),
-                    post_eos_padding_count=post_eos_padding_count,
-                    internal_stop_token_id=internal_stop_token_id,
-                )
-                # Frames are not consumed by full mode (talker drives audio);
-                # consume the generator's return so the stream fully drains.
-                del frames
-            else:
-                # Eager path: ``stream_generate`` yields (text, audio) per
-                # step. The original code rebuilt the whole Python int list
-                # (and forced a host sync) every iteration; defer the
-                # single ``detach().cpu().tolist()`` until after the stream
-                # so the per-step host sync disappears. Audio numerics are
-                # unchanged because the final prefix is identical to the
-                # last yielded ``text_chunk``.
-                from .generation import stream_generate
+            for _ in range(num_layers)
+        ])
+        self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.lm_head = ParallelLMHead(vocab_size, hidden_size)
+        self.audio_head = nn.Linear(hidden_size, num_audio_heads * audio_vocab_size, bias=False)
+        self._bridge_hidden: torch.Tensor | None = None
 
-                stream = stream_generate(
-                    bundle.model,
-                    input_ids,
-                    eos_token_id=eos_token_id,
-                    max_new_tokens=int(sampling.max_tokens) if sampling is not None else 512,
-                    temperature=float(sampling.temperature) if sampling is not None else 0.7,
-                    top_p=float(sampling.top_p) if sampling is not None else 0.9,
-                    open_thinking=bool(extra.get("open_thinking", False)),
-                    capture_bridge_states=True,
-                    bridge_state_callback=captured_bridge.append,
-                    post_eos_padding_count=post_eos_padding_count,
-                    internal_stop_token_id=internal_stop_token_id,
-                )
-                final_text_chunk: Any = None
-                for text_chunk, _audio_frame in stream:
-                    if text_chunk is not None:
-                        final_text_chunk = text_chunk
-                if final_text_chunk is not None:
-                    output_tokens = [
-                        int(token) for token in final_text_chunk.detach().cpu().reshape(-1).tolist()
-                    ]
-        bridge = (
-            captured_bridge[0]
-            if captured_bridge and captured_bridge[0].numel() > 0
-            else torch.empty(0, 0, dtype=torch.float32)
-        )
-        prompt_ids = (
-            input_ids[0].detach().cpu().tolist() if input_ids.ndim == 2 else list(input_ids)
-        )
-        # Bridge-aligned span: prompt + output[1:] -- the runner predicts
-        # the first output token at prefill, so the talker only decodes
-        # the remaining tokens and the span length matches the bridge rows.
-        aligned_text = prompt_ids + (output_tokens[1:] if len(output_tokens) > 1 else [])
-        return ThinkerStageOutput(
-            bridge_states=bridge,
-            prompt_token_ids=prompt_ids,
-            output_token_ids=output_tokens,
-            text_token_ids=aligned_text,
-            input_ids=input_ids,
-            request_id=request_id,
-            metadata={
-                "pipeline_kind": "full",
-                "post_eos_padding_count": post_eos_padding_count,
-            },
-        )
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """ModelRunner-compatible forward: returns hidden_states."""
+        hidden_states = self.embed_tokens(input_ids)
+        residual = None
+        for i, layer in enumerate(self.layers):
+            hidden_states, residual = layer(positions, hidden_states, residual)
+            if i == self.bridge_layer:
+                self._bridge_hidden = hidden_states
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
-    return thinker_forward_full
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(hidden_states)
+
+    def get_bridge_hidden(self) -> torch.Tensor | None:
+        return self._bridge_hidden
+
+    def get_audio_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.audio_head(hidden_states)
+        return logits.view(-1, self.num_audio_heads, self.audio_vocab_size)
 
 
-def tokenize_for_generate(
-    tokenizer: Any,
-    prompt: str,
-    open_thinking: bool,
-    *,
-    messages: list[dict[str, str]] | None = None,
-    audio_markers: int = 0,
-    audio_special_token: str = "<|audio_pad|>",
-) -> Any:
-    """Apply the chat template and produce a 1xT ``input_ids`` tensor.
+# ---------------------------------------------------------------------------
+#  Stage factory stubs (called by pipeline.py via dotted-path resolution)
+# ---------------------------------------------------------------------------
 
-    Labeled ``tokenize`` for the benchmark harness; pure CPU, no model call.
-
-    ``messages`` is an optional pre-built chat messages list (system +
-    user, etc.). When omitted, the helper wraps ``prompt`` as a single
-    user message -- the same path that ``generate_audio`` uses for the
-    MiniMind-O single-prompt API.
-
-    ``audio_markers`` prepends that many ``<|audio_pad|>`` tokens to the user
-    content; the model's ``inject_audio_features`` replaces those positions
-    with audio embeddings at prefill (engine-native audio input).
-    """
-    import torch
-
-    with stage("tokenize"):
-        if messages is None:
-            content = audio_special_token * audio_markers if audio_markers else ""
-            if prompt:
-                content = (content + "\n" if content else "") + prompt
-            messages = [{"role": "user", "content": content}]
-        try:
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                open_thinking=open_thinking,
-            )
-        except TypeError:
-            text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        # Device is supplied by the caller in the generate_audio path; the
-        # helper itself stays device-agnostic so unit tests can stub it.
-        return torch.tensor(
-            tokenizer(text).data["input_ids"],
-            dtype=torch.long,
-        )[None, ...]
-
-
-def run_generate(
-    model: Any,
-    input_ids: Any,
-    *,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    eos_token_id: Any | None,
-    open_thinking: bool,
-    audio_inputs: Any = None,
-    audio_lens: Any = None,
-    use_thinker_cuda_graph: bool = False,
-    seed: int | None = None,
-    capture_bridge_states: bool = False,
-    bridge_state_callback: Callable[[Any], None] | None = None,
-    text_token_callback: Callable[[list[int]], None] | None = None,
-    post_eos_padding_count: int = 0,
-    internal_stop_token_id: int | None = None,
-    graph_backend: str = "paged",
-) -> list[list[int]]:
-    """Stream ``model.generate`` and collect Mimi codebook frames.
-
-    Returns a list of 8-token frames (one per yielded audio chunk) that the
-    codec stage consumes. Labeled ``generate`` for the benchmark harness.
-    ``audio_inputs`` / ``audio_lens`` (when set) ride through to the batched
-    runner's prefill so the thinker sees user speech (engine-native audio in).
-
-    ``use_thinker_cuda_graph=True`` (opt-in, default off) routes text+audio decode
-    through a CUDA-Graph decoder. Default ``graph_backend="paged"`` is the
-    single-graph paged path; ``graph_backend="perpos"`` keeps the legacy
-    per-position decoder for the three-cell bench. Falls back to eager
-    ``stream_generate`` when CUDA is unavailable or the model isn't
-    capture-compatible.
-
-    ``seed`` (default None) controls the sampling RNG for the CUDA-Graph
-    path; when None, ``torch.initial_seed()`` is used (same determinism
-    contract as the eager path).
-
-    ``capture_bridge_states`` and ``bridge_state_callback`` expose the
-    bridge seam used by the talker stage. The CUDA Graph path returns graph-owned
-    bridge states when requested. ``text_token_callback`` receives all decoded
-    text tokens for the full pipeline's talker alignment.
-    """
-    import torch
-
-    with stage("generate"):
-        frames: list[list[int]] = []
-        # Graph fast path: joint text+audio decode, frames = transpose of
-        # the 8 audio channels (Mimi codebook frames, codec-stage format).
-        # ``audio_stop_token`` falls back to ``model.audio_stop_token``
-        # inside ``enable_cuda_graph``.
-        #
-        # The graph decoder implements the eager post-EOS state machine
-        # (enter, bounded PAD tail, internal-stop), so full mode never
-        # discards graph work and restarts prefill/decode eagerly.
-        if use_thinker_cuda_graph and all(
-            hasattr(model, name)
-            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
-        ):
-            from nanovllm_omni.models.minimind_omni.cuda_graph import enable_cuda_graph
-            from nanovllm_omni.models.minimind_omni.paged_cuda_graph import enable_paged_cuda_graph
-
-            graph_decoder = None
-            if graph_backend != "perpos" and hasattr(
-                getattr(model, "config", None), "audio_pad_token"
-            ):
-                graph_decoder = enable_paged_cuda_graph(
-                    model, n_steps=max_new_tokens, eos_token_id=eos_token_id
-                )
-            if graph_decoder is None:
-                graph_decoder = enable_cuda_graph(
-                    model, n_steps=max_new_tokens, eos_token_id=eos_token_id
-                )
-            if graph_decoder is not None:
-                graph_decoder.temperature = temperature
-                graph_decoder.top_p = top_p
-                call_seed = seed if seed is not None else int(torch.initial_seed())
-                result = graph_decoder.generate_tokens(
-                    input_ids,
-                    seed=call_seed,
-                    return_audio=True,
-                    return_bridge=capture_bridge_states,
-                    post_eos_padding_count=post_eos_padding_count,
-                    internal_stop_token_id=internal_stop_token_id,
-                )
-                if capture_bridge_states:
-                    graph_text_tokens, graph_audio_codes, graph_bridge = result
-                else:
-                    graph_text_tokens, graph_audio_codes = result
-                if capture_bridge_states and bridge_state_callback is not None:
-                    bridge_state_callback(graph_bridge)
-                if text_token_callback is not None:
-                    text_token_callback(graph_text_tokens)
-                if graph_audio_codes is not None:
-                    num_frames = len(graph_audio_codes[0])
-                    frames = [
-                        [graph_audio_codes[ch][t] for ch in range(8)] for t in range(num_frames)
-                    ]
-                return frames
-        if all(
-            hasattr(model, name)
-            for name in ("forward", "audio_pad_token", "audio_stop_token", "audio_spk_token")
-        ):
-            from .generation import stream_generate
-
-            stream = stream_generate(
-                model,
-                input_ids,
-                eos_token_id=eos_token_id,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                use_cache=True,
-                return_audio_codes=True,
-                open_thinking=open_thinking,
-                audio_inputs=audio_inputs,
-                audio_lens=audio_lens,
-                capture_bridge_states=capture_bridge_states,
-                bridge_state_callback=bridge_state_callback,
-                post_eos_padding_count=post_eos_padding_count,
-                internal_stop_token_id=internal_stop_token_id,
-            )
-        else:
-            # Lightweight/test doubles path; kept for the public seam.
-            stream = model.generate(
-                input_ids,
-                eos_token_id,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stream=True,
-                return_audio_codes=True,
-                open_thinking=open_thinking,
-            )
-        text_tokens: list[int] = []
-        for text_ids, audio_frame in stream:
-            # ``generate.step`` shows up as a sub-event of ``generate`` in the
-            # Kineto trace so per-iteration cost is visible in chrome://tracing.
-            with stage("generate.step"):
-                if text_ids is not None:
-                    if hasattr(text_ids, "detach"):
-                        text_ids = text_ids.detach().cpu().reshape(-1).tolist()
-                    text_tokens = [int(token) for token in text_ids]
-                if audio_frame and len(audio_frame) == 8:
-                    frames.append(audio_frame)
-        if text_token_callback is not None:
-            text_token_callback(text_tokens)
-        return frames
-
-
-def generate_audio(
-    bundle: MinimindBundle,
-    prompt: str,
-    *,
-    max_tokens: int = 16,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
-    open_thinking: bool = False,
-    audio_inputs: Any = None,
-    audio_lens: Any = None,
-    audio_markers: int = 0,
-    use_thinker_cuda_graph: bool | None = None,
-) -> AudioPayload:
-    """Run MiniMind-O stream generate and Mimi-decode to ``AudioPayload``.
-
-    Public entry point used by both the Omni entrypoint and the bench
-    harness. The four helper calls happen inside a single ``no_grad`` block
-    so CUDA memory peaks are not doubled by intermediate allocations.
-
-    ``use_thinker_cuda_graph`` (default None) routes decode through the CUDA-Graph
-    fixed-KV-buffer decoder. None resolves from ``bundle.use_thinker_cuda_graph``
-    (set by the deploy layer, deploy/minimind_omni.yaml), else False.
-    """
-    import torch
-
-    if use_thinker_cuda_graph is None:
-        use_thinker_cuda_graph = bool(getattr(bundle, "use_thinker_cuda_graph", False))
-
-    from .code2wav import decode_audio, encode_wav
-
-    eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
-    audio_special_token = getattr(
-        getattr(bundle.model, "config", None), "audio_special_token", "<|audio_pad|>"
-    )
-    with torch.no_grad():
-        input_ids = tokenize_for_generate(
-            bundle.tokenizer,
-            prompt,
-            open_thinking,
-            audio_markers=audio_markers,
-            audio_special_token=audio_special_token,
-        ).to(bundle.device)
-        frames = run_generate(
-            bundle.model,
-            input_ids,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            eos_token_id=eos_token_id,
-            open_thinking=open_thinking,
-            audio_inputs=audio_inputs,
-            audio_lens=audio_lens,
-            use_thinker_cuda_graph=use_thinker_cuda_graph,
-        )
-        if not frames:
-            return AudioPayload(data=b"", sample_rate=MIMI_SAMPLE_RATE)
-        samples = decode_audio(bundle.mimi, frames, bundle.device)
-        wav_bytes = encode_wav(samples, sample_rate=MIMI_SAMPLE_RATE)
-
-    return AudioPayload(data=wav_bytes, sample_rate=MIMI_SAMPLE_RATE)
-
-
-__all__ = [
-    "_thinker_stage",
-    "generate_audio",
-    "run_generate",
-    "tokenize_for_generate",
-]
+def _thinker_stage(deploy: object, args: object) -> object:
+    """Stage 0 factory — placeholder, will be wired to fork ModelRunner."""
+    raise NotImplementedError("Thinker stage not yet wired to fork ModelRunner")

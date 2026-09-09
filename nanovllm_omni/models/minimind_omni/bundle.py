@@ -125,25 +125,6 @@ def load_minimind_omni_bundle(
     mimi = mimi.to(device)
     model.mimi_model = mimi
 
-    # Wrap the vendored HF ``TalkerModule`` into our LLM_AR-shaped class.
-    # ``bundle.model.talker`` still exposes the raw module. A temporary
-    # bundle avoids a recursive dataclass cycle on ``bundle.model.config``.
-    talker_wrapped = None
-    if getattr(model, "talker", None) is not None:
-        from .talker import wrap_talker
-
-        talker_wrapped = wrap_talker(
-            MinimindBundle(
-                model=model,
-                tokenizer=tokenizer,
-                mimi=mimi,
-                device=device,
-                model_id=model_id,
-                thinker=model,
-                talker=getattr(model, "talker", None),
-                code2wav=mimi,
-            )
-        )
     return MinimindBundle(
         model=model,
         tokenizer=tokenizer,
@@ -151,7 +132,7 @@ def load_minimind_omni_bundle(
         device=device,
         model_id=model_id,
         thinker=model,
-        talker=talker_wrapped,
+        talker=getattr(model, "talker", None),
         code2wav=mimi,
     )
 

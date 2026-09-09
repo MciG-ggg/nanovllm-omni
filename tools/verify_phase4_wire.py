@@ -93,7 +93,7 @@ def _thinker_only_dir(src: str) -> str:
     if not src_st:
         raise FileNotFoundError(f"no safetensors in {src}")
     with safe_open(src_st[0], framework="pt", device="cpu") as f:
-        for k in f:
+        for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
             name = k[6:] if k.startswith("model.") else k
             if not name.startswith(keep_prefix):
                 continue

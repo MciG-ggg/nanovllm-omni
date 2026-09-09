@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nanovllm_omni.engine.stage_runner import (
+    SharedBlockManager,
     StageRunner,
     _ensure_dist,
     get_shared_block_manager,
@@ -596,4 +597,9 @@ __all__ = [
     "ThinkerStage",
     "TalkerOutput",
     "TalkerStage",
+    # Re-exported from engine.stage_runner for backward compat
+    "SharedBlockManager",
+    "StageRunner",
+    "get_shared_block_manager",
+    "get_stage_config",
 ]

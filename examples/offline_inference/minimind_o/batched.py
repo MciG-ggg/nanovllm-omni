@@ -29,7 +29,7 @@ import argparse
 from pathlib import Path
 
 from nanovllm_omni.models.minimind_omni.batched_runner import run_batched_generate
-from nanovllm_omni.models.minimind_omni.bundle import create_bundle
+from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle as create_bundle
 
 
 def _wav_bytes(payload) -> bytes:

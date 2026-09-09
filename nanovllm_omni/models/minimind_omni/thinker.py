@@ -218,6 +218,20 @@ class MiniMindThinker(nn.Module):
         self.audio_head = nn.Linear(
             hidden_size, self.num_audio_heads * self.audio_vocab_size, bias=False
         )
+        # Bridge hidden is stored as a plain Python attribute because the
+        # alternative — a registered buffer updated by
+        # ``buffer[:n] = hidden_states`` inside forward — doesn't survive
+        # CUDA-graph replay cleanly: the captured slice-assign fixes ``n``
+        # at capture time, and per-bs graphs only help when replay bs
+        # equals capture bs for every step. The captured buffer also
+        # keeps stale rows beyond ``n``.
+        #
+        # The robust path is to set ``Config.enforce_eager=True`` for the
+        # thinker stage so forward runs Python line-by-line and this
+        # attribute assignment actually executes each step. The
+        # enforcement lives in the thinker's stage kwargs; here we
+        # just make sure the attribute is in place when eager forward
+        # finishes.
         self._bridge_hidden: torch.Tensor | None = None
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

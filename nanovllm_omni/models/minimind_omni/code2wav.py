@@ -11,8 +11,8 @@ import wave
 from typing import Any
 
 from nanovllm_omni.outputs import AudioPayload
+from nanovllm_omni.utils.profiling import profile_range as stage
 
-from ._stage import stage
 from .bundle import (
     DEFAULT_MIMI_MODEL_ID,
     MIMI_CODE_VOCAB_LIMIT,

@@ -10,10 +10,11 @@ that together predict the 8 audio codebook channels frame by frame.
 
 Public symbols: ``MiniMindTalker``, ``_talker_stage``.
 
-ponytail: matches vendor 1:1; no speculative generalisation. The eager
-SDPA attention class is local so we don't pull fork's paged-attention
-path into a model whose forward shape is fixed (full sequence each
-step).
+ponytail: matches vendor 1:1 for the prep + body + lm_head shape; the
+attention layer delegates to fork's paged ``Attention`` so the
+``store_kvcache`` Triton kernel handles the talker's
+``D = num_kv_heads * head_dim = 192`` (not a power of two — the
+kernel now pads to next-pow2 internally via ``D_PAD``).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 from nanovllm.layers.activation import SiluAndMul
+from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import (
     MergedColumnParallelLinear,
@@ -29,7 +31,6 @@ from nanovllm.layers.linear import (
 )
 from nanovllm.layers.rotary_embedding import get_rope
 from torch import nn
-from torch.nn import functional
 
 # ---------------------------------------------------------------------------
 # Vendor TalkerHead / TalkerEmbedding (verbatim shape, name-for-name).
@@ -98,7 +99,7 @@ class TalkerEmbedding(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         base_out = self.base(x)
         return (
             sum(base_out[:, i, :] + self.adapters[i](x[:, i, :]) for i in range(self.num_layers))
@@ -107,38 +108,8 @@ class TalkerEmbedding(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Inner transformer block (uses fork layers; no paged KV cache).
+# Inner transformer block (uses fork's paged ``Attention``).
 # ---------------------------------------------------------------------------
-
-
-class _EagerAttention(nn.Module):
-    """SDPA attention — eager full-sequence path.
-
-    Fork's ``Attention`` reads the module-level ``Context`` to pick
-    between paged prefill / paged decode. The talker runs the full
-    sequence each step (no KV cache), so we bypass that machinery
-    and use ``F.scaled_dot_product_attention`` directly.
-    """
-
-    def __init__(self, num_heads: int, head_dim: int, scale: float, num_kv_heads: int) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.scale = scale
-
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        n = q.shape[0]
-        # GQA: replicate k/v to match num_heads when num_kv_heads != num_heads.
-        if self.num_kv_heads != self.num_heads:
-            repeat = self.num_heads // self.num_kv_heads
-            k = k.repeat_interleave(repeat, dim=1)
-            v = v.repeat_interleave(repeat, dim=1)
-        # SDPA signature is [B, H, N, D]; treat the whole batch as B=1.
-        q = q.transpose(0, 1).unsqueeze(0)
-        k = k.transpose(0, 1).unsqueeze(0)
-        v = v.transpose(0, 1).unsqueeze(0)
-        o = functional.scaled_dot_product_attention(q, k, v, scale=self.scale, is_causal=True)
-        return o.squeeze(0).transpose(0, 1).reshape(n, self.num_heads * q.shape[-1])
 
 
 class TalkerAttention(nn.Module):
@@ -174,7 +145,12 @@ class TalkerAttention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim, rotary_dim=self.head_dim, max_position=max_position, base=rope_theta
         )
-        self.attn = _EagerAttention(self.num_heads, self.head_dim, self.scaling, self.num_kv_heads)
+        # Fork paged Attention: handles GQA replication, RoPE, paged KV
+        # store, and the prefill/decode kernel split. The local
+        # _EagerAttention that previously wrapped stdlib SDPA is gone;
+        # it skipped the paged path entirely, which forced the talker
+        # off fork's KV-cache machinery and onto a per-step O(T²) loop.
+        self.attn = Attention(self.num_heads, self.head_dim, self.scaling, self.num_kv_heads)
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -249,27 +225,23 @@ class MiniMindTalker(nn.Module):
     """Talker: bridge hidden + audio codes → 8 codebook logits per step.
 
     Architecture matches the vendored ``MiniMindOmni.talker``
-    (``TalkerModule`` in ``model_omni.py``).  ``forward`` is eager and
-    runs the full sequence each step — no KV cache.  The vendor uses
-    KV cache for speed; we skip it for code-size parity with the
-    teaching goal.  If the per-step cost becomes painful, swap in a
-    paged cache; the rest of the API stays the same.
+    (``TalkerModule`` in ``model_omni.py``).
 
-    Args:
-        bridge_states: ``[B, T, hidden_size]`` from the thinker
-            ``bridge_layer`` (the thinker's own hidden_size, NOT
-            ``talker_hidden_size``; ``embed_proj`` projects it).
-        audio_codes: ``[B, 8, T]`` — channel ``i`` is the i-th
-            codebook's history. Pad positions (before the model has
-            produced a code) are filled with ``audio_pad_token`` (2049).
-        positions: ``[T]`` absolute RoPE positions.
-        spk_emb: optional ``[B, spk_emb_size]``. When provided, it is
-            inserted at the first position of the sequence (vendor
-            convention; we do not implement the ``audio_spk_token``
-            mask, the caller decides whether to include it).
+    The forward entry has two shapes:
+      - **runner-compatible**: ``forward(input_ids=None, positions=...,
+        inputs_embeds=...)`` returns hidden_states. ``compute_logits``
+        applies the 8-head ``TalkerHead``. This shape is what
+        ``ModelRunner.run_model`` expects when the caller has already
+        done input prep (thinker-style fork usage) or pre-embedded
+        the input (talker-style multimodal prep).
+      - **legacy full path**: ``forward(bridge_states=..., audio_codes=...,
+        positions=..., spk_emb=None)`` does prep + body + lm_head in
+        one call and returns a list of 8 logits tensors. Used by
+        tests and any code that wants the logits directly.
 
-    Returns:
-        list of 8 logits tensors, each ``[B, T, audio_vocab_size]``.
+    Both paths share ``prepare_inputs_embeds`` (the ``embed_proj`` /
+    ``codec_proj`` / ``speaker_proj`` work) and ``body`` (the 4
+    transformer blocks + final norm).
     """
 
     packed_modules_mapping = {
@@ -340,13 +312,71 @@ class MiniMindTalker(nn.Module):
         # ``k_proj`` (which the fork loader maps to ``qkv_proj``).
         self.speaker_proj = nn.Linear(spk_emb_size, talker_hidden, bias=False)
 
+    # ---- Multi-shape forward (runner + legacy) ----
+
     def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **legacy_kwargs,
+    ):
+        """Dispatch by kwarg shape — see class docstring."""
+        if inputs_embeds is not None:
+            # Runner-compatible: prep already happened; just run body
+            # and return hidden_states. ``compute_logits`` is called by
+            # ``ModelRunner.run_model`` next, applying ``TalkerHead``.
+            return self.body(positions, inputs_embeds)
+        if "bridge_states" in legacy_kwargs:
+            # Legacy full path: prep + body + lm_head → list[Tensor]
+            return self._forward_full(
+                bridge_states=legacy_kwargs["bridge_states"],
+                audio_codes=legacy_kwargs.get("audio_codes"),
+                positions=positions,
+                spk_emb=legacy_kwargs.get("spk_emb"),
+            )
+        raise ValueError(
+            "MiniMindTalker.forward requires either ``inputs_embeds`` "
+            "(runner path) or ``bridge_states`` in kwargs (legacy path)."
+        )
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> list[torch.Tensor]:
+        """Apply the 8-head ``TalkerHead``; returns one [N, vocab] tensor per codebook."""
+        return self.lm_head(hidden_states)
+
+    def _forward_full(
         self,
         bridge_states: torch.Tensor,
         audio_codes: torch.Tensor,
         positions: torch.Tensor,
-        spk_emb: torch.Tensor | None = None,
+        spk_emb: torch.Tensor | None,
     ) -> list[torch.Tensor]:
+        """Prep + body + lm_head, returns list of 8 logits tensors."""
+        embeds, positions = self.prepare_inputs_embeds(
+            bridge_states, audio_codes, spk_emb, positions
+        )
+        hidden = self.body(positions, embeds)
+        return self.compute_logits(hidden)
+
+    # ---- Decomposed methods (mirror vllm-omni's preprocess / forward split) ----
+
+    def prepare_inputs_embeds(
+        self,
+        bridge_states: torch.Tensor,
+        audio_codes: torch.Tensor,
+        spk_emb: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run text-side ``embed_proj`` + audio-side ``codec_proj`` + (optional) speaker prefix.
+
+        Returns ``(hidden, positions)``. ``positions`` is shifted by +1
+        when ``spk_emb`` is provided (the speaker token sits at position
+        0; the original positions move to 1..T).
+
+        Caller composes this with :meth:`body` and :meth:`compute_logits`
+        for full control, or just calls :meth:`forward` for the legacy
+        all-in-one path.
+        """
         # Fork layers are 2D-friendly ([N, H]); flatten batch dim so the
         # rms_norm add-residual path broadcasts correctly.
         if bridge_states.dim() == 3:
@@ -363,13 +393,17 @@ class MiniMindTalker(nn.Module):
             if spk_h.dim() == 2:
                 spk_h = spk_h.reshape(-1, spk_h.shape[-1])
             hidden = torch.cat([spk_h, hidden], dim=0)
-            positions = torch.cat([positions.new_zeros(1), positions + 1], dim=0)
+            if positions is not None:
+                positions = torch.cat([positions.new_zeros(1), positions + 1], dim=0)
+        return hidden, positions
 
+    def body(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Run the 4 transformer blocks + final norm, return post-norm hidden."""
         residual = None
         for layer in self.layers:
-            hidden, residual = layer(positions, hidden, residual)
-        hidden, _ = self.norm(hidden, residual)
-        return self.lm_head(hidden)
+            hidden_states, residual = layer(positions, hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +412,7 @@ class MiniMindTalker(nn.Module):
 
 
 def _talker_stage(deploy, args):
-    """Stage 1 factory — loads ``MiniMindTalker`` via fork ``load_model``.
+    """Stage 1 factory — defers heavy model load to ``TalkerStage.__init__``.
 
     The MTP decode loop that consumes ``TalkerInputPayload`` and emits
     audio codes lives in ``TalkerStage.__call__`` (see ``_engine.py``).

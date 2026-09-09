@@ -2,7 +2,7 @@
 
 Wraps :func:`torch.profiler.record_function` and :func:`torch.cuda.nvtx.range`
 under one context manager so that the same code path is visible to the
-``torch.profiler`` Kineto trace **and** to the ``nsys`` NVTX summary.
+``torch.proprof`` Kineto trace **and** to the ``nsys`` NVTX summary.
 
 Both calls are cheap and safe to issue unconditionally: ``record_function``
 is a no-op when no profiler is active and ``nvtx.range`` is a thin wrapper
@@ -10,7 +10,8 @@ around the NVTX C API that is itself cheap when no ``nsys`` collector is
 attached.  Naming is kept identical to the historical ``record_function``
 labels so existing parsers (``parse_kineto_trace``) keep working.
 
-Internal module — model code and benchmarks import :func:`stage` directly.
+ponytail: simple wrapper, no extra knobs until a third caller asks for
+per-range colour or metadata.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def stage(name: str) -> Iterator[None]:
+def profile_range(name: str) -> Iterator[None]:
     """Open a Kineto ``user_annotation`` and an NVTX range of the same name.
 
     The NVTX half is skipped on hosts without a working CUDA build (the
@@ -41,3 +42,6 @@ def stage(name: str) -> Iterator[None]:
                 yield
         else:
             yield
+
+
+__all__ = ["profile_range"]

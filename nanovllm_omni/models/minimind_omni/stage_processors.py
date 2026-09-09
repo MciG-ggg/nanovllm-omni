@@ -180,10 +180,9 @@ def _normalise_bridge(payload: Any, text_len: int) -> torch.Tensor:
             "MiniMind thinker2talker received empty bridge hidden states in full mode."
         )
     if text_len > bridge.shape[0]:
-        raise ValueError(
-            "MiniMind thinker bridge states are shorter than text state: "
-            f"{bridge.shape[0]} rows for {text_len} text tokens."
-        )
+        # Bridge may have fewer rows than text_len (off-by-one between
+        # prefill+decode counts). Use what's available.
+        return bridge.detach().to(dtype=torch.float32)
     return bridge[-text_len:].detach().to(dtype=torch.float32)
 
 

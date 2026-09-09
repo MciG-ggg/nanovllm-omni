@@ -235,7 +235,7 @@ def _check_forward_shapes(
     num_audio_heads = getattr(thinker, "num_audio_heads", 8)
 
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-    positions = torch.arange(seq_len, device=device).expand(batch_size, seq_len)
+    positions = torch.arange(batch_size * seq_len, device=device)
 
     out: dict[str, Any] = {"batch_size": batch_size, "seq_len": seq_len}
 
@@ -303,7 +303,7 @@ def _check_bit_equal(
     seq_len = 4
 
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
-    positions = torch.arange(seq_len, device=device).expand(batch_size, seq_len)
+    positions = torch.arange(batch_size * seq_len, device=device)
 
     with torch.no_grad():
         eager_out = thinker(input_ids, positions).clone()

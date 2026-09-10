@@ -46,6 +46,11 @@ from nanovllm_omni.engine.stage_runner import (
 
 
 _THINKER_KEEP_PREFIX = ("embed_tokens.", "layers.", "norm.", "lm_head.")
+# Vendor ``stream_generate`` post-EOS filler tokens (``enter_token_id``
+# then ``pad_token_id`` in ``model_omni.py``). They never reach the user;
+# they only keep the forward pass clocking so the talker tail drains.
+_THINKER_ENTER_TOKEN = 201
+_THINKER_PAD_TOKEN = 0
 # Talker keys all live under submodules (``lm_head.base.`` /
 # ``lm_head.adapters.`` / ...) — the bare ``lm_head.weight`` key
 # belongs to the thinker's text head (shape 6400) and must be
@@ -333,44 +338,76 @@ class ThinkerStage:
         runner.sampler = _sampler_with_rp
         generated: list[int] = []
         bridge_hidden: torch.Tensor | None = None
+        # Vendor ``stream_generate`` does NOT end the loop at text EOS:
+        # it sets ``text_finished`` and keeps clocking the forward pass
+        # with throwaway filler (``enter_token_id`` once, then
+        # ``pad_token_id``) so the talker's delay-interleaved 8-codebook
+        # tail can drain. The sampler is still called on those steps so
+        # the RNG stream advances identically; only the resulting token
+        # is discarded. Bridge rows keep accumulating across filler
+        # steps, which is exactly what the talker needs.
+        text_finished = False
+        first_finished = True
+        # Fork ``Config.eos`` defaults to -1 and nothing sets it, so the
+        # EOS test must come from the tokenizer (``<|im_end|>`` = 2 for
+        # MiniMind). Falling back to ``config.eos`` keeps non-MiniMind
+        # callers working.
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            eos_id = self.config.eos
 
-        while not scheduler.is_finished():
-            seqs, is_prefill = scheduler.schedule()
-            torch.cuda.synchronize()
-            input_ids, positions = (
-                runner.prepare_prefill(seqs) if is_prefill else runner.prepare_decode(seqs)
-            )
-            temperatures = runner.prepare_sample(seqs)
-            logits = runner.run_model(input_ids, positions, is_prefill)
+        try:
+            while not scheduler.is_finished():
+                seqs, is_prefill = scheduler.schedule()
+                torch.cuda.synchronize()
+                input_ids, positions = (
+                    runner.prepare_prefill(seqs) if is_prefill else runner.prepare_decode(seqs)
+                )
+                temperatures = runner.prepare_sample(seqs)
+                logits = runner.run_model(input_ids, positions, is_prefill)
 
-            # Extract bridge hidden. Decode steps only see the last token
-            # (prepare_decode appends ``seq.last_token``), so the forward
-            # for each decode step only produces ONE valid bridge row: the
-            # last one. Prefill covers the prompt; each decode step adds
-            # exactly one row. Take ``bh[-1:]`` on decode steps so the
-            # bridge stays token-aligned with ``token_ids + generated``
-            # (vendor recomputes the full sequence each step, which for
-            # matched sampling only matters through token alignment).
-            bh = model.get_bridge_hidden()
-            if bh is not None:
-                bh = bh.detach().clone()
-                if is_prefill:
-                    bridge_hidden = bh
-                elif bridge_hidden is not None:
-                    bridge_hidden = torch.cat([bridge_hidden, bh[-1:]], dim=0)
+                # Extract bridge hidden. Decode steps only see the last token
+                # (prepare_decode appends ``seq.last_token``), so the forward
+                # for each decode step only produces ONE valid bridge row: the
+                # last one. Prefill covers the prompt; each decode step adds
+                # exactly one row. Take ``bh[-1:]`` on decode steps so the
+                # bridge stays token-aligned with ``token_ids + generated``
+                # (vendor recomputes the full sequence each step, which for
+                # matched sampling only matters through token alignment).
+                bh = model.get_bridge_hidden()
+                if bh is not None:
+                    bh = bh.detach().clone()
+                    if is_prefill:
+                        bridge_hidden = bh
+                    elif bridge_hidden is not None:
+                        bridge_hidden = torch.cat([bridge_hidden, bh[-1:]], dim=0)
 
-            token_id_list = runner.sampler(logits, temperatures).tolist()
-            scheduler.postprocess(seqs, token_id_list, is_prefill)
-            self.stage_runner.reset_context()
+                # Sampler runs unconditionally so the RNG stream matches the
+                # vendor even on post-EOS filler steps.
+                token_id_list = runner.sampler(logits, temperatures).tolist()
+                sampled_id = token_id_list[0]
+                if text_finished:
+                    effective_id = _THINKER_ENTER_TOKEN if first_finished else _THINKER_PAD_TOKEN
+                    first_finished = False
+                    token_id_list = [effective_id]
+                else:
+                    effective_id = sampled_id
+                scheduler.postprocess(seqs, token_id_list, is_prefill)
+                self.stage_runner.reset_context()
 
-            new_id = token_id_list[0]
-            generated.append(new_id)
+                generated.append(effective_id)
+                if not text_finished and sampled_id == eos_id:
+                    text_finished = True
 
-            # Stop on EOS or max_tokens reached.
-            if (
-                not sequence.ignore_eos and new_id == self.config.eos
-            ) or sequence.num_completion_tokens >= max_tokens:
-                break
+                # Only ``max_tokens`` bounds the loop — vendor's while bound
+                # is ``input_ids.shape[1] < start_pos + max_new_tokens``.
+                if sequence.num_completion_tokens >= max_tokens:
+                    break
+        finally:
+            # Restore the original Sampler so a second call to the
+            # same ModelRunner doesn't end up wrapping an already-wrapped
+            # callable (which would explode on signature mismatch).
+            runner.sampler = _base_sampler
 
         # Extract text_state (final hidden from last forward).
         text_state = logits[0].detach() if logits is not None else None
@@ -510,10 +547,10 @@ class TalkerStage:
             raise ValueError("TalkerStage received empty text_token_ids")
 
         extra = getattr(sampling, "extra", None) or {}
-        max_steps = min(
-            len(text_codes),
-            int(extra["watchdog_limit"]) if extra.get("watchdog_limit") else len(text_codes),
-        )
+        # ``watchdog_limit`` caps the number of talker decode steps the
+        # way upstream's ``talker_max_steps_after_last_thinker_token``
+        # does; unset means "replay every generated thinker row".
+        watchdog_limit = int(extra["watchdog_limit"]) if extra.get("watchdog_limit") else None
         # Audio temperature is taken from the vendor default (0.2); the
         # text ``sampling.temperature`` is for the thinker stage.
         temperature = float(extra.get("audio_temperature", _AUDIO_VENDOR_TEMPERATURE))
@@ -522,41 +559,54 @@ class TalkerStage:
 
         bridge = bridge.unsqueeze(0).to(device=device, dtype=model.embed_proj[0].weight.dtype)
         spk_emb = payload.speaker_embedding
+        # Vendor seeds ``audio_buffer`` at the prompt length and feeds
+        # ``cat(audio_buffer, input_ids)`` every forward, so position
+        # ``start_pos + p`` is the p-th GENERATED token and positions
+        # ``0..start_pos-1`` are prompt rows carrying pad audio.
+        start_pos = len(payload.prompt_token_ids)
+        bridge_len = bridge.shape[1]
+        if start_pos >= bridge_len:
+            # Degenerate payload (no generated rows): fall back to the
+            # last row as the single decode position.
+            start_pos = max(0, bridge_len - 1)
+        num_steps = bridge_len - start_pos + 1
+        # Vendor runs one iteration per generated token; at iteration
+        # ``step`` the forward covers ``start_pos + step`` positions, so
+        # ``step`` may reach ``bridge_len - start_pos`` inclusive.
+        if watchdog_limit is not None:
+            num_steps = min(num_steps, watchdog_limit)
 
-        # ---- Staggered decode loop (matches vendor stream_generate) ----
-        # ``audio_codes[i]`` lags codebook i by i+1 steps — i.e. at
-        # ``step=s`` we have sampled ``s - i`` real codes for codebook
-        # ``i`` (or zero when ``s <= i``). Vendor uses pad for the
-        # lag positions; the model learned this pattern.
+        # ---- Staggered decode loop (mirrors vendor stream_generate) ----
+        # Vendor ``step`` is the count of generated tokens BEFORE this
+        # iteration's append, so the first iteration has ``step = 0`` and
+        # ``audio_step = -1`` (every codebook pads). Codebook ``i`` starts
+        # sampling real codes once ``audio_step >= i``.
         audio_codes: list[list[int]] = [[] for _ in range(8)]
-        audio_stop_pos = [None] * 8
-        # Vendor only emits a frame once ``audio_step >= 7`` so that all
-        # 8 codebooks have a real sample to contribute; the frame itself
-        # is the diagonal ``audio_codes[i][step - 7 + i]`` so each
-        # codebook hands in the sample it produced ``i`` steps ago.
+        audio_stop_pos: list[int | None] = [None] * 8
         emitted_frames: list[list[int]] = []
 
         with torch.no_grad():
-            for step in range(1, max_steps + 1):
-                t_audio = step  # vendor invariant: t_audio grows 1:1 with text
-                # Build audio_codes buffer for this step: [1, 8, t_audio].
-                buf = torch.full((1, 8, t_audio), _AUDIO_PAD_TOKEN, dtype=torch.long, device=device)
+            for step in range(num_steps):
                 audio_step = step - 1
-                for i in range(8):
-                    # Only fill positions we have real codes for.
-                    available = len(audio_codes[i])
-                    fill = min(audio_step + 1, i + 1, available)
-                    if fill > 0:
-                        buf[0, i, :fill] = torch.tensor(
-                            audio_codes[i][:fill], dtype=torch.long, device=device
-                        )
+                # Vendor's forward sees ``audio_buffer`` BEFORE this
+                # iteration's append, so the sequence length is
+                # ``start_pos + step`` — the very first forward covers
+                # exactly the prompt.
+                seq_len = start_pos + step
+                # Audio buffer: prompt columns stay pad; generated column
+                # ``start_pos + p`` holds ``audio_codes[i][p]`` for
+                # ``i < min(p, 8)`` (vendor's diagonal backfill).
+                buf = torch.full((1, 8, seq_len), _AUDIO_PAD_TOKEN, dtype=torch.long, device=device)
+                for p in range(step):
+                    lim = min(p, 8)
+                    for i in range(lim):
+                        buf[0, i, start_pos + p] = audio_codes[i][p]
 
-                # Prep + body via the decomposed model API. ``prepare_inputs_embeds``
-                # also returns the (possibly shifted) ``positions`` when
-                # ``spk_emb`` is provided; without a speaker, positions
-                # stays as 0..t_audio-1.
+                # Vendor recomputes the full sequence every step
+                # (``use_cache=False`` on the parity path), so the talker
+                # sees the whole prefix, not a sliding window.
                 embeds, positions = model.prepare_inputs_embeds(
-                    bridge[:, :t_audio, :], buf, spk_emb
+                    bridge[:, :seq_len, :], buf, spk_emb
                 )
 
                 # Fork ``Attention`` reads module-level ``Context`` to
@@ -589,10 +639,12 @@ class TalkerStage:
                     reset_context()
                 logits_list = model.compute_logits(hidden)
 
-                # Sample one code per codebook. We pass the temperature
-                # via the fork Sampler's own kwargs so the math lives
-                # in one place; top-50 + last-3-codes repetition penalty
-                # mirror the vendor recipe.
+                # Sample one code per codebook. HF ``model_omni.py``
+                # stream_generate: ``logits_i = al[0,-1,:] / 0.2``, then
+                # ``for prev in audio_codes[i][-3:]: logits_i[prev] /= 1.05``
+                # (last-3 of THAT layer only), then ``topk(50)`` +
+                # multinomial. The penalty is real in the HF reference —
+                # it is only absent from the vLLM refactor.
                 temperature_tensor = torch.tensor(
                     [temperature], dtype=model.embed_proj[0].weight.dtype, device=device
                 )
@@ -616,28 +668,23 @@ class TalkerStage:
                     if audio_stop_pos[i] is None and code >= 2048:
                         audio_stop_pos[i] = len(audio_codes[i]) - 1
 
-                # Vendor emission gate: only emit once all 8 codebooks
-                # have a real sample to contribute, and only while every
-                # codebook is still active (no stop token yet).
-                #
-                # Vendor's ``step`` is 0-indexed (``step=0`` is the first
-                # forward pass); our loop runs ``step=1`` first, so the
-                # ``audio_step >= 7`` check translates to ``step >= 9``
-                # here, and the diagonal index ``step_vendor - 7 + i``
-                # becomes ``step_here - 8 + i``.
-                if audio_step >= 8:
-                    active_layers = sum(
-                        1
-                        for i in range(8)
-                        if audio_stop_pos[i] is None or (step - 8 + i) < audio_stop_pos[i]
-                    )
-                    if active_layers >= 8:
-                        frame = [audio_codes[i][step - 8 + i] for i in range(8)]
-                        emitted_frames.append(frame)
-
-                # Stop once codebook 7 emits the stop token.
+                # Vendor break check runs BEFORE the append/emission.
                 if audio_codes[7] and audio_codes[7][-1] == _AUDIO_STOP_TOKEN:
                     break
+
+                # HF emission gate: ``audio_step >= 7`` with the diagonal
+                # ``frame[i] = audio_codes[i][step - 7 + i]`` and the
+                # active-layer filter ``stop_pos[i] is None or
+                # step - 7 + i < stop_pos[i]`` over all 8 layers.
+                if audio_step >= 7:
+                    idx = [step - 7 + i for i in range(8)]
+                    active = sum(
+                        1
+                        for i in range(8)
+                        if audio_stop_pos[i] is None or idx[i] < audio_stop_pos[i]
+                    )
+                    if active >= 8:
+                        emitted_frames.append([audio_codes[i][idx[i]] for i in range(8)])
 
         # ---- Pack output ----
         # ``emitted_frames`` mirrors the vendor: one row per emitted

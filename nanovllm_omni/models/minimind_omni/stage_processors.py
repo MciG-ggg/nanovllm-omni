@@ -213,16 +213,18 @@ def thinker2talker(payload: Any, prompt: str = "") -> Any:
         return payload
 
     prompt_ids, output_ids, all_ids = _aligned_text_ids(payload)
-    # Vendor ``stream_generate`` advances text and audio one token per
-    # step, so the talker bridge row count matches the GENERATED text,
-    # not prompt + generated. Slice both sides to the generated tail.
-    if output_ids:
-        all_ids = list(output_ids)
-        prompt_ids = []
+    # Vendor ``stream_generate`` seeds ``audio_buffer`` at the FULL prompt
+    # length and feeds ``cat(audio_buffer, input_ids)`` on every forward,
+    # so the talker is conditioned on prompt rows + generated rows. An
+    # earlier revision sliced the bridge to the generated tail only,
+    # which made the talker prompt-independent (identical frame 0 for
+    # every prompt). Keep the full bridge and let ``TalkerStage`` split
+    # it at ``len(prompt_token_ids)``.
     bridge = _normalise_bridge(payload, len(all_ids))
     if len(all_ids) > bridge.shape[0]:  # defensive; _normalise_bridge already checks
-        all_ids = all_ids[-bridge.shape[0] :]
-        output_ids = output_ids[-bridge.shape[0] :] if output_ids else []
+        drop = len(all_ids) - bridge.shape[0]
+        all_ids = all_ids[drop:]
+        prompt_ids = prompt_ids[drop:] if drop < len(prompt_ids) else []
     input_ids = torch.full(
         (max(1, len(prompt_ids)),),
         AUDIO_PAD_TOKEN_ID,

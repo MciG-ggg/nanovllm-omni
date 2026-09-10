@@ -307,6 +307,25 @@ class ThinkerStage:
 
         model = self.stage_runner.model_runner.model
         runner = self.stage_runner.model_runner
+        # Vendor ``stream_generate`` divides logits at every seen token by
+        # ``rp=1.05``; fork's ``Sampler`` only knows a per-call ``history``
+        # argument. Wrap ``runner.sampler`` so every decode step gets
+        # the full sequence so far (prompt + generated) as history.
+        _base_sampler = runner.sampler
+        # Vendor's ``stream_generate`` divides logits at every seen
+        # token by ``rp=1.05``; the fork ``Sampler`` only takes a
+        # per-call ``history``. Wrap ``runner.sampler`` so every decode
+        # step gets the full sequence (prompt + generated) as history.
+        # Override via ``sampling.extra["repetition_penalty"]`` if a
+        # caller wants a different value.
+        _rp = float(getattr(sampling, "repetition_penalty", 1.05) or 1.05)
+
+        def _sampler_with_rp(logits, temperatures):
+            seen = sequence.token_ids
+            history = torch.tensor(seen, dtype=torch.long, device=logits.device)
+            return _base_sampler(logits, temperatures, history=history, repetition_penalty=_rp)
+
+        runner.sampler = _sampler_with_rp
         generated: list[int] = []
         bridge_hidden: torch.Tensor | None = None
 
@@ -399,6 +418,7 @@ class TalkerStage:
         self._sampler = Sampler()
         self._device: str | None = None
         self._config: Any = None
+        self._arange_cache: Any = None
 
     def _ensure_model(self) -> Any:
         """Lazily load the talker model from the talker-only safetensors."""
@@ -498,6 +518,11 @@ class TalkerStage:
         # lag positions; the model learned this pattern.
         audio_codes: list[list[int]] = [[] for _ in range(8)]
         audio_stop_pos = [None] * 8
+        # Vendor only emits a frame once ``audio_step >= 7`` so that all
+        # 8 codebooks have a real sample to contribute; the frame itself
+        # is the diagonal ``audio_codes[i][step - 7 + i]`` so each
+        # codebook hands in the sample it produced ``i`` steps ago.
+        emitted_frames: list[list[int]] = []
 
         with torch.no_grad():
             for step in range(1, max_steps + 1):
@@ -529,6 +554,12 @@ class TalkerStage:
                 # on the freshly-loaded model so ``store_kvcache`` is
                 # skipped — we don't need the paged storage here, only
                 # the kernel.
+                # Cache the arange base once per TalkerStage call so the
+                # full-range slot/cu tensors share storage instead of
+                # allocating 64 KB per decode step.
+                if self._arange_cache is None or self._arange_cache.device != device:
+                    self._arange_cache = torch.arange(32768, dtype=torch.int32, device=device)
+                arange = self._arange_cache
                 n_tokens = embeds.shape[0]
                 set_context(
                     is_prefill=True,
@@ -536,7 +567,7 @@ class TalkerStage:
                     cu_seqlens_k=torch.tensor([0, n_tokens], dtype=torch.int32, device=device),
                     max_seqlen_q=n_tokens,
                     max_seqlen_k=n_tokens,
-                    slot_mapping=torch.arange(n_tokens, dtype=torch.int32, device=device),
+                    slot_mapping=arange[:n_tokens],
                     context_lens=None,
                     block_tables=None,
                 )
@@ -573,23 +604,38 @@ class TalkerStage:
                     if audio_stop_pos[i] is None and code >= 2048:
                         audio_stop_pos[i] = len(audio_codes[i]) - 1
 
+                # Vendor emission gate: only emit once all 8 codebooks
+                # have a real sample to contribute, and only while every
+                # codebook is still active (no stop token yet).
+                #
+                # Vendor's ``step`` is 0-indexed (``step=0`` is the first
+                # forward pass); our loop runs ``step=1`` first, so the
+                # ``audio_step >= 7`` check translates to ``step >= 9``
+                # here, and the diagonal index ``step_vendor - 7 + i``
+                # becomes ``step_here - 8 + i``.
+                if audio_step >= 8:
+                    active_layers = sum(
+                        1
+                        for i in range(8)
+                        if audio_stop_pos[i] is None or (step - 8 + i) < audio_stop_pos[i]
+                    )
+                    if active_layers >= 8:
+                        frame = [audio_codes[i][step - 8 + i] for i in range(8)]
+                        emitted_frames.append(frame)
+
                 # Stop once codebook 7 emits the stop token.
                 if audio_codes[7] and audio_codes[7][-1] == _AUDIO_STOP_TOKEN:
                     break
 
         # ---- Pack output ----
-        # audio_codes: list of 8 lists, each length = max_steps (or fewer
-        # if we broke out early). Truncate to the shortest codebook to
-        # form a square [frames, 8] tensor.
-        n_frames = min(len(c) for c in audio_codes)
-        if n_frames == 0:
-            audio_codes_tensor = torch.zeros(1, 8, dtype=torch.long)
+        # ``emitted_frames`` mirrors the vendor: one row per emitted
+        # frame, each row is the diagonal ``audio_codes[i][step - 7 + i]``.
+        # Truncation is no longer needed because we only ever appended
+        # full 8-code rows.
+        if not emitted_frames:
+            audio_codes_tensor = torch.zeros(0, 8, dtype=torch.long)
         else:
-            audio_codes_tensor = (
-                torch.tensor([c[:n_frames] for c in audio_codes], dtype=torch.long, device=device)
-                .t()
-                .contiguous()
-            )  # [frames, 8]
+            audio_codes_tensor = torch.tensor(emitted_frames, dtype=torch.long)
         return TalkerOutput(audio_codes=audio_codes_tensor.cpu())
 
 

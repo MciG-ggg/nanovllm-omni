@@ -81,9 +81,9 @@ class ThinkerAttention(nn.Module):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(-1, self.num_heads, self.head_dim)
-        k = k.reshape(-1, self.num_kv_heads, self.head_dim)
-        v = v.reshape(-1, self.num_kv_heads, self.head_dim)
+        q = q.reshape(-1, self.num_heads, self.head_dim).contiguous()
+        k = k.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
+        v = v.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         q = self.q_norm(q)
         k = self.k_norm(k)
         q, k = self.rotary_emb(positions, q, k)

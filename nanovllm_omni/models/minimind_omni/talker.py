@@ -157,14 +157,17 @@ class TalkerAttention(nn.Module):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(-1, self.num_heads, self.head_dim)
-        k = k.reshape(-1, self.num_kv_heads, self.head_dim)
-        v = v.reshape(-1, self.num_kv_heads, self.head_dim)
+        q = q.reshape(-1, self.num_heads, self.head_dim).contiguous()
+        k = k.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
+        v = v.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         q = self.q_norm(q)
         k = self.k_norm(k)
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v)
-        return self.o_proj(o)
+        # Fork Attention returns ``[N, H_q, D]`` (matches the SDPA helper
+        # and flash_attn varlen output); flatten to ``[N, H_q*D]`` for
+        # RowParallelLinear, which sees only the trailing dim.
+        return self.o_proj(o.flatten(1, -1))
 
 
 class TalkerMLP(nn.Module):
@@ -388,13 +391,14 @@ class MiniMindTalker(nn.Module):
             b, t, _ = audio_h.shape
             audio_h = audio_h.reshape(b * t, -1)
         hidden = text_h + audio_h  # elementwise add — vendor requires same length
+        if positions is None:
+            positions = torch.arange(hidden.shape[0], device=hidden.device, dtype=torch.long)
         if spk_emb is not None:
             spk_h = self.speaker_proj(spk_emb)
             if spk_h.dim() == 2:
                 spk_h = spk_h.reshape(-1, spk_h.shape[-1])
             hidden = torch.cat([spk_h, hidden], dim=0)
-            if positions is not None:
-                positions = torch.cat([positions.new_zeros(1), positions + 1], dim=0)
+            positions = torch.cat([positions.new_zeros(1), positions + 1], dim=0)
         return hidden, positions
 
     def body(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:

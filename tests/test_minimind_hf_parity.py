@@ -76,7 +76,7 @@ def main() -> None:
     # ---- nanovllm-omni path ----
     print("\n=== nanovllm-omni path ===")
     from nanovllm_omni import Omni, SamplingParams
-    from nanovllm_omni.models.minimind_omni._engine import TalkerStage
+    from nanovllm_omni.models.minimind_omni._engine import TalkerStage, ThinkerStage
 
     torch.manual_seed(seed := SEED)
     omni = Omni(MODEL_DIR, mimi_model_id=MIMI_DIR, device="cuda")
@@ -89,19 +89,41 @@ def main() -> None:
         captured.append(out.audio_codes.detach().cpu().clone())
         return out
 
+    _orig_thinker = ThinkerStage.__call__
+    thinker_captured: list = []
+
+    def _spy_thinker(self, payload, sampling):
+        out = _orig_thinker(self, payload, sampling)
+        thinker_captured.append(out)
+        return out
+
     TalkerStage.__call__ = _spy
+    ThinkerStage.__call__ = _spy_thinker
     try:
-        sp = SamplingParams(temperature=0.7, max_tokens=MAX_NEW_TOKENS)
-        outs = omni.generate([formatted], sp)
+        # Match vendor sampling so we test implementation, not sampling
+        # drift: temperature=0.2 + rp=1.05. ``repetition_penalty`` rides
+        # through ``extra`` (the public SamplingParams only exposes
+        # temperature / top_p / top_k / max_tokens / stop / seed / n).
+        sp = SamplingParams(
+            temperature=0.2,
+            max_tokens=MAX_NEW_TOKENS,
+            extra={"repetition_penalty": 1.05},
+        )
+        omni.generate([formatted], sp)
     finally:
         TalkerStage.__call__ = _orig
+        ThinkerStage.__call__ = _orig_thinker
 
     nano_codes = captured[0] if captured else None
-    nano_text = list(outs[0].token_ids) if hasattr(outs[0], "token_ids") else []
+    nano_text: list[int] = []
+    if thinker_captured:
+        nano_text = list(thinker_captured[0].text_token_ids)
 
-    print(f"Nano text tokens: {nano_text}")
+    print(
+        f"Nano text tokens ({len(nano_text)}): {nano_text[:30]}{'...' if len(nano_text) > 30 else ''}"
+    )
     if nano_codes is not None:
-        print(f"Nano audio codes shape: {nano_codes.shape}")
+        print(f"Nano audio codes shape: {tuple(nano_codes.shape)}")
         if nano_codes.numel() > 0:
             print(f"Nano frame 0: {nano_codes[0].tolist()}")
     else:

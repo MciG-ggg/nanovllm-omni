@@ -339,6 +339,11 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
     max_num_batched_tokens = getattr(args, "max_num_batched_tokens", None)
     max_num_seqs = getattr(args, "max_num_seqs", None)
     tensor_parallel_size = getattr(args, "tensor_parallel_size", 1)
+    # MiniMind-3o ships trust_remote_code modeling files; without this
+    # AutoConfig.from_pretrained raises before fork Config is built.
+    # Default True (matches minimind_omni/_engine.py:419 hardcoded path);
+    # caller can override by passing trust_remote_code=False explicitly.
+    trust_remote_code = getattr(args, "trust_remote_code", True)
     return {
         "gpu_memory_utilization": (
             gpu_memory_utilization if gpu_memory_utilization is not None else 0.9
@@ -348,6 +353,7 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
         ),
         "max_num_seqs": max_num_seqs if max_num_seqs is not None else 512,
         "tensor_parallel_size": tensor_parallel_size,
+        "trust_remote_code": trust_remote_code,
     }
 
 

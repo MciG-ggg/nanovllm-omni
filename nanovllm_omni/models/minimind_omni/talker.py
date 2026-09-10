@@ -419,8 +419,8 @@ def _talker_stage(deploy, args):
     """Stage 1 factory — defers heavy model load to ``TalkerStage.__init__``.
 
     The MTP decode loop that consumes ``TalkerInputPayload`` and emits
-    audio codes lives in ``TalkerStage.__call__`` (see ``_engine.py``).
+    audio codes lives in ``TalkerStage.__call__`` (see ``stage.py``).
     """
-    from ._engine import TalkerStage
+    from .stage import TalkerStage
 
     return TalkerStage(deploy, args)

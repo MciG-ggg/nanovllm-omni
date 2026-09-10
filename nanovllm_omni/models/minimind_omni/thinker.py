@@ -270,6 +270,6 @@ def _thinker_stage(deploy, args):
     ``ThinkerStageOutput``) is Phase 4 territory; see
     ``docs/dev/nanovllm-omni-rewrite.md`` §7.
     """
-    from ._engine import ThinkerStage
+    from .stage import ThinkerStage
 
     return ThinkerStage(deploy, args)

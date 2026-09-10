@@ -155,7 +155,6 @@ class OmniBase:
     def __init__(self, model: str, **kwargs: Any) -> None:
         self.model = model
         self.engine_args = OmniEngineArgs(model=model, **kwargs)
-        self._bundle: Any = None
         self._pipeline: PipelineConfig | None = None
         self._deploy: DeployConfig | None = None
         self._executor: PipelineExecutor | None = None
@@ -252,26 +251,3 @@ class OmniBase:
                 max_concurrent=max_concurrent,
             )
         return self._executor
-
-    def _ensure_bundle(self) -> Any:
-        """Backward-compat shim for callers that still read the loaded
-        MiniMind-O bundle directly. New code should use the runner instead.
-        """
-        if self._bundle is None:
-            from ..models.minimind_omni import load_minimind_omni_bundle
-
-            extra = dict(self.engine_args.extra or {})
-            mimi_model_id = extra.pop("mimi_model_id", None) or extra.pop("mimi", None)
-            kwargs: dict[str, Any] = {
-                "trust_remote_code": self.engine_args.trust_remote_code,
-                "dtype": self.engine_args.dtype,
-            }
-            if mimi_model_id:
-                kwargs["mimi_model_id"] = mimi_model_id
-            self._bundle = load_minimind_omni_bundle(
-                model_id=self.model,
-                device=self.engine_args.device,
-                **kwargs,
-            )
-            self._bundle.use_thinker_cuda_graph = self._resolve_deploy().use_thinker_cuda_graph
-        return self._bundle

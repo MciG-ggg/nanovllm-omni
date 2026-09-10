@@ -47,6 +47,4 @@ SMOLVLA_PIPELINE = PipelineConfig(
     hf_architectures=("SmolVLAPolicy",),
 )
 
-PIPELINE = SMOLVLA_PIPELINE
-
 register_pipeline(SMOLVLA_PIPELINE)

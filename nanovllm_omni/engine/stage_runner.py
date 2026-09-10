@@ -23,11 +23,10 @@ Fork imports are deliberately lazy: the fork submodule requires
 available on a CPU-only host. Smoke tests that only import this module
 don't trigger the fork import.
 
-ponytail: nothing here is MiniMind-O specific. Lives in ``engine/``
-because two-stage fork-backed pipelines will reuse this regardless of
-which model family is plugged in. The second model family that hits
-this layer will tell us which knobs ( (e) enforce_eager override,
-per-stage gpu_memory_utilization) need to surface.
+ponytail: only MiniMind-O consumes this today (``SharedBlockManager``
+couples thinker + talker stages). Belongs in
+``models/minimind_omni/stage_runner.py`` but kept at ``engine/`` until a
+second family needs it (YAGNI on the move; see review SUMMARY.md §2 #17).
 """
 
 from __future__ import annotations
@@ -86,8 +85,7 @@ class SharedBlockManager:
 # single ``SharedBlockManager``. The first caller (ThinkerStage,
 # constructed first per ``PipelineRunner._ensure_stages`` order) wins;
 # later callers reuse the same instance regardless of the ``num_blocks``
-# they pass. Mismatches are surfaceable via ``reset_shared_block_manager``
-# in tests.
+# they pass.
 
 
 _shared_block_manager: SharedBlockManager | None = None
@@ -109,12 +107,6 @@ def get_shared_block_manager(num_blocks: int, block_size: int) -> SharedBlockMan
     if _shared_block_manager is None:
         _shared_block_manager = SharedBlockManager(num_blocks, block_size)
     return _shared_block_manager
-
-
-def reset_shared_block_manager() -> None:
-    """Drop the cached ``SharedBlockManager`` (test hook)."""
-    global _shared_block_manager
-    _shared_block_manager = None
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +142,6 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
             cfg.hf_config.dtype = getattr(cfg.hf_config, "torch_dtype", None) or torch.float16
         _stage_configs[stage_name] = cfg
     return _stage_configs[stage_name]
-
-
-def reset_stage_configs() -> None:
-    """Drop the cached stage ``Config`` objects (test hook)."""
-    _stage_configs.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +331,7 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
     tensor_parallel_size = getattr(args, "tensor_parallel_size", 1)
     # MiniMind-3o ships trust_remote_code modeling files; without this
     # AutoConfig.from_pretrained raises before fork Config is built.
-    # Default True (matches minimind_omni/_engine.py:419 hardcoded path);
+    # Default True (matches minimind_omni/stage.py hardcoded path);
     # caller can override by passing trust_remote_code=False explicitly.
     trust_remote_code = getattr(args, "trust_remote_code", True)
     return {
@@ -366,7 +353,5 @@ __all__ = [
     "_ensure_dist",
     "get_shared_block_manager",
     "get_stage_config",
-    "reset_shared_block_manager",
-    "reset_stage_configs",
     "stage_kwargs_from_args",
 ]

@@ -33,7 +33,7 @@ def _safetensor_keys(dst: str) -> set[str]:
 
 
 def test_thinker_only_dir_keeps_toplevel_lm_head() -> None:
-    from nanovllm_omni.models.minimind_omni._engine import _thinker_only_dir
+    from nanovllm_omni.models.minimind_omni.stage import _thinker_only_dir
 
     with tempfile.TemporaryDirectory() as d:
         src = Path(d)
@@ -55,7 +55,7 @@ def test_thinker_only_dir_keeps_toplevel_lm_head() -> None:
 
 
 def test_talker_only_dir_drops_bare_lm_head() -> None:
-    from nanovllm_omni.models.minimind_omni._engine import _talker_only_dir
+    from nanovllm_omni.models.minimind_omni.stage import _talker_only_dir
 
     with tempfile.TemporaryDirectory() as d:
         src = Path(d)

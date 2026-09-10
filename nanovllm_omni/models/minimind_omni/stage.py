@@ -1,4 +1,6 @@
-"""Stage engine wiring for MiniMind-O (MiniMind-O specific bits only).
+"""Stage wiring for MiniMind-O (the per-stage classes and the helpers
+they need). Mirrors the ``stage.py`` convention used by
+``models/sd_turbo/`` / ``smolvla/`` / ``smolvlm/``.
 
 The fork-AR-Engine adapter layer (``SharedBlockManager`` /
 ``StageRunner`` / ``_ensure_dist`` / ``get_stage_config`` /
@@ -14,6 +16,12 @@ only the MiniMind-O specific bits:
   - HuggingFace tokenizer loader for the MiniMind-3o snapshot
   - ``ThinkerStage`` and ``TalkerStage`` high-level stage classes
     invoked by ``PipelineRunner``'s ``_stage_factory``.
+
+Lazy load via factory: import this module only from inside
+``thinker._thinker_stage`` / ``talker._talker_stage`` — never at the top
+of a sibling module. ``ModelRunner.__init__`` (pulled in by
+``ThinkerStage`` / ``TalkerStage``) drags in ``triton`` / ``flash-attn``,
+which aren't available on CPU-only hosts.
 
 Fork imports stay lazy — ``ModelRunner`` pulls in ``triton`` /
 ``flash-attn``, which isn't available on CPU-only hosts. The factory
@@ -32,7 +40,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from nanovllm_omni.engine.stage_runner import (
-    SharedBlockManager,
     StageRunner,
     _ensure_dist,
     get_shared_block_manager,
@@ -325,15 +332,21 @@ class ThinkerStage:
         _top_p = float(getattr(sampling, "top_p", 1.0) or 1.0)
 
         def _sampler_with_rp(logits, temperatures):
-            seen = sequence.token_ids
-            history = torch.tensor(seen, dtype=torch.long, device=logits.device)
-            return _base_sampler(
-                logits,
-                temperatures,
-                top_p=_top_p,
-                history=history,
-                repetition_penalty=_rp,
-            )
+            # Match vendor stream_generate: divide the last-token logits,
+            # apply the full-history penalty and top-p filter, then call
+            # torch.multinomial directly. Gumbel-max is distributionally
+            # equivalent but consumes a different RNG path; a different
+            # text token changes every later bridge/audio-buffer row.
+            logits_i = logits[0].clone() / (temperatures[0] + 1e-9)
+            for token in set(sequence.token_ids):
+                logits_i[token] /= _rp
+            if _top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits_i, descending=True)
+                remove = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > _top_p
+                remove[1:] = remove[:-1].clone()
+                remove[0] = False
+                logits_i[sorted_indices[remove]] = -float("inf")
+            return torch.multinomial(torch.softmax(logits_i, dim=-1), 1).view(-1)
 
         runner.sampler = _sampler_with_rp
         generated: list[int] = []
@@ -478,7 +491,6 @@ class TalkerOutput:
 # Vendor constant — single channel of the audio-buffer pad (model_omni.py).
 _AUDIO_PAD_TOKEN = 2049
 _AUDIO_STOP_TOKEN = 2050
-_AUDIO_SPK_TOKEN = 2051
 _AUDIO_VENDOR_TEMPERATURE = 0.2
 _AUDIO_REPETITION_PENALTY = 1.05
 
@@ -493,20 +505,17 @@ class TalkerStage:
     path is used so D = num_kv_heads * head_dim = 192 is no longer
     a Triton-kernel barrier (the kernel now pads to next-pow2).
 
-    Sampling goes through fork ``Sampler`` with ``top_k=50`` and a
-    repetition penalty on the last 3 codes per codebook, matching
-    the vendor recipe. ``enforce_eager`` for the underlying fork
+    Audio sampling uses vendor's ``topk(50)`` plus
+    ``torch.multinomial(softmax(...))`` with a repetition penalty on the
+    last 3 codes per codebook. ``enforce_eager`` for the underlying fork
     flow is not applicable here because we don't go through a
     ``ModelRunner``; we set up the fork ``Context`` directly.
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
-        from nanovllm.layers.sampler import Sampler
-
         self.deploy = deploy
         self.args = args
         self._model: Any = None
-        self._sampler = Sampler()
         self._device: str | None = None
         self._config: Any = None
         self._arange_cache: Any = None
@@ -573,7 +582,6 @@ class TalkerStage:
         from .stage_processors import TalkerInputPayload
 
         model = self._ensure_model()
-        sampler = self._sampler
         device = self._device
 
         # ---- Extract & validate inputs ----
@@ -693,25 +701,22 @@ class TalkerStage:
                 # (last-3 of THAT layer only), then ``topk(50)`` +
                 # multinomial. The penalty is real in the HF reference —
                 # it is only absent from the vLLM refactor.
-                temperature_tensor = torch.tensor(
-                    [temperature], dtype=model.embed_proj[0].weight.dtype, device=device
-                )
                 for i, logits in enumerate(logits_list):
                     if audio_step < i:
                         audio_codes[i].append(_AUDIO_PAD_TOKEN)
                         continue
-                    last = logits[-1:, :]  # [1, vocab]
-                    recent = audio_codes[i][-3:]
-                    history = (
-                        torch.tensor(recent, dtype=torch.long, device=device) if recent else None
-                    )
-                    code = sampler(
-                        last,
-                        temperature_tensor,
-                        top_k=50,
-                        history=history,
-                        repetition_penalty=_AUDIO_REPETITION_PENALTY,
-                    ).item()
+                    # Match vendor exactly: keep the model dtype through
+                    # temperature scaling and top-k, then draw with
+                    # torch.multinomial from the 50-token softmax. Using the
+                    # generic Gumbel sampler consumes a different RNG path;
+                    # one different code recursively changes every later
+                    # audio-buffer column.
+                    logits_i = logits[-1, :].clone() / temperature
+                    for previous_code in audio_codes[i][-3:]:
+                        logits_i[previous_code] /= _AUDIO_REPETITION_PENALTY
+                    top_value, top_index = logits_i.topk(50)
+                    sampled = torch.multinomial(torch.softmax(top_value, dim=-1), 1)
+                    code = top_index[sampled].item()
                     audio_codes[i].append(code)
                     if audio_stop_pos[i] is None and code >= 2048:
                         audio_stop_pos[i] = len(audio_codes[i]) - 1
@@ -750,9 +755,4 @@ __all__ = [
     "ThinkerStage",
     "TalkerOutput",
     "TalkerStage",
-    # Re-exported from engine.stage_runner for backward compat
-    "SharedBlockManager",
-    "StageRunner",
-    "get_shared_block_manager",
-    "get_stage_config",
 ]

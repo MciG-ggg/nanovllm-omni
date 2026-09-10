@@ -76,7 +76,7 @@ def main() -> None:
     # ---- nanovllm-omni path ----
     print("\n=== nanovllm-omni path ===")
     from nanovllm_omni import Omni, SamplingParams
-    from nanovllm_omni.models.minimind_omni._engine import TalkerStage, ThinkerStage
+    from nanovllm_omni.models.minimind_omni.stage import TalkerStage, ThinkerStage
 
     torch.manual_seed(seed := SEED)
     omni = Omni(MODEL_DIR, mimi_model_id=MIMI_DIR, device="cuda")

@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nanovllm_omni.outputs import AudioPayload
-
 DEFAULT_MINIMIND_MODEL_ID = "jingyaogong/minimind-3o"
 DEFAULT_MIMI_MODEL_ID = "kyutai/mimi"
 MIMI_SAMPLE_RATE = 24_000
@@ -137,10 +135,7 @@ def load_minimind_omni_bundle(
     )
 
 
-# AudioPayload re-exported for convenience; canonical home is
-# ``nanovllm_omni.outputs``.
 __all__ = [
-    "AudioPayload",
     "DEFAULT_MINIMIND_MODEL_ID",
     "DEFAULT_MIMI_MODEL_ID",
     "MIMI_SAMPLE_RATE",

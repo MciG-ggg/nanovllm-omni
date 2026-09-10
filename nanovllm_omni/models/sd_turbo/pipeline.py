@@ -44,6 +44,4 @@ SD_TURBO_PIPELINE = PipelineConfig(
     hf_architectures=("StableDiffusionPipeline",),
 )
 
-PIPELINE = SD_TURBO_PIPELINE
-
 register_pipeline(SD_TURBO_PIPELINE)

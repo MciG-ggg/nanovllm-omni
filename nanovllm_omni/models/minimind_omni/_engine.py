@@ -343,14 +343,21 @@ class ThinkerStage:
             temperatures = runner.prepare_sample(seqs)
             logits = runner.run_model(input_ids, positions, is_prefill)
 
-            # Extract bridge hidden; accumulate across prefill + each decode step.
+            # Extract bridge hidden. Decode steps only see the last token
+            # (prepare_decode appends ``seq.last_token``), so the forward
+            # for each decode step only produces ONE valid bridge row: the
+            # last one. Prefill covers the prompt; each decode step adds
+            # exactly one row. Take ``bh[-1:]`` on decode steps so the
+            # bridge stays token-aligned with ``token_ids + generated``
+            # (vendor recomputes the full sequence each step, which for
+            # matched sampling only matters through token alignment).
             bh = model.get_bridge_hidden()
             if bh is not None:
                 bh = bh.detach().clone()
                 if is_prefill:
                     bridge_hidden = bh
                 elif bridge_hidden is not None:
-                    bridge_hidden = torch.cat([bridge_hidden, bh], dim=0)
+                    bridge_hidden = torch.cat([bridge_hidden, bh[-1:]], dim=0)
 
             token_id_list = runner.sampler(logits, temperatures).tolist()
             scheduler.postprocess(seqs, token_id_list, is_prefill)

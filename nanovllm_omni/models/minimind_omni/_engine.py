@@ -308,22 +308,27 @@ class ThinkerStage:
         model = self.stage_runner.model_runner.model
         runner = self.stage_runner.model_runner
         # Vendor ``stream_generate`` divides logits at every seen token by
-        # ``rp=1.05``; fork's ``Sampler`` only knows a per-call ``history``
-        # argument. Wrap ``runner.sampler`` so every decode step gets
-        # the full sequence so far (prompt + generated) as history.
+        # ``rp=1.05`` and applies nucleus filtering with ``top_p=0.90``;
+        # the fork ``Sampler`` only knows per-call ``history``/``top_p``.
+        # Wrap ``runner.sampler`` so every decode step gets the full
+        # sequence (prompt + generated) as history plus the right top_p.
+        # ``repetition_penalty`` rides through ``sampling.extra``.
         _base_sampler = runner.sampler
-        # Vendor's ``stream_generate`` divides logits at every seen
-        # token by ``rp=1.05``; the fork ``Sampler`` only takes a
-        # per-call ``history``. Wrap ``runner.sampler`` so every decode
-        # step gets the full sequence (prompt + generated) as history.
-        # Override via ``sampling.extra["repetition_penalty"]`` if a
-        # caller wants a different value.
-        _rp = float(getattr(sampling, "repetition_penalty", 1.05) or 1.05)
+        _rp = float(
+            (getattr(sampling, "extra", None) or {}).get("repetition_penalty", 1.05) or 1.05
+        )
+        _top_p = float(getattr(sampling, "top_p", 1.0) or 1.0)
 
         def _sampler_with_rp(logits, temperatures):
             seen = sequence.token_ids
             history = torch.tensor(seen, dtype=torch.long, device=logits.device)
-            return _base_sampler(logits, temperatures, history=history, repetition_penalty=_rp)
+            return _base_sampler(
+                logits,
+                temperatures,
+                top_p=_top_p,
+                history=history,
+                repetition_penalty=_rp,
+            )
 
         runner.sampler = _sampler_with_rp
         generated: list[int] = []

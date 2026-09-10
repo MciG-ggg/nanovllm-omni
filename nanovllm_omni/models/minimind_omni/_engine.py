@@ -416,6 +416,48 @@ class ThinkerStage:
         if bridge_hidden is not None:
             bridge_hidden = bridge_hidden.clone()
 
+        # Re-capture the bridge with one full-sequence prefill pass.
+        #
+        # The loop above uses ``prepare_decode`` (paged KV-cache; only the
+        # last token is forwarded, so ``bh[-1:]`` is the only new bridge
+        # row). Vendor ``MiniMindOmni`` does not use a KV cache — each
+        # step runs ``forward(cat(audio_buffer, input_ids))`` over the
+        # whole prefix with ``use_cache=False``, so its bridge row at
+        # position ``i`` is computed from a FULL-sequence attention pass.
+        # The two are not bit-equal (bf16 attention differences propagate
+        # through softmax and into lm_head logits), and the talker
+        # cross-attends to those rows, so the frame codes diverge by
+        # hundreds. One extra full-sequence prefill at the end replaces
+        # the paged-KV-decode bridge with a full-attention bridge that
+        # matches vendor's per-step semantics exactly.
+        full_ids = token_ids + list(generated)
+        if len(full_ids) > 0 and bridge_hidden is not None:
+            from nanovllm.utils.context import reset_context as _rc
+            from nanovllm.utils.context import set_context as _sc
+
+            n_total = len(full_ids)
+            dev = bridge_hidden.device
+            _sc(
+                is_prefill=True,
+                cu_seqlens_q=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
+                cu_seqlens_k=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
+                max_seqlen_q=n_total,
+                max_seqlen_k=n_total,
+                slot_mapping=torch.arange(n_total, dtype=torch.int32, device=dev),
+                context_lens=None,
+                block_tables=None,
+            )
+            try:
+                with torch.no_grad():
+                    _in = torch.tensor(full_ids, dtype=torch.int64, device=dev)
+                    _pos = torch.arange(n_total, dtype=torch.int64, device=dev)
+                    _ = model(_in, _pos)
+                _full_bridge = model.get_bridge_hidden()
+                if _full_bridge is not None:
+                    bridge_hidden = _full_bridge.detach().to(dev).clone()
+            finally:
+                _rc()
+
         return ThinkerStageOutput(
             bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),
             prompt_token_ids=tuple(token_ids),
@@ -569,7 +611,13 @@ class TalkerStage:
             # Degenerate payload (no generated rows): fall back to the
             # last row as the single decode position.
             start_pos = max(0, bridge_len - 1)
-        num_steps = bridge_len - start_pos + 1
+        # Vendor's loop runs exactly ``max_new_tokens`` iterations with
+        # ``while input_ids.shape[1] < start_pos + max_new_tokens``, i.e.
+        # one iteration per generated token. The bridge has one row per
+        # generated token (the row at position ``start_pos + i`` is the
+        # hidden state after processing text position ``start_pos + i``),
+        # so ``num_steps = bridge_len - start_pos`` matches vendor.
+        num_steps = bridge_len - start_pos
         # Vendor runs one iteration per generated token; at iteration
         # ``step`` the forward covers ``start_pos + step`` positions, so
         # ``step`` may reach ``bridge_len - start_pos`` inclusive.

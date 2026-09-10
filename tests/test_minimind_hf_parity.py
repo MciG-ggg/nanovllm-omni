@@ -106,6 +106,7 @@ def main() -> None:
         # temperature / top_p / top_k / max_tokens / stop / seed / n).
         sp = SamplingParams(
             temperature=0.2,
+            top_p=0.90,
             max_tokens=MAX_NEW_TOKENS,
             extra={"repetition_penalty": 1.05},
         )

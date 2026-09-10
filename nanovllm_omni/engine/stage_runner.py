@@ -299,20 +299,23 @@ class StageRunner:
         hidden_states: Any,
         temperatures: Any,
         top_k: int = 0,
+        top_p: float = 1.0,
         history: Any = None,
         repetition_penalty: float = 1.0,
     ) -> Any:
         """Draw one token per sequence from ``hidden_states`` logits.
 
-        Wraps fork ``Sampler``, which accepts ``top_k`` / ``history`` /
-        ``repetition_penalty`` as optional kwargs. Default path is
-        Gumbel-max (bit-exact with the pre-extension behaviour); the
-        vendor top-k + repetition-penalty recipe is opt-in per call.
+        Wraps fork ``Sampler``, which accepts ``top_k`` / ``top_p`` /
+        ``history`` / ``repetition_penalty`` as optional kwargs.
+        Default path is Gumbel-max (bit-exact with the pre-extension
+        behaviour); the vendor top-k / top-p + repetition-penalty
+        recipe is opt-in per call.
         """
         return self.sampler(
             hidden_states,
             temperatures,
             top_k=top_k,
+            top_p=top_p,
             history=history,
             repetition_penalty=repetition_penalty,
         )

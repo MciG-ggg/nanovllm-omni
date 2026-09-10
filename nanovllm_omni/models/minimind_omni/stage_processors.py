@@ -213,14 +213,16 @@ def thinker2talker(payload: Any, prompt: str = "") -> Any:
         return payload
 
     prompt_ids, output_ids, all_ids = _aligned_text_ids(payload)
+    # Vendor ``stream_generate`` advances text and audio one token per
+    # step, so the talker bridge row count matches the GENERATED text,
+    # not prompt + generated. Slice both sides to the generated tail.
+    if output_ids:
+        all_ids = list(output_ids)
+        prompt_ids = []
     bridge = _normalise_bridge(payload, len(all_ids))
     if len(all_ids) > bridge.shape[0]:  # defensive; _normalise_bridge already checks
         all_ids = all_ids[-bridge.shape[0] :]
-    if len(prompt_ids) > len(all_ids):
-        prompt_ids = prompt_ids[-len(all_ids) :]
-        output_ids = []
-    else:
-        output_ids = output_ids[: len(all_ids) - len(prompt_ids)]
+        output_ids = output_ids[-bridge.shape[0] :] if output_ids else []
     input_ids = torch.full(
         (max(1, len(prompt_ids)),),
         AUDIO_PAD_TOKEN_ID,

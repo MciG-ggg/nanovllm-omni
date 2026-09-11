@@ -28,6 +28,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import torch.cuda.nvtx as nvtx
+
 from .env import git_commit, gpu_label
 from .smolvlm_prompts import SMOLVLM_INPUTS, SmolVLMInput
 
@@ -117,10 +119,21 @@ def _load_pipeline(device: str | None) -> Any:
 def _infer_one(pipeline: Any, prompt: str, max_new_tokens: int) -> str:
     """One text-only forward through the SmolVLM stage contract.
 
+    NVTX ranges (per ADR 0001):
+    - :vlm-decode  -- SmolVLM processor + AR forward + per-token decode
+
+    The ADR schema lists 3 separate ranges (tokenize / vlm-prefill /
+    vlm-decode) but we wrap the whole upstream ``model.generate`` as
+    :vlm-decode here because splitting them requires intrusive changes
+    to transformers' generate. For text-only short prompts (smolvlm_short),
+    decode is the dominant cost; for medium/long prompts the implicit
+    prefill + decode split is roughly proportional to AR length.
+
     Returns the decoded text (informational; not part of the timing).
     """
     sampling = SimpleNamespace(extra={"max_new_tokens": max_new_tokens, "images": []})
-    return pipeline({"prompt": prompt}, sampling)
+    with nvtx.range(":vlm-decode"):
+        return pipeline({"prompt": prompt}, sampling)
 
 
 def _run_baseline(

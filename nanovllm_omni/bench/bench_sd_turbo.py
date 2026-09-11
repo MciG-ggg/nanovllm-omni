@@ -23,6 +23,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import torch.cuda.nvtx as nvtx
+
 from .env import git_commit, gpu_label
 from .sd_turbo_prompts import SD_TURBO_INPUTS, SdTurboInput
 
@@ -113,13 +115,22 @@ def _load_pipeline(device: str | None) -> Any:
 
 
 def _infer_one(pipeline: Any, prompt: str) -> Any:
-    """One forward through the 4-method diffusion contract (sd-turbo = 1 step)."""
-    state = pipeline.prepare_encode({"prompt": prompt})
+    """One forward through the 4-method diffusion contract (sd-turbo = 1 step).
+
+    NVTX ranges (per ADR 0001):
+    - :tokenize    -- CLIP text encoder + initial latents
+    - :unet        -- UNet noise prediction loop
+    - :vae-decode  -- latent -> image
+    """
+    with nvtx.range(":tokenize"):
+        state = pipeline.prepare_encode({"prompt": prompt})
     num_steps = state.metadata["num_steps"]
-    for step in range(num_steps):
-        noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
-        pipeline.step_scheduler(state, noise_pred)
-    return pipeline.post_decode(state)
+    with nvtx.range(":unet"):
+        for step in range(num_steps):
+            noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
+            pipeline.step_scheduler(state, noise_pred)
+    with nvtx.range(":vae-decode"):
+        return pipeline.post_decode(state)
 
 
 def _run_baseline(
@@ -164,6 +175,63 @@ def _run_baseline(
     return walls, peak_vram
 
 
+def _run_cuda_graph(
+    pipeline: Any,
+    sd_input: SdTurboInput,
+    *,
+    runs: int,
+    warmup: int,
+) -> tuple[list[float], float]:
+    """CUDA Graph capture variant: capture once, replay N times.
+
+    The 1-step sd-turbo forward is a fixed-shape computation, so CG
+    capture is straightforward. The captured graph re-runs the same
+    UNet + VAE decode sequence on the original input data (we don't
+    vary the prompt between replays -- that's the cost of a fixed
+    shape). VRAM peak includes the capture-time working set.
+
+    Returns (walls_ms, peak_vram_mb).
+    """
+    import torch
+    from torch.cuda.graph import CUDAGraph
+
+    # Build the state once; capture uses these specific tensor addresses.
+    state = pipeline.prepare_encode({"prompt": sd_input.prompt})
+    num_steps = state.metadata["num_steps"]
+
+    def _gpu_only() -> Any:
+        for step in range(num_steps):
+            noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
+            pipeline.step_scheduler(state, noise_pred)
+        return pipeline.post_decode(state)
+
+    # Warmup the kernels on a side stream (compile CUDA cache + cuDNN).
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(warmup + 2):
+            _gpu_only()
+    torch.cuda.current_stream().wait_stream(side)
+
+    # Capture.
+    g = CUDAGraph()
+    with torch.cuda.graph(g, stream=side):
+        _gpu_only()
+
+    # Replay.
+    walls: list[float] = []
+    torch.cuda.reset_peak_memory_stats()
+    for _ in range(runs):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        g.replay()
+        torch.cuda.synchronize()
+        walls.append((time.perf_counter() - t0) * 1000.0)
+
+    peak_vram = torch.cuda.max_memory_allocated() / (1024**2)
+    return walls, peak_vram
+
+
 def _env_snapshot(out_dir: Path, today: str, gpu: str, commit: str) -> Path:
     """Per-run env snapshot for the perf writeup.
 
@@ -199,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip Kineto trace export (faster; no trace.json.gz written).",
     )
     parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Capture the UNet + VAE decode loop in a CUDA Graph; replay N times.",
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="CSV output path (default: docs/perf/bench_sd_turbo_<commit>.csv)",
@@ -223,13 +296,21 @@ def main(argv: list[str] | None = None) -> int:
     pipeline = _load_pipeline(args.device)
     rows: list[dict[str, Any]] = []
     for sd_input in SD_TURBO_INPUTS:
-        walls, peak_vram = _run_baseline(
-            pipeline,
-            sd_input,
-            runs=args.runs,
-            warmup=args.warmup,
-            profile_out=trace_path,
-        )
+        if args.cuda_graph:
+            walls, peak_vram = _run_cuda_graph(
+                pipeline,
+                sd_input,
+                runs=args.runs,
+                warmup=args.warmup,
+            )
+        else:
+            walls, peak_vram = _run_baseline(
+                pipeline,
+                sd_input,
+                runs=args.runs,
+                warmup=args.warmup,
+                profile_out=trace_path,
+            )
         rows.append(_row(sd_input, walls, gpu, commit, peak_vram))
         p50, p99, _peak = _summarize(walls)
         print(

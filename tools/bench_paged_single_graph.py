@@ -84,9 +84,10 @@ def main() -> int:
     if args.no_flash:
         os.environ["NANOVLLM_DISABLE_FLASH"] = "1"
 
-    from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.paged_attention import disable_paged_kv_cache
     from nanovllm_omni.models.minimind_omni.paged_cuda_graph import enable_paged_cuda_graph
+
+    from nanovllm_omni.models.minimind_omni.bundle import load_minimind_omni_bundle
     from nanovllm_omni.models.minimind_omni.thinker import (
         run_generate,
         tokenize_for_generate,

@@ -26,6 +26,7 @@ from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import (
     DeployConfig,
     PipelineConfig,
+    StageExecutionType,
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
@@ -80,13 +81,19 @@ class PipelineRunner:
 
     def _ensure_stages(self) -> list[Any]:
         if self._stage_instances is None:
-            self._stage_instances = [
-                resolve_stage_factory(stage.factory)(
+            instances = []
+            for stage in self.pipeline.stages:
+                instance = resolve_stage_factory(stage.factory)(
                     self.deploy,
                     self._stage_args(stage.name),
                 )
-                for stage in self.pipeline.stages
-            ]
+                if stage.kind == StageExecutionType.DIFFUSION:
+                    from nanovllm_omni.diffusion.client import InlineDiffusionClient
+
+                    # Factory returns a DiffusionPipeline; wrap in client.
+                    instance = InlineDiffusionClient(instance)
+                instances.append(instance)
+            self._stage_instances = instances
         return self._stage_instances
 
     def _stage_sampling(
@@ -148,7 +155,11 @@ class PipelineRunner:
                 payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
             t0 = time.perf_counter()
-            payload = instance(payload, stage_sampling)
+            if stage_cfg.kind == StageExecutionType.DIFFUSION:
+                # DiffusionClient wraps the pipeline; instance is the client.
+                payload = instance.run(payload, stage_sampling)
+            else:
+                payload = instance(payload, stage_sampling)
             timings.append((stage_cfg.name, (time.perf_counter() - t0) * 1000.0))
         self._last_stage_timings = timings
         return payload

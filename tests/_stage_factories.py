@@ -181,11 +181,36 @@ def get_diffusion_log() -> list[tuple[str, Any, Any]]:
     return list(_diffusion_log)
 
 
+class _LoggedDiffusionPipeline:
+    """Fake DiffusionPipeline that logs calls and returns a constant."""
+
+    supports_step_execution = True
+
+    def __init__(self, log_target: list) -> None:
+        self._log = log_target
+
+    def prepare_encode(self, request: Any) -> Any:
+        from nanovllm_omni.diffusion.interface import StepState
+
+        return StepState(
+            request_id="test",
+            latents=0.0,
+            encoder_hidden_states=None,
+        )
+
+    def denoise_step(self, state: Any, *, step: int, num_steps: int) -> Any:
+        return 0.1
+
+    def step_scheduler(self, state: Any, noise_pred: Any) -> None:
+        state.latents = state.latents + noise_pred
+
+    def post_decode(self, state: Any) -> Any:
+        from nanovllm_omni.diffusion.interface import DiffusionOutput
+
+        self._log.append(("dit", state.latents, None))
+        return DiffusionOutput(images=["video"], finished=True)
+
+
 def logged_diffusion(deploy: Any, args: Any) -> Any:
-    """Diffusion (single-stage) factory: returns ``"video"`` and logs."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        _diffusion_log.append(("dit", payload, sampling))
-        return "video"
-
-    return forward
+    """Diffusion (single-stage) factory: returns a logged pipeline."""
+    return _LoggedDiffusionPipeline(_diffusion_log)

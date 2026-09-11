@@ -1,18 +1,26 @@
-"""Profile bench skeleton for sd-turbo (Phase 1 baseline).
+"""Profile bench for sd-turbo (Phase 1 baseline).
 
-# Phase 1: baseline-only wall time over SD_TURBO_INPUTS. No Kineto
-# capture or per-stage breakdown yet -- those land when StageProfile
-# gains model-aware stage names (tokenize / unet / vae-decode).
-# See ADR 0001 for the protocol.
+Runs the project's SdTurboPipeline (``_sd_turbo_stage`` factory) under
+Kineto capture, writes one CSV row per input with p50 / p99 / peak VRAM,
+plus a per-run Kineto trace to ``docs/perf/sd-turbo-<date>.trace.json.gz``
+and an env snapshot at ``docs/perf/sd-turbo-<date>.env.txt``.
+
+See ADR 0001 for the 4-phase protocol. This file implements Phase 1
+only: no CUDA Graph, no fusion patches, no per-stage NVTX markers yet --
+Phase 2 cell design follows the bottleneck finding from this profile.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import platform
 import statistics
+import time
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .env import git_commit, gpu_label
@@ -33,7 +41,8 @@ CSV_COLUMNS: tuple[str, ...] = (
 def _summarize(walls: Sequence[float]) -> tuple[float, float, float]:
     """(p50, p99, peak) over the timed walls. Zeros if fewer than 2 runs."""
     if len(walls) < 2:
-        return (walls[0] if walls else 0.0, 0.0, walls[0] if walls else 0.0)
+        only = walls[0] if walls else 0.0
+        return (only, 0.0, only)
     cuts = statistics.quantiles(walls, n=100, method="inclusive")
     return (cuts[49], cuts[98], max(walls))
 
@@ -63,6 +72,14 @@ def _csv_path(out_dir: Path, commit: str) -> Path:
     return out_dir / f"bench_sd_turbo_{commit}.csv"
 
 
+def _trace_path(out_dir: Path, today: str) -> Path:
+    return out_dir / f"sd-turbo-{today}.trace.json.gz"
+
+
+def _env_path(out_dir: Path, today: str) -> Path:
+    return out_dir / f"sd-turbo-{today}.env.txt"
+
+
 def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     import csv
 
@@ -74,12 +91,110 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
+def _load_pipeline(device: str | None) -> Any:
+    """Load SdTurboPipeline via the project's factory (not raw diffusers).
+
+    Going through ``_sd_turbo_stage`` keeps the profile on OUR code path,
+    not the upstream diffusers pipe -- the parity comparison (Phase 3)
+    is the one that benchmarks diffusers directly.
+    """
+    from nanovllm_omni.models.sd_turbo.stage import _sd_turbo_stage
+
+    args = SimpleNamespace(
+        model="stabilityai/sd-turbo",
+        device=device,
+        dtype="float16",
+        extra={"allow_hf_download": True},
+    )
+    return _sd_turbo_stage(None, args)
+
+
+def _infer_one(pipeline: Any, prompt: str) -> Any:
+    """One forward through the 4-method diffusion contract (sd-turbo = 1 step)."""
+    state = pipeline.prepare_encode({"prompt": prompt})
+    num_steps = state.metadata["num_steps"]
+    for step in range(num_steps):
+        noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
+        pipeline.step_scheduler(state, noise_pred)
+    return pipeline.post_decode(state)
+
+
+def _run_baseline(
+    pipeline: Any,
+    sd_input: SdTurboInput,
+    *,
+    runs: int,
+    warmup: int,
+    profile_out: Path | None,
+) -> tuple[list[float], float]:
+    """Warmup + N timed forwards; return (walls_ms, peak_vram_mb).
+
+    All N timed forwards share one Kineto context so ``profile_out``
+    captures the whole bench, not just the last run.
+    """
+    import torch
+    from torch.profiler import ProfilerActivity, profile
+
+    for _ in range(warmup):
+        _infer_one(pipeline, sd_input.prompt)
+
+    walls: list[float] = []
+    torch.cuda.reset_peak_memory_stats()
+
+    if profile_out is not None:
+        prof_ctx: Any = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+    else:
+        prof_ctx = contextlib.nullcontext()
+
+    with prof_ctx as prof:
+        for _ in range(runs):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            _infer_one(pipeline, sd_input.prompt)
+            torch.cuda.synchronize()
+            walls.append((time.perf_counter() - t0) * 1000.0)
+
+    peak_vram = torch.cuda.max_memory_allocated() / (1024**2)
+    if profile_out is not None and prof is not None:
+        profile_out.parent.mkdir(parents=True, exist_ok=True)
+        prof.export_chrome_trace(str(profile_out))
+    return walls, peak_vram
+
+
+def _env_snapshot(out_dir: Path, today: str, gpu: str, commit: str) -> Path:
+    """Per-run env snapshot for the perf writeup.
+
+    Fields: torch version, commit, GPU name + driver, CUDA version,
+    today's date. Matches minimind's ``.env.txt`` convention.
+    """
+    import torch
+
+    lines = [
+        f"date: {today}",
+        f"commit: {commit}",
+        f"gpu: {gpu}",
+        f"torch: {torch.__version__}",
+        f"cuda_available: {torch.cuda.is_available()}",
+    ]
+    if torch.cuda.is_available():
+        lines.append(f"cuda: {torch.version.cuda}")
+        lines.append(f"device: {torch.cuda.get_device_name(0)}")
+    path = _env_path(out_dir, today)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="stabilityai/sd-turbo")
     parser.add_argument("--device", default=None)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="Skip Kineto trace export (faster; no trace.json.gz written).",
+    )
     parser.add_argument(
         "--out",
         default=None,
@@ -89,8 +204,10 @@ def main(argv: list[str] | None = None) -> int:
 
     gpu = gpu_label()
     commit = git_commit()
+    today = date.today().isoformat()
     out_dir = Path(__file__).resolve().parents[3] / "docs" / "perf"
     out_path = Path(args.out) if args.out else _csv_path(out_dir, commit)
+    trace_path = None if args.no_trace else _trace_path(out_dir, today)
 
     if gpu == "cpu":
         # No CUDA -> still produce a CSV row (all zeros) so the bench
@@ -100,12 +217,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    # TODO(wire): load the sd-turbo diffusers pipeline + run N timed
-    # forwards per input. Until wired, write empty rows so the CSV
-    # contract is preserved.
-    rows = [_row(sd_input, [0.0] * args.runs, gpu, commit, 0.0) for sd_input in SD_TURBO_INPUTS]
+    pipeline = _load_pipeline(args.device)
+    rows: list[dict[str, Any]] = []
+    for sd_input in SD_TURBO_INPUTS:
+        walls, peak_vram = _run_baseline(
+            pipeline,
+            sd_input,
+            runs=args.runs,
+            warmup=args.warmup,
+            profile_out=trace_path,
+        )
+        rows.append(_row(sd_input, walls, gpu, commit, peak_vram))
+        p50, p99, _peak = _summarize(walls)
+        print(
+            f"{sd_input.id}: p50={p50:.3f} ms, p99={p99:.3f} ms, " f"peak_vram={peak_vram:.0f} MiB"
+        )
+
     _write_csv(rows, out_path)
-    print(f"wrote {out_path} ({platform.node()}) [skeleton: not yet wired]")
+    _env_snapshot(out_dir, today, gpu, commit)
+    trace_msg = str(trace_path) if trace_path is not None else "(no trace)"
+    print(f"wrote {out_path} + {trace_msg} ({platform.node()})")
     return 0
 
 

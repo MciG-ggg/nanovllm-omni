@@ -199,11 +199,15 @@ def _run_cuda_graph(
     num_steps = state.metadata["num_steps"]
 
     def _gpu_only() -> Any:
-        # Reset before each call: step_scheduler increments state.step_index
-        # and we share the same state across warmup + capture + replays.
-        # Without the reset, warmup 2 reads timesteps[1] which is OOB for
-        # 1-step sd-turbo.
+        # Reset before each call. We share one state + one scheduler
+        # across warmup + capture + replays, but:
+        # - step_scheduler mutates state.step_index (Python int, leaks)
+        # - scheduler.step() mutates an internal _step_index (also leaks,
+        #   but only via set_timesteps reset)
+        # Without the resets, warmup 2 reads timesteps[1] / sigmas[2]
+        # which are OOB for 1-step sd-turbo.
         state.step_index = 0
+        pipeline.scheduler.set_timesteps(num_steps)
         for step in range(num_steps):
             noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
             pipeline.step_scheduler(state, noise_pred)

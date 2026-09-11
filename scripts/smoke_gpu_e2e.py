@@ -316,7 +316,8 @@ def test_smolvla_split_stages():
     from PIL import Image as PILImage
 
     fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
-    fake_state = np.random.randn(7).astype(np.float32)
+    # SmolVLA expects 8-dim state (not 7)
+    fake_state = np.random.randn(8).astype(np.float32)
 
     sampling = SamplingParams(
         extra={
@@ -391,7 +392,8 @@ def test_smolvla_legacy_single_stage():
     from PIL import Image as PILImage
 
     fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
-    fake_state = np.random.randn(7).astype(np.float32)
+    # SmolVLA expects 8-dim state (not 7)
+    fake_state = np.random.randn(8).astype(np.float32)
 
     sampling = SamplingParams(
         extra={

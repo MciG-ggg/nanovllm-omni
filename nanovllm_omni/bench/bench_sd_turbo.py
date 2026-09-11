@@ -104,7 +104,10 @@ def _load_pipeline(device: str | None) -> Any:
         model="stabilityai/sd-turbo",
         device=device,
         dtype="float16",
-        extra={"allow_hf_download": True},
+        # allow_hf_download=False so the factory sets variant="fp16" and
+        # diffusers resolves to the *.fp16.safetensors files in the offline
+        # HF cache (stabilityai/sd-turbo ships only the fp16 variant).
+        extra={"allow_hf_download": False},
     )
     return _sd_turbo_stage(None, args)
 

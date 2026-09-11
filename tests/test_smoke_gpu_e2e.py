@@ -1,4 +1,4 @@
-"""End-to-end GPU smoke tests for diffusion engine + smolvla split stages.
+"""End-to-end GPU smoke tests for diffusion engine + smolvla two stages.
 
 Runs on WSL (RTX 3050 4GB) with real weights.
 Verifies:
@@ -223,7 +223,7 @@ def test_sdturbo_pipeline_matches_legacy():
 
 
 @pytest.mark.smoke
-def test_smolvla_split_stages_e2e():
+def test_smolvla_two_stage_e2e():
     """Run the two-stage smolvla pipeline through PipelineRunner.
     Uses real SmolVLM backbone + real DiffusionEngine action stage.
     """
@@ -240,7 +240,7 @@ def test_smolvla_split_stages_e2e():
 
     # Build a two-stage pipeline config.
     pipeline = PipelineConfig(
-        name="smolvla_split_test",
+        name="smolvla_test",
         stages=(
             StageConfig(
                 stage_id=0,
@@ -291,64 +291,4 @@ def test_smolvla_split_stages_e2e():
 
     assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
     assert result.array.shape[1] == 7, f"Expected 7-DoF actions, got shape={result.array.shape}"
-    print(f"SmolVLA split stages test passed: action shape={result.array.shape}")
-
-
-# ---------------------------------------------------------------------------
-# SmolVLA: legacy single-stage path (backward compat)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.smoke
-def test_smolvla_legacy_single_stage():
-    """Legacy single-stage smolvla still works (ADR-031)."""
-    from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
-    from nanovllm_omni.config.registry import (
-        DeployConfig,
-        PipelineConfig,
-        StageConfig,
-        StageExecutionType,
-    )
-    from nanovllm_omni.engine.runner import PipelineRunner
-
-    _smolvla_family = "nanovllm_omni.models.smolvla"
-
-    pipeline = PipelineConfig(
-        name="smolvla_legacy_test",
-        stages=(
-            StageConfig(
-                stage_id=0,
-                name="vla",
-                kind=StageExecutionType.LLM_GENERATION,
-                factory=f"{_smolvla_family}.stage:_vla_stage",
-                process_input=None,
-                input_sources=(),
-                is_terminal=True,
-                final_output_type="actions",
-            ),
-        ),
-        default_deploy_config_name="smolvla.yaml",
-    )
-
-    deploy = DeployConfig(stages=(), max_batch=2)
-    args = OmniEngineArgs(
-        model=SMOLVLA_MODEL,
-        device="cuda",
-        extra={"allow_hf_download": False},
-    )
-
-    sampling = SamplingParams(
-        extra={
-            "image": torch.randn(3, 224, 224).byte(),
-            "state": torch.randn(7).float().numpy(),
-        },
-    )
-
-    runner = PipelineRunner(pipeline, deploy, args)
-    result = runner.run("pick up the red block", sampling)
-
-    from nanovllm_omni.outputs import ActionArtifact
-
-    assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
-    assert result.array.ndim == 2, f"Expected 2-D action array, got ndim={result.array.ndim}"
-    print(f"SmolVLA legacy test passed: action shape={result.array.shape}")
+    print(f"SmolVLA two-stage test passed: action shape={result.array.shape}")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end GPU smoke tests for diffusion engine + smolvla split stages.
+"""End-to-end GPU smoke tests for diffusion engine + smolvla two stages.
 
 Standalone script (no conftest.py dependency) — runs on WSL (RTX 3050 4GB)
 with real weights in HF cache (offline).
@@ -8,7 +8,6 @@ Verifies:
   1. SD-Turbo: SdTurboPipeline → DiffusionEngine → valid PIL Image
   2. SD-Turbo: DiffusionEngine output vs legacy StableDiffusionPipeline
   3. SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact
-  4. SmolVLA: legacy single-stage → ActionArtifact (backward compat)
 """
 
 import sys
@@ -261,7 +260,7 @@ def test_sdturbo_matches_legacy():
 # =========================================================================
 # Test 3: SmolVLA — two-stage pipeline (vlm + action)
 # =========================================================================
-def test_smolvla_split_stages():
+def test_smolvla_two_stage():
     from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
     from nanovllm_omni.config.registry import (
         DeployConfig,
@@ -275,7 +274,7 @@ def test_smolvla_split_stages():
     smolvla_family = "nanovllm_omni.models.smolvla"
 
     pipeline = PipelineConfig(
-        name="smolvla_split_test",
+        name="smolvla_test",
         stages=(
             StageConfig(
                 stage_id=0,
@@ -339,80 +338,6 @@ def test_smolvla_split_stages():
 
 
 # =========================================================================
-# Test 4: SmolVLA — legacy single-stage (backward compat)
-# =========================================================================
-def test_smolvla_legacy_single_stage():
-    try:
-        import lerobot  # noqa: F401
-
-        # Check if the required SmolVLM2 backbone is cached
-        from transformers import AutoConfig
-
-        AutoConfig.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Instruct", local_files_only=True)
-    except (ImportError, OSError) as e:
-        print(f"  ⏭️  SKIPPED: {type(e).__name__}: {e}")
-        return
-
-    from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
-    from nanovllm_omni.config.registry import (
-        DeployConfig,
-        PipelineConfig,
-        StageConfig,
-        StageExecutionType,
-    )
-    from nanovllm_omni.engine.runner import PipelineRunner
-    from nanovllm_omni.outputs import ActionArtifact
-
-    smolvla_family = "nanovllm_omni.models.smolvla"
-
-    pipeline = PipelineConfig(
-        name="smolvla_legacy_test",
-        stages=(
-            StageConfig(
-                stage_id=0,
-                name="vla",
-                kind=StageExecutionType.LLM_GENERATION,
-                factory=f"{smolvla_family}.stage:_vla_stage",
-                process_input=None,
-                input_sources=(),
-                is_terminal=True,
-                final_output_type="actions",
-            ),
-        ),
-        default_deploy_config_name="smolvla.yaml",
-    )
-
-    deploy = DeployConfig(stages=(), max_batch=2)
-    args = OmniEngineArgs(
-        model=SMOLVLA_MODEL,
-        device="cuda",
-        extra={"allow_hf_download": False},
-    )
-
-    from PIL import Image as PILImage
-
-    fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
-    # SmolVLA expects 8-dim state (not 7)
-    fake_state = np.random.randn(8).astype(np.float32)
-
-    sampling = SamplingParams(
-        extra={
-            "image": fake_image,
-            "state": fake_state,
-        },
-    )
-
-    runner = PipelineRunner(pipeline, deploy, args)
-    result = runner.run("pick up the red block", sampling)
-
-    assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
-    assert result.array.ndim == 2, f"Expected 2-D, got ndim={result.array.ndim}"
-    print(
-        f"  Action shape: {result.array.shape}, values range: [{result.array.min():.4f}, {result.array.max():.4f}]"
-    )
-
-
-# =========================================================================
 # Main
 # =========================================================================
 if __name__ == "__main__":
@@ -420,13 +345,7 @@ if __name__ == "__main__":
     run_test(
         "SD-Turbo: DiffusionEngine vs legacy StableDiffusionPipeline", test_sdturbo_matches_legacy
     )
-    run_test(
-        "SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact", test_smolvla_split_stages
-    )
-    run_test(
-        "SmolVLA: legacy single-stage → ActionArtifact (backward compat)",
-        test_smolvla_legacy_single_stage,
-    )
+    run_test("SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact", test_smolvla_two_stage)
 
     print(f"\n{'='*50}")
     print(f"Results: {passed} passed, {failed} failed")

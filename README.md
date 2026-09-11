@@ -64,7 +64,7 @@ Wan2.2** path, the Rising0321 repo is what you want.
 | MiniMind-O (`minimind-3o`) | 3 (Thinker → Talker → Code2Wav) | audio (24 kHz mono WAV) | `jingyaogong/minimind-3o` + `kyutai/mimi` |
 | SmolVLM-500M-Instruct | 1 (VLM) | text | `HuggingFaceTB/SmolVLM-500M-Instruct` |
 | SD-Turbo | 1 (DIFFUSION, 1-step) | image (512×512 PNG) | `stabilityai/sd-turbo` |
-| SmolVLA | 1 (LLM_GENERATION) | action chunks | `HuggingFaceVLA/smolvla_libero` + LIBERO datasets |
+| SmolVLA | 2 (vlm LLM_AR → action DIFFUSION) | action chunks | `HuggingFaceVLA/smolvla_libero` + LIBERO datasets |
 
 All four run on a single 4 GB consumer card (RTX 3050) in one process. Image generation, video generation, vision LLMs beyond SmolVLM, full VLA stacks, and full-duplex S2S are aspirational and are not implemented.
 
@@ -106,7 +106,7 @@ At 500 M parameters the answers are short and the art-style question resolves to
 
 <video controls src="docs/gallery/smolvla_0.mp4" width="480"></video>
 
-LIBERO eval episode; the LLM_GENERATION stage emits an action chunk (`numpy.ndarray` of shape `[chunk_size, action_dim]`). This video is the chunk driven through the LIBERO simulator. Source: `examples/offline_inference/smolvla/libero_eval.py`.
+LIBERO eval episode; the two-stage pipeline (vlm LLM_AR → action DIFFUSION) emits an action chunk (`numpy.ndarray` of shape `[chunk_size, action_dim]`), bit-exact vs `predict_action_chunk`. This video is the chunk driven through the LIBERO simulator. Source: `examples/offline_inference/smolvla/libero_eval.py`.
 
 ## Quickstart
 

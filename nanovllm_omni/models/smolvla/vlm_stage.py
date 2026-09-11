@@ -7,7 +7,7 @@ action stage. This is the "prefix phase" of flow matching.
 Per ADR-029 (deferred): we use lerobot's internal `vlm_with_expert` directly
 rather than weight-slicing into a fork `SmolVLMForCausalLM`. This keeps the
 KV cache format identical to lerobot's, which is critical for bit-exact
-alignment between the split path and `policy.predict_action_chunk`.
+alignment between the two-stage path and `policy.predict_action_chunk`.
 
 See docs/dev/nanovllm-omni-smolvla-arflow-migration.md §3 ADR-029.
 """
@@ -86,7 +86,7 @@ class SmolVLAVlmStage:
             else {}
         )
 
-        # Build observation batch (matches _obs_batch in legacy stage.py).
+        # Build observation batch (single image + state, preprocessor normalizes).
         images_list = []
         img = extras.get("image") or extras.get("observation.images.image")
         if img is not None:

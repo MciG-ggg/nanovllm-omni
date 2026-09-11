@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import nanovllm_omni
 from nanovllm_omni.config import resolve_pipeline_config
-from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import StageExecutionType
-from nanovllm_omni.models.smolvla import stage as smolvla_stage
 from nanovllm_omni.outputs import ActionArtifact, OmniRequestOutput
 
 REPO = Path(__file__).resolve().parents[1]
@@ -26,10 +22,12 @@ class _Arr:
 def test_pipeline_registry_resolves_smolvla():
     config = resolve_pipeline_config("smolvla")
     assert config is not None
-    assert [s.name for s in config.stages] == ["vla"]
-    assert config.stages[0].kind == StageExecutionType.LLM_GENERATION
-    assert config.stages[0].is_terminal is True
-    assert config.stages[0].final_output_type == "actions"
+    assert [s.name for s in config.stages] == ["vlm", "action"]
+    assert config.stages[0].kind == StageExecutionType.LLM_AR
+    assert config.stages[0].is_terminal is False
+    assert config.stages[1].kind == StageExecutionType.DIFFUSION
+    assert config.stages[1].is_terminal is True
+    assert config.stages[1].final_output_type == "actions"
     assert config.default_deploy_config_name == "smolvla.yaml"
 
 
@@ -44,57 +42,6 @@ def test_from_pipeline_actions_key():
     output = OmniRequestOutput.from_pipeline(artifact, final_output_type="actions")
     assert output.multimodal_output is not None
     assert output.multimodal_output["actions"] is artifact
-
-
-def test_vla_stage_requires_lerobot(monkeypatch):
-    def boom() -> None:
-        raise ImportError("lerobot is required for SmolVLA")
-
-    monkeypatch.setattr(smolvla_stage, "_import_smolvla_policy", boom)
-    with pytest.raises(ImportError, match="lerobot"):
-        smolvla_stage._vla_stage(None, OmniEngineArgs(model="smolvla"))
-
-
-def test_vla_stage_requires_image(monkeypatch):
-    class _Policy:
-        def predict_action_chunk(self, batch):
-            raise AssertionError("should not run")
-
-    monkeypatch.setattr(smolvla_stage, "_load_policy", lambda args: _Policy())
-    forward = smolvla_stage._vla_stage(None, OmniEngineArgs(model="smolvla", device="cpu"))
-    with pytest.raises(ValueError, match=r"extra\['image'\]"):
-        forward("pick up the mug", SamplingParams())
-
-
-def test_omni_generate_returns_actions(monkeypatch):
-    pytest.importorskip("numpy")
-    pytest.importorskip("torch")
-    import numpy as np
-
-    class _Policy:
-        def predict_action_chunk(self, batch):
-            assert "observation.images.image" in batch
-            assert batch["task"] == ["pick up the mug"]
-            return np.zeros((1, 50, 7), dtype=np.float32)
-
-        preprocessor = staticmethod(lambda b: b)
-        postprocessor = staticmethod(lambda b: b)
-
-    monkeypatch.setattr(smolvla_stage, "_load_policy", lambda args: _Policy())
-
-    from nanovllm_omni import Omni
-
-    omni = Omni("smolvla", device="cpu", deploy_config_path=str(DEPLOY))
-    image = np.zeros((256, 256, 3), dtype=np.uint8)
-    state = np.zeros(8, dtype=np.float32)
-    out = omni.generate(
-        ["pick up the mug"],
-        SamplingParams(extra={"image": image, "wrist_image": image, "state": state}),
-    )[0]
-    action = out.multimodal_output["actions"]
-    assert isinstance(action, ActionArtifact)
-    assert action.chunk_size == 50
-    assert action.action_dim == 7
 
 
 def test_local_dir_config_type_selects_smolvla(tmp_path: Path):
@@ -186,21 +133,3 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
     assert base._compute_final_stage_id(["audio"]) == 2
     # Unknown modality falls back to last stage.
     assert base._compute_final_stage_id(["video"]) == 2
-
-
-def test_as_nchw_accepts_image_bytes(monkeypatch) -> None:
-    """TK-017: base64-decoded image bytes decode to a batch-NCHW tensor.
-
-    Needs numpy + Pillow, so it skips cleanly on the no-torch / no-PIL CI
-    jobs (dev extra has neither).
-    """
-    from io import BytesIO
-
-    np = pytest.importorskip("numpy")
-    image_cls = pytest.importorskip("PIL.Image")
-
-    buf = BytesIO()
-    image_cls.fromarray(np.zeros((16, 24, 3), dtype=np.uint8)).save(buf, format="PNG")
-    tensor = smolvla_stage._as_nchw(buf.getvalue(), None)
-    assert tuple(tensor.shape) == (1, 3, 16, 24)
-    assert tensor.dtype != "object"

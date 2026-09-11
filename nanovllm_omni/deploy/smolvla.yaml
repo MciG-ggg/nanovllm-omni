@@ -1,3 +1,6 @@
 stages:
-  - name: vla
+  - name: vlm
     default_sampling_params: {}
+  - name: action
+    default_sampling_params:
+      num_inference_steps: 10

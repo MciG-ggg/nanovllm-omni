@@ -54,7 +54,7 @@
 | MiniMind-O(`minimind-3o`) | 3 (Thinker → Talker → Code2Wav) | 音频(24 kHz mono WAV) | `jingyaogong/minimind-3o` + `kyutai/mimi` |
 | SmolVLM-500M-Instruct | 1 (VLM) | 文本 | `HuggingFaceTB/SmolVLM-500M-Instruct` |
 | SD-Turbo | 1 (DIFFUSION, 1-step) | 图像(512×512 PNG) | `stabilityai/sd-turbo` |
-| SmolVLA | 1 (LLM_GENERATION) | 动作 chunk | `HuggingFaceVLA/smolvla_libero` + LIBERO 数据集 |
+| SmolVLA | 2 (vlm LLM_AR → action DIFFUSION) | 动作 chunk | `HuggingFaceVLA/smolvla_libero` + LIBERO 数据集 |
 
 四个模型全部跑在单张 4 GB 消费级卡(RTX 3050)上,一个 Python 进程。视频生成、超出所列四类的多模型流水线、完整 VLA 栈、全双工 S2S 都是当前规划、暂未实现。
 
@@ -96,7 +96,7 @@ SD-Turbo 的对抗蒸馏锁死 `guidance_scale=0.0` 与 `num_inference_steps=1`;
 
 <video controls src="docs/gallery/smolvla_0.mp4" width="480"></video>
 
-LIBERO 评测片段;LLM_GENERATION stage 输出 action chunk(`numpy.ndarray`,形状 `[chunk_size, action_dim]`)。视频是把 chunk 喂给 LIBERO 模拟器跑出来的。代码:`examples/offline_inference/smolvla/libero_eval.py`。
+LIBERO 评测片段;两阶段管线(vlm LLM_AR → action DIFFUSION)输出 action chunk(`numpy.ndarray`,形状 `[chunk_size, action_dim]`),与 `predict_action_chunk` bit-exact。视频是把 chunk 喂给 LIBERO 模拟器跑出来的。代码:`examples/offline_inference/smolvla/libero_eval.py`。
 
 ## 快速开始
 

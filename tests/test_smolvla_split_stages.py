@@ -1,4 +1,4 @@
-"""SmolVLA split-stages tests: CPU-side, no GPU or lerobot required.
+"""SmolVLA two-stage tests: CPU-side, no GPU or lerobot required.
 
 Verifies:
 - ``vlm2action`` bridge: shape validation, TypeError on non-VlmStageOutput
@@ -161,14 +161,14 @@ def test_post_decode_returns_action_artifact():
     assert action_artifact.array.shape == (10, 7)
 
 
-def test_smolvla_split_pipeline_topology():
+def test_smolvla_pipeline_topology():
     """Pipeline topology: 2 stages (vlm + action), correct kinds."""
     from nanovllm_omni.config import resolve_pipeline_config
     from nanovllm_omni.config.registry import StageExecutionType
 
-    config = resolve_pipeline_config("smolvla_split")
+    config = resolve_pipeline_config("smolvla")
     assert config is not None
-    assert config.name == "smolvla_split"
+    assert config.name == "smolvla"
     assert len(config.stages) == 2
     assert config.stages[0].name == "vlm"
     assert config.stages[0].kind == StageExecutionType.LLM_AR
@@ -181,15 +181,11 @@ def test_smolvla_split_pipeline_topology():
     assert "vlm2action" in config.stages[1].process_input
 
 
-def test_smolvla_legacy_pipeline_unchanged():
-    """Legacy single-stage pipeline still works (ADR-031 backward compat)."""
+def test_smolvla_libero_handle_resolves():
+    """HF handle resolves to the two-stage smolvla pipeline."""
     from nanovllm_omni.config import resolve_pipeline_config
-    from nanovllm_omni.config.registry import StageExecutionType
 
-    config = resolve_pipeline_config("smolvla")
+    config = resolve_pipeline_config("HuggingFaceVLA/smolvla_libero")
     assert config is not None
-    assert len(config.stages) == 1
-    assert config.stages[0].name == "vla"
-    assert config.stages[0].kind == StageExecutionType.LLM_GENERATION
-    assert config.stages[0].is_terminal is True
-    assert config.stages[0].final_output_type == "actions"
+    assert config.name == "smolvla"
+    assert len(config.stages) == 2

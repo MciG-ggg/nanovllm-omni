@@ -2,7 +2,7 @@
 
 Implements the ``DiffusionPipeline`` 4-method contract to run flow
 matching with the action expert. This is the second stage of the
-SmolVLA two-stage split.
+SmolVLA two-stage pipeline.
 
 Uses lerobot's internal ``denoise_step`` + ``euler_integrate`` to
 maintain bit-exact alignment with ``policy.predict_action_chunk``.

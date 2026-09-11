@@ -36,7 +36,7 @@ def _mini_pipeline(name: str) -> PipelineConfig:
                 stage_id=0,
                 name="stage",
                 kind=StageExecutionType.LLM_AR,
-                factory="nanovllm_omni.models.smolvla.stage:_vla_stage",
+                factory="nanovllm_omni.models.smolvla.vlm_stage:_vlm_stage",
                 is_terminal=True,
             ),
         ),

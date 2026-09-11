@@ -5,9 +5,8 @@ Runs on WSL (RTX 3050 4GB) with real weights. Verifies:
 
   1. SD-Turbo: DiffusionEngine output == StableDiffusionPipeline output
      (bit-exact, same seed + 1 step + guidance=0).
-  2. SmolVLA legacy: our _vla_stage output == policy.select_action(obs).
-  3. SmolVLA split: vlm_stage + action_stage == policy.predict_action_chunk(obs).
-  4. SmolVLM (greedy): custom generate loop == model.generate() (token-level).
+  2. SmolVLA: vlm_stage + action_stage == policy.predict_action_chunk(obs).
+  3. SmolVLM (greedy): custom generate loop == model.generate() (token-level).
 
 Per docs:
   - docs/dev/nanovllm-omni-sdturbo-diffusion-migration.md §5.2
@@ -181,120 +180,11 @@ def test_sdturbo_alignment():
 
 
 # =========================================================================
-# Test 2: SmolVLA legacy — our _vla_stage vs policy.select_action
+# Test 2: SmolVLA two-stage — vlm + action vs policy.predict_action_chunk
 # =========================================================================
-def test_smolvla_legacy_alignment():
-    print("\n--- SmolVLA legacy: _vla_stage vs policy.select_action ---")
-    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-
-    from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
-    from nanovllm_omni.config.registry import (
-        DeployConfig,
-        PipelineConfig,
-        StageConfig,
-        StageExecutionType,
-    )
-    from nanovllm_omni.engine.runner import PipelineRunner
-
-    # Load policy directly for baseline
-    policy = SmolVLAPolicy.from_pretrained(SMOLVLA_MODEL, local_files_only=True, strict=False)
-    device = "cuda"
-    policy = policy.to(device)
-
-    # Synthetic observation (8-dim state per smolvla_libero spec)
-    fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
-    fake_state = np.random.randn(8).astype(np.float32)
-    instruction = "pick up the red block"
-
-    # Build lerobot's internal batch (matches _obs_batch in stage.py)
-    from lerobot.policies import make_pre_post_processors
-
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy.config, pretrained_path=SMOLVLA_MODEL
-    )
-    batch = {
-        "observation.images.image": torch.from_numpy(np.array(fake_image))
-        .permute(2, 0, 1)
-        .unsqueeze(0)
-        .float()
-        .to(device),
-        "task": [instruction],
-    }
-    batch["observation.state"] = torch.from_numpy(fake_state).reshape(1, -1).to(device)
-    batch = preprocessor(batch)
-
-    with torch.inference_mode():
-        torch.manual_seed(42)
-        torch.cuda.manual_seed_all(42)
-        legacy_action = policy.predict_action_chunk(batch)
-
-    legacy_action = postprocessor(legacy_action)
-    if isinstance(legacy_action, torch.Tensor):
-        legacy_action = legacy_action.detach().cpu().float().numpy()
-    if legacy_action.ndim == 3:
-        legacy_action = legacy_action[0]
-    if legacy_action.ndim == 1:
-        legacy_action = legacy_action[None, :]
-
-    # Our path (legacy single stage)
-    smolvla_family = "nanovllm_omni.models.smolvla"
-    pipeline = PipelineConfig(
-        name="smolvla_legacy_align",
-        stages=(
-            StageConfig(
-                stage_id=0,
-                name="vla",
-                kind=StageExecutionType.LLM_GENERATION,
-                factory=f"{smolvla_family}.stage:_vla_stage",
-                process_input=None,
-                input_sources=(),
-                is_terminal=True,
-                final_output_type="actions",
-            ),
-        ),
-        default_deploy_config_name="smolvla.yaml",
-    )
-    deploy = DeployConfig(stages=(), max_batch=2)
-    args = OmniEngineArgs(
-        model=SMOLVLA_MODEL,
-        device=device,
-        extra={"allow_hf_download": False},
-    )
-    sampling = SamplingParams(
-        extra={"image": fake_image, "state": fake_state},
-    )
-    runner = PipelineRunner(pipeline, deploy, args)
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    our_result = runner.run(instruction, sampling)
-    our_action = our_result.array  # [chunk, action_dim]
-
-    # Compare shapes
-    print(f"  legacy shape: {legacy_action.shape}, ours: {our_action.shape}")
-    # Trim to same length (legacy may have 50, ours may have 50)
-    min_len = min(legacy_action.shape[0], our_action.shape[0])
-    legacy_trim = legacy_action[:min_len]
-    our_trim = our_action[:min_len]
-    diff = np.abs(legacy_trim.astype(float) - our_trim.astype(float))
-    # SmolVLA samples from a stochastic flow; gate is atol=1e-4 per doc §6.2
-    # In practice, both paths use lerobot's `select_action` (single-stage) or
-    # `predict_action_chunk` so they share noise. Gate: mean diff < 0.05.
-    record(
-        f"SmolVLA legacy (chunk_len={min_len})",
-        diff.mean() < 0.05,
-        diff.max(),
-        diff.mean(),
-        atol=0.05,
-        msg="[tolerance: flow matching has noise sampling]",
-    )
-
-
-# =========================================================================
-# Test 3: SmolVLA split stages — vlm + action vs policy.predict_action_chunk
-# =========================================================================
-def test_smolvla_split_alignment():
-    print("\n--- SmolVLA split: vlm + action vs policy.predict_action_chunk ---")
-    # Split path mirrors lerobot's sample_actions: vlm_stage runs embed_prefix +
+def test_smolvla_alignment():
+    print("\n--- SmolVLA: vlm + action vs policy.predict_action_chunk ---")
+    # Two-stage path mirrors lerobot's sample_actions: vlm_stage runs embed_prefix +
     # vlm_with_expert.forward (prefix KV cache), action_stage runs denoise_step +
     # Euler integration. Same policy instance (via _POLICY_CACHE), same seed and
     # same preprocessor batch → expect bit-exact vs predict_action_chunk.
@@ -312,7 +202,7 @@ def test_smolvla_split_alignment():
 
     smolvla_family = "nanovllm_omni.models.smolvla"
     pipeline = PipelineConfig(
-        name="smolvla_split_align",
+        name="smolvla_align",
         stages=(
             StageConfig(
                 stage_id=0,
@@ -385,12 +275,12 @@ def test_smolvla_split_alignment():
     runner = PipelineRunner(pipeline, deploy, args)
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
-    split_result = runner.run(instruction, sampling)
-    split_action = split_result.array
-    print(f"  Split stages action shape: {split_action.shape}")
-    diff = np.abs(baseline_action.astype(float) - split_action.astype(float))
+    our_result = runner.run(instruction, sampling)
+    our_action = our_result.array
+    print(f"  SmolVLA action shape: {our_action.shape}")
+    diff = np.abs(baseline_action.astype(float) - our_action.astype(float))
     record(
-        "SmolVLA split (PipelineRunner vs predict_action_chunk)",
+        "SmolVLA (PipelineRunner vs predict_action_chunk)",
         diff.max() < 1e-4,
         diff.max(),
         diff.mean(),
@@ -478,8 +368,7 @@ def test_smolvlm_alignment():
 if __name__ == "__main__":
     test_sdturbo_alignment()
     test_smolvlm_alignment()
-    test_smolvla_legacy_alignment()
-    test_smolvla_split_alignment()
+    test_smolvla_alignment()
 
     print(f"\n{'='*60}")
     print("Alignment summary:")

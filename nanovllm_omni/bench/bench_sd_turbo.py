@@ -193,7 +193,6 @@ def _run_cuda_graph(
     Returns (walls_ms, peak_vram_mb).
     """
     import torch
-    from torch.cuda.graph import CUDAGraph
 
     # Build the state once; capture uses these specific tensor addresses.
     state = pipeline.prepare_encode({"prompt": sd_input.prompt})
@@ -214,7 +213,7 @@ def _run_cuda_graph(
     torch.cuda.current_stream().wait_stream(side)
 
     # Capture.
-    g = CUDAGraph()
+    g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g, stream=side):
         _gpu_only()
 

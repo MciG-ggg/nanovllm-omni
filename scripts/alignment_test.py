@@ -80,7 +80,6 @@ def test_sdturbo_alignment():
     )
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest
     from nanovllm_omni.diffusion.runner import DiffusionRunner
     from nanovllm_omni.models.sd_turbo.stage import SdTurboPipeline
 
@@ -141,9 +140,11 @@ def test_sdturbo_alignment():
     )
 
     gen_ours = torch.Generator(device=device).manual_seed(seed)
+    from types import SimpleNamespace
+
     runner = DiffusionRunner(our_pipeline)
     state = runner.prepare(
-        OmniDiffusionRequest(
+        SimpleNamespace(
             request_id="align",
             prompt=prompt,
             num_inference_steps=1,
@@ -293,12 +294,12 @@ def test_smolvla_legacy_alignment():
 # =========================================================================
 def test_smolvla_split_alignment():
     print("\n--- SmolVLA split: vlm + action vs policy.predict_action_chunk ---")
-    # The split-stages path is structurally different from predict_action_chunk:
-    #  - vlm_stage: HF SmolVLM2 forward (not lerobot's vlm_with_expert)
-    #  - action_stage: action expert + flow matching
-    # Without proper weight slicing (ADR-029), the vlm hidden states won't match
-    # lerobot's internal vlm_with_expert, so action output will diverge.
-    # We measure the actual divergence here.
+    # Split path mirrors lerobot's sample_actions: vlm_stage runs embed_prefix +
+    # vlm_with_expert.forward (prefix KV cache), action_stage runs denoise_step +
+    # Euler integration. Same policy instance (via _POLICY_CACHE), same seed and
+    # same preprocessor batch → expect bit-exact vs predict_action_chunk.
+    from lerobot.policies import make_pre_post_processors
+    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
     from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
     from nanovllm_omni.config.registry import (
@@ -348,28 +349,52 @@ def test_smolvla_split_alignment():
     fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
     fake_state = np.random.randn(8).astype(np.float32)
     instruction = "pick up the red block"
+
+    # Baseline: same preprocessor batch + predict_action_chunk, same seed.
+    device = "cuda"
+    policy = SmolVLAPolicy.from_pretrained(SMOLVLA_MODEL, local_files_only=True, strict=False).to(
+        device
+    )
+    preprocessor, _ = make_pre_post_processors(policy.config, pretrained_path=SMOLVLA_MODEL)
+    batch = {
+        "observation.images.image": torch.from_numpy(np.array(fake_image))
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .float()
+        .to(device),
+        "observation.state": torch.from_numpy(fake_state).reshape(1, -1).to(device),
+        "task": [instruction],
+    }
+    batch = preprocessor(batch)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    with torch.no_grad():
+        base_out = policy.predict_action_chunk(batch)
+    baseline_action = base_out.detach().cpu().numpy()
+    del policy, preprocessor, batch
+    torch.cuda.empty_cache()
+
     sampling = SamplingParams(
         extra={
             "image": fake_image,
             "state": fake_state,
-            "chunk_len": 10,
+            "chunk_len": 50,
             "action_dim": 7,
         },
     )
     runner = PipelineRunner(pipeline, deploy, args)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
     split_result = runner.run(instruction, sampling)
     split_action = split_result.array
     print(f"  Split stages action shape: {split_action.shape}")
-    # Without proper weight slicing, this won't match the baseline. Report what we get.
+    diff = np.abs(baseline_action.astype(float) - split_action.astype(float))
     record(
-        f"SmolVLA split (no weight slicing yet, action_dim={split_action.shape[1]})",
-        # not aligned without proper weight slicing
-        False,
-        0.0,
-        0.0,
-        atol=0.0,
-        msg="[DEFERRED: ADR-029 weight slicing not implemented; vlm_stage uses "
-        "HF SmolVLM2 directly, action expert won't get matching hidden states]",
+        "SmolVLA split (PipelineRunner vs predict_action_chunk)",
+        diff.max() < 1e-4,
+        diff.max(),
+        diff.mean(),
+        atol=1e-4,
     )
 
 

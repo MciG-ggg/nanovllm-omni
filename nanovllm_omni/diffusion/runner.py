@@ -25,8 +25,13 @@ class DiffusionRunner:
 
         Accepts the raw payload directly (no OmniDiffusionRequest conversion)
         so the pipeline receives the full payload with all metadata.
+        Sampling is forwarded so pipelines can read deploy defaults
+        (num_inference_steps/height/width) from ``sampling.extra``.
         """
-        return self.pipeline.prepare_encode(payload)
+        try:
+            return self.pipeline.prepare_encode(payload, sampling)
+        except TypeError:
+            return self.pipeline.prepare_encode(payload)
 
     def denoise_step(
         self,

@@ -39,7 +39,7 @@ class SmolVLAActionPipeline:
         self.config = policy.config
         self.num_inference_steps = num_inference_steps or self.config.num_steps
 
-    def prepare_encode(self, request: Any) -> Any:
+    def prepare_encode(self, request: Any, sampling: Any = None) -> Any:
         """Init latent noise; stash VLM KV cache state for conditioning.
 
         The ``request`` is an ``ActionInputPayload`` from ``vlm2action``.

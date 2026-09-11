@@ -61,13 +61,23 @@ class SdTurboPipeline:
         self.torch_dtype = torch_dtype
         self.vae_scaling = 0.18215  # SD v1/v2 standard
 
-    def prepare_encode(self, request: Any) -> Any:
-        """Text → text embeddings + initial latents."""
+    def prepare_encode(self, request: Any, sampling: Any = None) -> Any:
+        """Text → text embeddings + initial latents.
+
+        ``request`` is the payload (prompt str or object with prompt/height/
+        width/num_inference_steps attrs); ``sampling.extra`` is the fallback
+        for those fields when the payload is a bare prompt string (the
+        PipelineRunner path after OmniDiffusionRequest was removed).
+        """
         import torch
 
         from nanovllm_omni.diffusion.interface import StepState
 
-        prompt = request.prompt if hasattr(request, "prompt") else str(request)
+        extra = dict(getattr(sampling, "extra", None) or {})
+
+        prompt = getattr(request, "prompt", None)
+        if prompt is None:
+            prompt = extra.get("prompt", str(request))
 
         # Tokenize + encode text.
         text_input = self.tokenizer(
@@ -81,8 +91,8 @@ class SdTurboPipeline:
             text_embeddings = self.text_encoder(text_input.input_ids.to(self.target_device))[0]
 
         # Initial random latents.
-        height = getattr(request, "height", 512)
-        width = getattr(request, "width", 512)
+        height = int(getattr(request, "height", extra.get("height", 512)))
+        width = int(getattr(request, "width", extra.get("width", 512)))
         latent_shape = (1, self.unet.config.in_channels, height // 8, width // 8)
         latents = torch.randn(
             latent_shape,
@@ -91,7 +101,9 @@ class SdTurboPipeline:
         )
 
         # Scheduler setup.
-        num_steps = getattr(request, "num_inference_steps", 1)
+        num_steps = int(
+            getattr(request, "num_inference_steps", extra.get("num_inference_steps", 1))
+        )
         self.scheduler.set_timesteps(num_steps)
         latents = latents * self.scheduler.init_noise_sigma
 
@@ -99,6 +111,7 @@ class SdTurboPipeline:
             request_id=getattr(request, "request_id", "sync"),
             latents=latents,
             encoder_hidden_states=text_embeddings,
+            metadata={"num_steps": num_steps},
         )
 
     def denoise_step(self, state: Any, *, step: int, num_steps: int) -> Any:

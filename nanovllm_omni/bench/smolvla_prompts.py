@@ -1,12 +1,12 @@
-"""Profile input set for smolvla (6 inputs x 20 runs each, thorough).
+"""Profile input set for smolvla (1 input x 20 runs, tiny 档 with synthetic data).
 
-Each input is one (state, instruction) pair from a fixed LIBERO demo
-episode. ``state`` carries proprioception + vision; ``instruction`` is
-the high-level task description (constant across the episode).
+Synthetic observation (256x256 RGB + 7-dim zero state) for the Phase 1
+profile -- goal is "where time goes in our two-stage pipeline", not
+LIBERO data fidelity. Real LIBERO demo episode population is a
+follow-up (see TODO in this file).
 
-# TODO(populate): pick a LIBERO task and a fixed demo episode, then
-# extract 6 (state, instruction) pairs from it. Until populated, the
-# tuple is empty so the bench short-circuits cleanly.
+7-dim state is the SmolVLA action_dim per the policy config
+(``action_feature.shape == [7]``).
 """
 
 from __future__ import annotations
@@ -17,20 +17,45 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SmolVLAInput:
-    """One smolvla profile input.
+    """One smolvla profile input (synthetic observation).
 
-    ``state`` shape is lerobot-observation-specific (proprio + vision
-    keys); concrete shape comes from the LIBERO demo chosen above.
+    ``image`` is a HxWx3 uint8 array (numpy); ``state`` is a 7-dim
+    proprio vector; ``instruction`` is the high-level task description.
+    ``num_inference_steps`` is the flow-matching step count (config
+    default 10; profile can vary in Phase 2).
     """
 
     id: str
-    state: Any
+    image: Any
+    state: tuple  # 7-dim proprio
     instruction: str
-    action_chunk_size: int = 50
-    num_flow_steps: int = 10
+    num_inference_steps: int = 10
+
+
+def _synthetic_image() -> Any:
+    """256x256 RGB image: vertical gradient + mid-frequency noise.
+
+    Synthetic enough that SigLIP/SmolVLM2 vision tower has real work
+    to do (not all-zeros); simple enough to fit on a slide.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed=42)
+    grad = np.linspace(0, 255, 256, dtype=np.uint8)
+    img = np.tile(grad, (256, 1)).T  # [256, 256] gradient
+    img = np.stack([img, img // 2, 255 - img], axis=-1)  # RGB
+    noise = rng.integers(0, 32, size=img.shape, dtype=np.uint8)
+    return (img + noise).clip(0, 255)
 
 
 SMOLVLA_INPUTS: tuple[SmolVLAInput, ...] = (
-    # TODO: replace with real (state, instruction) pairs from a fixed
-    # LIBERO demo episode. See top-of-file note.
+    SmolVLAInput(
+        id="smolvla_01",
+        image=_synthetic_image(),
+        state=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        instruction="pick up the red block and place it in the basket",
+    ),
 )
+# TODO(populate): replace with 6 (state, instruction) pairs from a fixed
+# LIBERO demo episode. Until then, the tuple has 1 input so the bench
+# short-circuits cleanly through CPU fallback + 1 GPU row.

@@ -183,7 +183,11 @@ def _env_snapshot(out_dir: Path, today: str, gpu: str, commit: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="HuggingFaceTB/SmolVLM-500M-Instruct")
-    parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="torch device (default: cuda; sd-turbo / minimind default to cuda too)",
+    )
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument(

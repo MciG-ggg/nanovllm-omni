@@ -88,7 +88,9 @@ class SmolVLAVlmStage:
 
         # Build observation batch (single image + state, preprocessor normalizes).
         images_list = []
-        img = extras.get("image") or extras.get("observation.images.image")
+        img = extras.get("image")
+        if img is None:
+            img = extras.get("observation.images.image")
         if img is not None:
             images_list.append(img)
         wrist = extras.get("wrist_image") or extras.get("observation.images.image2")

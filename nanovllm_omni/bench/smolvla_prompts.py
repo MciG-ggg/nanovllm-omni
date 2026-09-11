@@ -52,7 +52,7 @@ SMOLVLA_INPUTS: tuple[SmolVLAInput, ...] = (
     SmolVLAInput(
         id="smolvla_01",
         image=_synthetic_image(),
-        state=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        state=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         instruction="pick up the red block and place it in the basket",
     ),
 )

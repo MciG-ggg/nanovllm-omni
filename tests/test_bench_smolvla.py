@@ -24,8 +24,8 @@ def test_input_fixture_locked() -> None:
     assert len(SMOLVLA_INPUTS) == 1
     inp = SMOLVLA_INPUTS[0]
     assert inp.id == "smolvla_01"
-    # 7-dim state matches SmolVLA action_dim.
-    assert len(inp.state) == 7
+    # 8-dim state matches SmolVLA observation.state normalizer.
+    assert len(inp.state) == 8
     assert inp.num_inference_steps == 10
     assert inp.instruction.startswith("pick up")
     # Synthetic image is 256x256x3 uint8.

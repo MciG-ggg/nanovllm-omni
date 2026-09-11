@@ -18,7 +18,6 @@ from typing import Any
 
 from .engine import DiffusionEngine
 from .interface import DiffusionPipeline
-from .request import OmniDiffusionRequest
 from .runner import DiffusionRunner
 
 
@@ -43,35 +42,11 @@ class InlineDiffusionClient:
     def run(self, payload: Any, sampling: Any) -> Any:
         """Synchronous entry point for PipelineRunner.run.
 
-        Converts the ``(payload, sampling)`` pair into an
-        ``OmniDiffusionRequest`` and runs the engine synchronously.
+        Passes the payload directly to the pipeline (no conversion to
+        OmniDiffusionRequest) so the pipeline receives the full payload
+        with all metadata (KV cache, masks, etc.).
         """
-        # Extract prompt from payload (str or {"prompt": ...}).
-        if isinstance(payload, str):
-            prompt = payload
-        elif isinstance(payload, dict):
-            prompt = str(payload.get("prompt", ""))
-        else:
-            prompt = str(payload)
-
-        # Extract params from sampling.
-        extras = (
-            dict(sampling.extra)
-            if sampling is not None and getattr(sampling, "extra", None)
-            else {}
-        )
-        request = OmniDiffusionRequest(
-            request_id="sync",
-            prompt=prompt,
-            sampling_params=sampling,
-            num_inference_steps=int(extras.get("num_inference_steps", 1)),
-            guidance_scale=float(extras.get("guidance_scale", 0.0)),
-            height=int(extras.get("height", 512)),
-            width=int(extras.get("width", 512)),
-        )
-        outputs = self._engine.run_sync(request)
-        # Return the first output's images (PIL.Image list) for
-        # OmniRequestOutput.from_diffusion compatibility.
+        outputs = self._engine.run_sync(payload, sampling)
         if outputs and outputs[0].images:
             return outputs[0].images[0]
         return None

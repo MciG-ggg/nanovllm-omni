@@ -1,8 +1,8 @@
 """DiffusionEngine: orchestrates diffusion inference via DiffusionRunner.
 
 Two entry points (ADR-024):
-- ``run_sync(request)`` — synchronous, used by ``PipelineRunner.run``
-- ``step_streaming(request)`` — async generator, for future SSE / streaming
+- ``run_sync(payload, sampling)`` — synchronous, used by ``PipelineRunner.run``
+- ``step_streaming(payload, sampling)`` — async generator, for future SSE / streaming
 
 Both share a private ``_denoise_loop`` method.
 
@@ -12,8 +12,8 @@ See ``docs/dev/nanovllm-omni-sdturbo-diffusion-migration.md`` §3 ADR-024.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import Any
 
-from .request import OmniDiffusionRequest
 from .runner import DiffusionRunner
 from .scheduler import RequestScheduler
 
@@ -31,36 +31,44 @@ class DiffusionEngine:
         self._runner = runner
         self._scheduler = RequestScheduler()
 
-    def run_sync(self, request: OmniDiffusionRequest) -> list:
+    def run_sync(self, payload: Any, sampling: Any = None) -> list:
         """Run one request to completion synchronously.
 
-        Returns a list of ``OmniRequestOutput``-compatible dicts.
-        This is the main path consumed by ``PipelineRunner.run``.
+        Accepts the raw payload + sampling directly (no OmniDiffusionRequest
+        conversion) so the pipeline receives the full payload with all
+        metadata (KV cache, masks, etc.).
         """
-        outputs = list(self._denoise_loop(request))
-        return outputs
+        return list(self._denoise_loop(payload, sampling))
 
     async def step_streaming(
         self,
-        request: OmniDiffusionRequest,
+        payload: Any,
+        sampling: Any = None,
     ) -> AsyncGenerator[list, None]:
-        """Async generator: yield partial results each denoise step.
-
-        For future SSE / streaming HTTP.  Currently not wired to any
-        consumer (ADR-024).
-        """
-        for output in self._denoise_loop(request):
+        """Async generator: yield partial results each denoise step."""
+        for output in self._denoise_loop(payload, sampling):
             yield [output]
 
-    def _denoise_loop(self, request: OmniDiffusionRequest):
+    def _denoise_loop(self, payload: Any, sampling: Any = None):
         """Core denoise loop shared by run_sync and step_streaming.
 
         Yields DiffusionOutput after each completed request.
         """
-        state = self._runner.prepare(request)
+        state = self._runner.prepare(payload, sampling)
         self._scheduler.add_request(state)
 
-        num_steps = request.num_inference_steps
+        # Determine num_steps: state metadata (pipeline config) wins over
+        # sampling extras (user override) and payload defaults.
+        num_steps = 1
+        if hasattr(payload, "num_inference_steps"):
+            num_steps = payload.num_inference_steps
+        if sampling is not None and getattr(sampling, "extra", None):
+            ei = int(sampling.extra.get("num_inference_steps", 0))
+            if ei > 0:
+                num_steps = ei
+        if hasattr(state, "metadata") and "num_steps" in state.metadata:
+            num_steps = state.metadata["num_steps"]  # pipeline config wins
+
         while self._scheduler.has_requests():
             sched = self._scheduler.schedule()
             if sched is None:

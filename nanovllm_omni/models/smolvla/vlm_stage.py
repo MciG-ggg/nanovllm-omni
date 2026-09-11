@@ -1,10 +1,15 @@
-"""SmolVLA vlm (AR) stage: SigLIP vision + SmolVLM language backbone.
+"""SmolVLA vlm (AR) stage: SigLIP vision + SmolVLM2 language backbone.
 
-Outputs ``VlmStageOutput`` with backbone hidden states for the downstream
-action stage.  Currently uses HF SmolVLM as backbone (ADR-029 planned
-fork migration deferred).
+Loads the full lerobot SmolVLA policy, runs `embed_prefix` + `vlm_with_expert.forward`
+to produce the VLM KV cache, and stores it in the bridge payload for the downstream
+action stage. This is the "prefix phase" of flow matching.
 
-See ``docs/dev/nanovllm-omni-smolvla-arflow-migration.md`` §3 ADR-029.
+Per ADR-029 (deferred): we use lerobot's internal `vlm_with_expert` directly
+rather than weight-slicing into a fork `SmolVLMForCausalLM`. This keeps the
+KV cache format identical to lerobot's, which is critical for bit-exact
+alignment between the split path and `policy.predict_action_chunk`.
+
+See docs/dev/nanovllm-omni-smolvla-arflow-migration.md §3 ADR-029.
 """
 
 from __future__ import annotations
@@ -15,46 +20,59 @@ from .stage_processors import VlmStageOutput
 
 
 def _vlm_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: load SmolVLM backbone, return SmolVLAVlmStage."""
+    """Stage 0 factory: load SmolVLA, return SmolVLAVlmStage."""
     return SmolVLAVlmStage(deploy, args)
 
 
 class SmolVLAVlmStage:
-    """AR stage: encode observation + instruction → backbone hidden states."""
+    """AR stage: encode observation + instruction → KV cache for action expert.
+
+    Internally loads the full lerobot SmolVLA policy (SigLIP + SmolVLM2 +
+    action expert), but only runs the prefix phase. The action expert is
+    owned by the downstream action stage.
+    """
 
     def __init__(self, deploy: Any, args: Any) -> None:
-        import torch
-        from transformers import AutoProcessor
-
-        try:
-            from transformers import AutoModelForImageTextToText as AutoModelCls
-        except ImportError:
-            from transformers import (
-                AutoModelForVision2Seq as AutoModelCls,  # type: ignore[no-redef]
-            )
+        from lerobot.policies import make_pre_post_processors
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
         extra = dict(getattr(args, "extra", None) or {})
         allow_hf = bool(extra.get("allow_hf_download", False))
         self.device = getattr(args, "device", None) or "cuda"
-        dtype = getattr(args, "dtype", None) or "bfloat16"
 
-        model_path = getattr(args, "model", None) or "HuggingFaceTB/SmolVLM-500M-Instruct"
-        # For SmolVLA, the backbone is SmolVLM; extract from the lerobot checkpoint
-        # or use the standalone SmolVLM if model is the backbone path.
-        torch_dtype = getattr(torch, dtype)
-        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "trust_remote_code": True}
-        if not allow_hf:
-            load_kwargs["local_files_only"] = True
+        # Load the full lerobot policy (vlm_stage needs vlm_with_expert + preprocessor).
+        model_path = getattr(args, "model", None) or "HuggingFaceVLA/smolvla_libero"
+        # If the model path looks like a backbone (not a lerobot policy), use default.
+        if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
+            model_path = "HuggingFaceVLA/smolvla_libero"
+        # Share one policy instance with the action stage (same process,
+        # same checkpoint → same cache key). Avoids a second ~2GB load on
+        # the 4GB card and keeps sample_noise RNG state identical.
+        from .action_stage import _POLICY_CACHE
 
-        self.processor = AutoProcessor.from_pretrained(model_path, **load_kwargs)
-        self.model = AutoModelCls.from_pretrained(model_path, **load_kwargs)
-        self.model.config.pad_token_id = None
-        self.model = self.model.to(self.device)
+        cache_key = model_path + ("" if allow_hf else "_offline")
+        self.policy = _POLICY_CACHE.get(cache_key)
+        if self.policy is None:
+            load_kwargs: dict[str, Any] = {"strict": False}
+            if not allow_hf:
+                load_kwargs["local_files_only"] = True
+            self.policy = SmolVLAPolicy.from_pretrained(model_path, **load_kwargs)
+            if self.device:
+                self.policy = self.policy.to(self.device)
+            _POLICY_CACHE[cache_key] = self.policy
+
+        # Cache references for speed.
+        self.config = self.policy.config
+        self.preprocessor, self.postprocessor = make_pre_post_processors(
+            self.config,
+            pretrained_path=model_path,
+        )
 
     def __call__(self, payload: Any, sampling: Any) -> VlmStageOutput:
         import torch
+        from lerobot.policies.common.vla_utils import make_att_2d_masks
 
-        # Extract instruction and images from payload/sampling.
+        # Extract instruction from payload.
         if isinstance(payload, str):
             instruction = payload
         elif isinstance(payload, dict):
@@ -68,57 +86,81 @@ class SmolVLAVlmStage:
             else {}
         )
 
-        # Build observation batch (images + state).
-        images = []
+        # Build observation batch (matches _obs_batch in legacy stage.py).
+        images_list = []
         img = extras.get("image") or extras.get("observation.images.image")
         if img is not None:
-            images.append(img)
+            images_list.append(img)
         wrist = extras.get("wrist_image") or extras.get("observation.images.image2")
         if wrist is not None:
-            images.append(wrist)
+            images_list.append(wrist)
 
         robot_state = extras.get("state")
         if robot_state is None:
             robot_state = extras.get("observation.state")
 
-        # Build chat template input for SmolVLM.
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    *[{"type": "image"} for _ in images],
-                    {"type": "text", "text": instruction},
-                ],
-            }
-        ]
-        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
-        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
-
-        # Run SmolVLM to get hidden states (not generate, just forward).
-        with torch.inference_mode():
-            out = self.model(**inputs, output_hidden_states=True)
-            # Use the last hidden layer as backbone output.
-            hidden_states = out.hidden_states[-1]  # [1, T, H]
-
-        # Process robot state.
+        # Convert to lerobot batch format.
         import numpy as np
 
-        if robot_state is not None:
-            state_tensor = torch.from_numpy(
-                np.asarray(robot_state, dtype=np.float32).reshape(1, -1)
-            ).to(self.device)
+        if img is not None:
+            arr = np.array(img)
+            img_tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float()
+            img_tensor = img_tensor.to(self.device)
         else:
-            state_tensor = torch.zeros(1, 7, device=self.device)  # default 7-DoF
+            raise ValueError("SmolVLA vlm_stage requires an image in extras['image']")
+
+        batch = {"observation.images.image": img_tensor, "task": [instruction]}
+        if robot_state is not None:
+            batch["observation.state"] = torch.tensor(
+                np.asarray(robot_state, dtype=np.float32).reshape(1, -1),
+            ).to(self.device)
+
+        batch = self.preprocessor(batch)
+
+        # === VLM prefix phase (same as lerobot's sample_actions) ===
+        for k in batch:
+            if k in self.policy._queues and k != "action":
+                batch[k] = torch.stack(list(self.policy._queues[k]), dim=1)
+
+        images, img_masks = self.policy.prepare_images(batch)
+        state = self.policy.prepare_state(batch)
+        lang_tokens = batch["observation.language.tokens"]
+        lang_masks = batch["observation.language.attention_mask"]
+
+        # 1) Embed prefix (image + language + state embeddings).
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.policy.model.embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state=state,
+        )
+
+        # 2) VLM forward → KV cache.
+        prefix_att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_pos_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        _, past_kv = self.policy.model.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d,
+            position_ids=prefix_pos_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+        )
 
         return VlmStageOutput(
-            prefix_states=hidden_states.squeeze(0),  # [T, H]
-            robot_state=state_tensor.squeeze(0),  # [state_dim]
-            attention_mask=inputs.get("attention_mask"),
+            prefix_states=prefix_pad_masks,  # used for shape only; KV cache is in metadata
+            robot_state=state.squeeze(0),
+            attention_mask=prefix_att_masks,
             request_id=extras.get("request_id"),
             metadata={
-                "chunk_len": extras.get("chunk_len", 10),
-                "action_dim": extras.get("action_dim", 7),
+                "past_key_values": past_kv,
+                "prefix_pad_masks": prefix_pad_masks,
+                "original_action_dim": self.config.action_feature.shape[0],
+                "chunk_size": self.config.chunk_size,
+                "max_action_dim": self.config.max_action_dim,
+                "num_steps": self.config.num_steps,
+                "use_cache": self.config.use_cache,
+                "policy_ref": self.policy,  # action stage needs model.sample_noise + denoise_step
             },
         )
 

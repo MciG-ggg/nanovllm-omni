@@ -1,11 +1,11 @@
 """SmolVLA action (flow matching) stage.
 
 Implements the ``DiffusionPipeline`` 4-method contract to run flow
-matching with the action expert.  This is the second stage of the
+matching with the action expert. This is the second stage of the
 SmolVLA two-stage split.
 
-Flow matching uses Euler integration: ``x_{t+dt} = x_t + v * dt``,
-where ``v`` is the velocity predicted by the action expert network.
+Uses lerobot's internal ``denoise_step`` + ``euler_integrate`` to
+maintain bit-exact alignment with ``policy.predict_action_chunk``.
 
 See ``docs/dev/nanovllm-omni-smolvla-arflow-migration.md`` §3 ADR-030.
 """
@@ -21,7 +21,7 @@ class SmolVLAActionPipeline:
     """Flow-matching pipeline for SmolVLA action expert.
 
     Implements the 4-method DiffusionPipeline contract:
-    - prepare_encode: init latent noise + cache backbone states
+    - prepare_encode: init latent noise from KV cache state
     - denoise_step: action expert forward → velocity
     - step_scheduler: Euler integration step
     - post_decode: produce ActionArtifact
@@ -29,169 +29,180 @@ class SmolVLAActionPipeline:
 
     supports_step_execution = True
 
-    def __init__(self, action_expert: Any, num_inference_steps: int = 10) -> None:
-        """action_expert: lerobot's action expert module (nn.Module-like).
-        For testing without lerobot, pass a fake that returns constant velocity.
-        """
-        self.action_expert = action_expert
-        self.num_inference_steps = num_inference_steps
+    def __init__(
+        self,
+        policy: Any,
+        num_inference_steps: int | None = None,
+    ) -> None:
+        """policy: lerobot SmolVLAPolicy (provides denoise_step + sample_noise)."""
+        self.policy = policy
+        self.config = policy.config
+        self.num_inference_steps = num_inference_steps or self.config.num_steps
 
     def prepare_encode(self, request: Any) -> Any:
-        """Init latent noise; stash backbone states for conditioning."""
-        import torch
+        """Init latent noise; stash VLM KV cache state for conditioning.
 
+        The ``request`` is an ``ActionInputPayload`` from ``vlm2action``.
+        Prefer the policy from the payload metadata (vlm_stage's policy)
+        over self.policy to ensure bit-exact alignment.
+        """
         from nanovllm_omni.diffusion.interface import StepState
 
-        # The "request" here is an ActionInputPayload (from vlm2action).
-        chunk_len = getattr(request, "chunk_len", 10)
-        action_dim = getattr(request, "action_dim", 7)
-        device = "cpu"  # default; real impl reads from tensors
+        metadata = dict(request.metadata) if hasattr(request, "metadata") else {}
+        past_key_values = metadata.get("past_key_values")
+        prefix_pad_masks = metadata.get("prefix_pad_masks")
+        if past_key_values is None or prefix_pad_masks is None:
+            raise ValueError("ActionInputPayload missing past_key_values or prefix_pad_masks")
 
-        # Get device from the prefix_states tensor if available.
-        prefix_states = getattr(request, "prefix_states", None)
-        if hasattr(prefix_states, "device"):
-            device = prefix_states.device
+        # Use the vlm_stage's policy to ensure bit-exact alignment.
+        policy = metadata.get("policy") or metadata.get("policy_ref") or self.policy
+        config = policy.config
 
-        # Initial latent = pure noise, shape [chunk_len, action_dim].
-        latents = torch.randn(
-            chunk_len,
-            action_dim,
-            device=device,
-            dtype=torch.float32,
-        )
+        # Sample initial noise (same as lerobot's sample_noise).
+        bsize = prefix_pad_masks.shape[0]
+        device = prefix_pad_masks.device
+        actions_shape = (bsize, config.chunk_size, config.max_action_dim)
+        x_t = policy.model.sample_noise(actions_shape, device)
 
         return StepState(
             request_id=getattr(request, "request_id", "sync"),
-            latents=latents,
-            encoder_hidden_states=prefix_states,  # cache backbone states
+            latents=x_t,
+            encoder_hidden_states=None,
             metadata={
-                "robot_state": getattr(request, "robot_state", None),
-                "chunk_len": chunk_len,
-                "action_dim": action_dim,
-                "attention_mask": getattr(request, "attention_mask", None),
+                "past_key_values": past_key_values,
+                "prefix_pad_masks": prefix_pad_masks,
+                "original_action_dim": metadata.get(
+                    "original_action_dim", config.action_feature.shape[0]
+                ),
+                "num_steps": metadata.get("num_steps", config.num_steps),
+                "policy": policy,
             },
         )
 
     def denoise_step(self, state: Any, *, step: int, num_steps: int) -> Any:
-        """Run action expert; return velocity."""
+        """Run action expert; return velocity.
+
+        Matches lerobot's ``denoise_step(x_t, prefix_pad_masks, past_kv, timestep)``
+        with timestep = 1.0 + step * (-1/num_steps) (euler_integrate convention).
+        """
         import torch
 
-        # The action expert takes (latents, prefix_states, robot_state) and
-        # returns velocity.  For testing, the fake action expert is a simple
-        # linear projection that ignores inputs and returns a constant.
-        prefix_states = state.encoder_hidden_states
-        robot_state = state.metadata.get("robot_state")
+        dt = -1.0 / num_steps
+        time = 1.0 + step * dt
+        bsize = state.latents.shape[0]
+        device = state.latents.device
+        time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
-        with torch.inference_mode():
-            velocity = self.action_expert(
-                state.latents,
-                prefix_states=prefix_states,
-                robot_state=robot_state,
-            )
-        return velocity
+        policy = state.metadata["policy"]
+        v_t = policy.model.denoise_step(
+            x_t=state.latents,
+            prefix_pad_masks=state.metadata["prefix_pad_masks"],
+            past_key_values=state.metadata["past_key_values"],
+            timestep=time_tensor,
+        )
+        state.metadata["dt"] = dt
+        return v_t
 
     def step_scheduler(self, state: Any, noise_pred: Any) -> None:
-        """Euler integration: x_{t+dt} = x_t + v * dt."""
-        num_steps = self.num_inference_steps
-        dt = 1.0 / num_steps
+        """Euler integration: x_t = x_t + dt * v_t."""
+        dt = state.metadata["dt"]
         state.latents = state.latents + noise_pred * dt
         state.step_index += 1
 
     def post_decode(self, state: Any) -> Any:
-        """Produce ActionArtifact from final latents."""
+        """Truncate to original_action_dim → ActionArtifact."""
         from nanovllm_omni.diffusion.interface import DiffusionOutput
 
-        latents = state.latents  # [chunk_len, action_dim]
-        # Convert to numpy for ActionArtifact.
-        array = latents.detach().cpu().numpy().astype("float32")
+        original_action_dim = state.metadata["original_action_dim"]
+        actions = state.latents[:, :, :original_action_dim]
+        # Squeeze batch dim for ActionArtifact (expects 2-D [chunk, dim]).
+        if actions.dim() == 3 and actions.shape[0] == 1:
+            actions = actions[0]
+        array = actions.detach().cpu().numpy().astype("float32")
         return DiffusionOutput(
             images=[ActionArtifact.from_array(array)],
             finished=True,
         )
 
 
-def _action_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory: load action expert, return SmolVLAActionPipeline."""
+_POLICY_CACHE: dict[str, Any] = {}
 
-    # The action expert is part of the lerobot SmolVLA policy.
-    # For the split-stages path, we load it separately.
-    # TODO(ADR-029): proper weight slicing from SmolVLA checkpoint.
+
+def _action_stage(deploy: Any, args: Any) -> Any:
+    """Stage 1 factory: return SmolVLAActionPipeline.
+
+    Uses a process-level cache to avoid loading the same policy twice.
+    In production, vlm_stage already loaded the full SmolVLA policy; this
+    factory only needs to return a pipeline that uses ``policy_ref`` from
+    the vlm_stage metadata at runtime.
+    """
     extra = dict(getattr(args, "extra", None) or {})
     allow_hf = bool(extra.get("allow_hf_download", False))
-    device = getattr(args, "device", None) or "cuda"
 
-    num_inference_steps = int(extra.get("num_inference_steps", 10))
+    num_inference_steps = int(extra.get("num_inference_steps", 0)) or None
 
-    # Try to load the action expert from the lerobot checkpoint.
-    try:
-        from lerobot.policies.smolvla.modeling_smolvla import (  # type: ignore[import-not-found]
-            SmolVLAPolicy,
-        )
+    model_path = (
+        extra.get("action_model") or getattr(args, "model", None) or "HuggingFaceVLA/smolvla_libero"
+    )
+    if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
+        model_path = extra.get("action_model") or "HuggingFaceVLA/smolvla_libero"
 
-        # extra["action_model"] overrides the model path for the action stage.
-        # When split stages are used, the top-level args.model points to the
-        # VLM backbone, not the lerobot checkpoint.
-        model_path = (
-            extra.get("action_model")
-            or getattr(args, "model", None)
-            or "HuggingFaceVLA/smolvla_libero"
-        )
-        # If the model path looks like a backbone (not a lerobot policy),
-        # fall back to the default lerobot checkpoint.
-        if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
-            model_path = extra.get("action_model") or "HuggingFaceVLA/smolvla_libero"
-        load_kwargs: dict[str, Any] = {"strict": False}
-        if not allow_hf:
-            load_kwargs["local_files_only"] = True
-        policy = SmolVLAPolicy.from_pretrained(model_path, **load_kwargs)
-        if device:
-            policy = policy.to(device)
-        # Extract the action expert.
-        action_expert = getattr(policy.model, "action_expert", None) or getattr(
-            policy,
-            "action_expert",
-            None,
-        )
-        if action_expert is None:
-            # Fallback: fake action expert for testing.
-            action_expert = _FakeActionExpert(
-                action_dim=7,
-                chunk_len=10,
-                device=device,
+    cache_key = model_path + ("" if allow_hf else "_offline")
+    policy = _POLICY_CACHE.get(cache_key)
+
+    if policy is None:
+        try:
+            from lerobot.policies.smolvla.modeling_smolvla import (  # type: ignore[import-not-found]
+                SmolVLAPolicy,
             )
-    except (ImportError, OSError) as e:
-        # lerobot not installed or checkpoint not available; use fake for testing.
-        print(f"  [action_stage] Falling back to fake action expert: {type(e).__name__}: {e}")
-        action_expert = _FakeActionExpert(
-            action_dim=7,
-            chunk_len=10,
-            device=device,
-        )
+
+            load_kwargs: dict[str, Any] = {"strict": False}
+            if not allow_hf:
+                load_kwargs["local_files_only"] = True
+            policy = SmolVLAPolicy.from_pretrained(model_path, **load_kwargs)
+
+            device = getattr(args, "device", None) or "cuda"
+            if device:
+                policy = policy.to(device)
+
+            _POLICY_CACHE[cache_key] = policy
+        except (ImportError, OSError):
+            # lerobot not installed; use fake for testing.
+            return SmolVLAActionPipeline(
+                policy=_FakePolicy(),
+                num_inference_steps=num_inference_steps,
+            )
 
     return SmolVLAActionPipeline(
-        action_expert=action_expert,
+        policy=policy,
         num_inference_steps=num_inference_steps,
     )
 
 
-class _FakeActionExpert:
-    """Fake action expert for testing without lerobot + GPU."""
+class _FakePolicy:
+    """Fake policy for testing without lerobot + GPU."""
 
-    def __init__(self, action_dim: int = 7, chunk_len: int = 10, device: str = "cpu") -> None:
+    class _FakeConfig:  # noqa: N801 (test double mirrors lerobot's lowercase config attrs)
+        chunk_size = 10
+        max_action_dim = 7
+        num_steps = 3
+        use_cache = True
 
-        self.action_dim = action_dim
-        self.chunk_len = chunk_len
-        self.device = device
+        class action_feature:  # noqa: N801 (mirrors policy.config.action_feature)
+            shape = [7]
 
-    def __call__(self, latents: Any, prefix_states: Any = None, robot_state: Any = None) -> Any:
-        """Return constant velocity = 0.1 * ones.
+    def __init__(self) -> None:
+        import torch  # noqa: F401  (used inside nested _FakeModel methods)
 
-        With N Euler steps of dt=1/N: x_1 = N * 0.1 * (1/N) = 0.1.
-        So ActionArtifact should have values ≈ 0.1 after the full loop.
-        """
-        import torch
+        class _FakeModel:
+            def sample_noise(self, shape, device):
+                return torch.randn(shape, device=device, dtype=torch.float32)
 
-        return torch.full_like(latents, 0.1)
+            def denoise_step(self, x_t, prefix_pad_masks, past_key_values, timestep):
+                return torch.full_like(x_t, 0.1)
+
+        self.config = self._FakeConfig()
+        self.model = _FakeModel()
 
 
-__all__ = ["SmolVLAActionPipeline", "_action_stage", "_FakeActionExpert"]
+__all__ = ["SmolVLAActionPipeline", "_action_stage"]

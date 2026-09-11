@@ -13,6 +13,32 @@ from __future__ import annotations
 import pytest
 
 
+class _FakePolicy:
+    """Fake policy for testing without lerobot + GPU."""
+
+    class config:  # noqa: N801 (test double mirrors lerobot's lowercase config attrs)
+        chunk_size = 10
+        max_action_dim = 7
+        num_steps = 3
+        use_cache = True
+
+        class action_feature:  # noqa: N801 (mirrors policy.config.action_feature)
+            shape = [7]
+
+    class model:  # noqa: N801 (mirrors policy.model)
+        @staticmethod
+        def sample_noise(shape, device):
+            import torch
+
+            return torch.randn(shape, device=device, dtype=torch.float32)
+
+        @staticmethod
+        def denoise_step(x_t, prefix_pad_masks, past_key_values, timestep):
+            import torch
+
+            return torch.full_like(x_t, 0.1)
+
+
 def test_vlm2action_accepts_vlm_stage_output():
     """vlm2action: happy path."""
     import torch
@@ -22,7 +48,7 @@ def test_vlm2action_accepts_vlm_stage_output():
         vlm2action,
     )
 
-    hidden = torch.randn(8, 576)  # [T, H]
+    hidden = torch.randn(8, 576)
     state = torch.randn(7)
     out = VlmStageOutput(
         prefix_states=hidden,
@@ -53,38 +79,44 @@ def test_vlm2action_rejects_non_vlm_output():
 
 def test_euler_integration_constant_velocity():
     """ADR-030: Euler integration with constant velocity v for N steps
-    of dt = 1/N yields x_1 = x_0 + N * v * (1/N) = x_0 + v."""
+    of dt = -1/N yields x_0 + N * v * (-1/N) = x_0 - v."""
     import torch
 
-    from nanovllm_omni.models.smolvla.action_stage import (
-        SmolVLAActionPipeline,
-        _FakeActionExpert,
-    )
-    from nanovllm_omni.models.smolvla.stage_processors import ActionInputPayload
+    from nanovllm_omni.diffusion.interface import StepState
+    from nanovllm_omni.models.smolvla.action_stage import SmolVLAActionPipeline
 
-    action_expert = _FakeActionExpert(action_dim=7, chunk_len=10, device="cpu")
-    pipe = SmolVLAActionPipeline(action_expert, num_inference_steps=10)
+    policy = _FakePolicy()
+    pipe = SmolVLAActionPipeline(policy=policy, num_inference_steps=10)
 
-    # Prepare.
-    request = ActionInputPayload(
-        prefix_states=torch.zeros(8, 576),
-        robot_state=torch.zeros(7),
-        chunk_len=10,
-        action_dim=7,
+    # Fake a VlmStageOutput with metadata that action_stage expects.
+    # In real flow, vlm_stage provides past_key_values + prefix_pad_masks.
+    fake_state = StepState(
         request_id="test",
+        latents=torch.randn(1, 10, 32),
+        metadata={
+            "past_key_values": None,  # fake
+            "prefix_pad_masks": torch.ones(1, 10),  # fake
+            "original_action_dim": 7,
+            "policy": policy,
+        },
     )
-    state = pipe.prepare_encode(request)
-    x0 = state.latents.clone()
 
-    # Run 10 steps.
+    # Manually init latents like prepare_encode does.
+    x0 = torch.randn(1, 10, 32)
+
+    # Override latents for test.
+    fake_state.latents = x0.clone()
+    x0 = fake_state.latents.clone()
+
     for step in range(10):
-        velocity = pipe.denoise_step(state, step=step, num_steps=10)
-        pipe.step_scheduler(state, velocity)
+        v_t = pipe.denoise_step(fake_state, step=step, num_steps=10)
+        pipe.step_scheduler(fake_state, v_t)
 
-    # x_1 should equal x_0 + v (= x_0 + 0.1)
-    expected = x0 + 0.1
-    assert torch.allclose(state.latents, expected, atol=1e-5), (
-        f"Euler regression: expected {expected[0, 0]:.4f}, " f"got {state.latents[0, 0]:.4f}"
+    # velocity=0.1, dt=-1/10, 10 steps: x_1 = x_0 + 10 * 0.1 * (-0.1) = x_0 - 0.1
+    expected = x0 + 10 * 0.1 * (-0.1)
+    assert torch.allclose(fake_state.latents, expected, atol=1e-5), (
+        f"Euler regression: expected {expected[0, 0, 0]:.4f}, "
+        f"got {fake_state.latents[0, 0, 0]:.4f}"
     )
 
 
@@ -92,10 +124,8 @@ def test_action_pipeline_supports_step_execution():
     """ActionPipeline must declare supports_step_execution=True."""
     from nanovllm_omni.models.smolvla.action_stage import SmolVLAActionPipeline
 
-    # Use any callable as fake action expert.
-    pipe = SmolVLAActionPipeline(action_expert=lambda *a, **kw: None, num_inference_steps=5)
+    pipe = SmolVLAActionPipeline(policy=_FakePolicy(), num_inference_steps=5)
     assert pipe.supports_step_execution is True
-    # Structural check: implements the protocol (duck-typed).
     assert hasattr(pipe, "prepare_encode")
     assert hasattr(pipe, "denoise_step")
     assert hasattr(pipe, "step_scheduler")
@@ -106,25 +136,26 @@ def test_post_decode_returns_action_artifact():
     """post_decode: latents → ActionArtifact [chunk_len, action_dim]."""
     import torch
 
+    from nanovllm_omni.diffusion.interface import StepState
     from nanovllm_omni.models.smolvla.action_stage import SmolVLAActionPipeline
-    from nanovllm_omni.models.smolvla.stage_processors import ActionInputPayload
     from nanovllm_omni.outputs import ActionArtifact
 
-    pipe = SmolVLAActionPipeline(
-        action_expert=lambda *a, **kw: torch.zeros(10, 7),
-        num_inference_steps=3,
+    policy = _FakePolicy()
+    pipe = SmolVLAActionPipeline(policy=policy, num_inference_steps=3)
+
+    state = StepState(
+        request_id="test",
+        latents=torch.randn(1, 10, 32),
+        metadata={
+            "past_key_values": None,
+            "prefix_pad_masks": torch.ones(1, 10),
+            "original_action_dim": 7,
+            "policy": policy,
+        },
     )
-    request = ActionInputPayload(
-        prefix_states=torch.zeros(8, 576),
-        robot_state=torch.zeros(7),
-        chunk_len=10,
-        action_dim=7,
-    )
-    state = pipe.prepare_encode(request)
     output = pipe.post_decode(state)
     assert output.finished is True
-    assert output.images is not None
-    assert len(output.images) == 1
+    assert output.images is not None and len(output.images) == 1
     action_artifact = output.images[0]
     assert isinstance(action_artifact, ActionArtifact)
     assert action_artifact.array.shape == (10, 7)
@@ -146,7 +177,6 @@ def test_smolvla_split_pipeline_topology():
     assert config.stages[1].kind == StageExecutionType.DIFFUSION
     assert config.stages[1].is_terminal is True
     assert config.stages[1].final_output_type == "actions"
-    # Bridge is wired.
     assert config.stages[1].process_input is not None
     assert "vlm2action" in config.stages[1].process_input
 

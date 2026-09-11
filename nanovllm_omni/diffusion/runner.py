@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any
 
 from .interface import DiffusionOutput, DiffusionPipeline, StepState
-from .request import OmniDiffusionRequest
 
 
 class DiffusionRunner:
@@ -21,9 +20,13 @@ class DiffusionRunner:
     def __init__(self, pipeline: DiffusionPipeline) -> None:
         self.pipeline = pipeline
 
-    def prepare(self, request: OmniDiffusionRequest) -> StepState:
-        """Encode conditions → initial StepState."""
-        return self.pipeline.prepare_encode(request)
+    def prepare(self, payload: Any, sampling: Any = None) -> StepState:
+        """Encode conditions → initial StepState.
+
+        Accepts the raw payload directly (no OmniDiffusionRequest conversion)
+        so the pipeline receives the full payload with all metadata.
+        """
+        return self.pipeline.prepare_encode(payload)
 
     def denoise_step(
         self,
@@ -43,10 +46,17 @@ class DiffusionRunner:
         """Decode latents → final output."""
         return self.pipeline.post_decode(state)
 
-    def run_sync(self, request: OmniDiffusionRequest) -> list[DiffusionOutput]:
-        """Run the full denoise loop synchronously.  Returns [DiffusionOutput]."""
-        state = self.prepare(request)
-        num_steps = request.num_inference_steps
+    def run_sync(self, payload: Any, sampling: Any = None) -> list[DiffusionOutput]:
+        """Run the full denoise loop synchronously. Returns [DiffusionOutput]."""
+        state = self.prepare(payload, sampling)
+        # Determine num_steps from state metadata or sampling extras.
+        num_steps = 1
+        if sampling is not None and getattr(sampling, "extra", None):
+            num_steps = int(sampling.extra.get("num_inference_steps", 1))
+        if hasattr(state, "metadata") and "num_steps" in state.metadata:
+            num_steps = state.metadata["num_steps"]
+        if hasattr(payload, "num_inference_steps"):
+            num_steps = payload.num_inference_steps
         for step in range(num_steps):
             noise_pred = self.denoise_step(state, step=step, num_steps=num_steps)
             self.step_scheduler(state, noise_pred)

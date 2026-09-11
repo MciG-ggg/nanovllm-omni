@@ -204,10 +204,16 @@ def _run_cuda_graph(
         # - step_scheduler mutates state.step_index (Python int, leaks)
         # - scheduler.step() mutates an internal _step_index (also leaks,
         #   but only via set_timesteps reset)
-        # Without the resets, warmup 2 reads timesteps[1] / sigmas[2]
-        # which are OOB for 1-step sd-turbo.
+        # - diffusers' UNet copies the CPU timestep tensor to GPU each
+        #   forward; CG capture forbids non-pinned CPU->CUDA copies, so
+        #   we pin the timesteps tensor immediately after set_timesteps.
+        # Without these resets / pins, warmup 2 reads timesteps[1] /
+        # sigmas[2] which are OOB for 1-step sd-turbo, or fails with
+        # "Cannot copy between CPU and CUDA tensors during CUDA graph
+        # capture".
         state.step_index = 0
         pipeline.scheduler.set_timesteps(num_steps)
+        pipeline.scheduler.timesteps = pipeline.scheduler.timesteps.pin_memory()
         for step in range(num_steps):
             noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
             pipeline.step_scheduler(state, noise_pred)

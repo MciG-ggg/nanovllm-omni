@@ -199,6 +199,11 @@ def _run_cuda_graph(
     num_steps = state.metadata["num_steps"]
 
     def _gpu_only() -> Any:
+        # Reset before each call: step_scheduler increments state.step_index
+        # and we share the same state across warmup + capture + replays.
+        # Without the reset, warmup 2 reads timesteps[1] which is OOB for
+        # 1-step sd-turbo.
+        state.step_index = 0
         for step in range(num_steps):
             noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
             pipeline.step_scheduler(state, noise_pred)
@@ -221,10 +226,6 @@ def _run_cuda_graph(
     walls: list[float] = []
     torch.cuda.reset_peak_memory_stats()
     for _ in range(runs):
-        # state.step_index is a Python int; capture incremented it to 1
-        # (sd-turbo is 1-step) and the next replay would read OOB.
-        # Reset before each replay so the captured loop sees step_index=0.
-        state.step_index = 0
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         g.replay()

@@ -186,7 +186,7 @@ routes one prompt through `Omni.generate` end-to-end (real weights):
 
 ```bash
 # Inside the WSL box (~mcig@mcigs-wsl) — needs torch + the local weight snapshots
-python -m nanovllm_omni.engine.bench time \
+python -m nanovllm_omni.bench time \
     --pipeline full \
     --max-tokens 16 --runs 20 --warmup 1
 ```

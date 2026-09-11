@@ -8,6 +8,8 @@
 # manipulation is needed.
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import sys
 import types
 
@@ -39,17 +41,33 @@ for _name, _mod in [
     ("triton.backends", _triton.backends),
     ("triton.backends.compiler", _triton.backends.compiler),
 ]:
-    sys.modules.setdefault(_name, _mod)
+    if _name not in sys.modules:
+        _mod.__spec__ = importlib.machinery.ModuleSpec(
+            _name,
+            loader=None,
+            origin="<stub>",
+        )
+        sys.modules[_name] = _mod
 
 # ---------------------------------------------------------------------------
 # 2. Stub flash_attn (CUDA-only).
+#    Python 3.12+: find_spec raises ValueError if __spec__ is None.
+#    We need a real ModuleSpec for the stub to work with
+#    importlib.util.find_spec checks (diffusers, etc.).
 # ---------------------------------------------------------------------------
 for _mod in (
     "flash_attn",
     "flash_attn.flash_attn_varlen_func",
     "flash_attn.flash_attn_with_kvcache",
 ):
-    sys.modules.setdefault(_mod, types.ModuleType(_mod))
+    if _mod not in sys.modules:
+        _m = types.ModuleType(_mod)
+        _m.__spec__ = importlib.machinery.ModuleSpec(
+            _mod,
+            loader=None,
+            origin="<stub>",
+        )
+        sys.modules[_mod] = _m
 
 # ---------------------------------------------------------------------------
 # 3. Mock torch.compile as a no-op BEFORE fork activation.py triggers it.

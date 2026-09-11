@@ -113,7 +113,7 @@ packages = [
     "nanovllm_omni.models.sd_turbo",
     "nanovllm_omni.models.smolvla",
     "nanovllm_omni.models.smolvlm",
-    "nanovllm_omni.engine.bench",
+    "nanovllm_omni.bench",
     "nanovllm_omni.serving",
 
 ]

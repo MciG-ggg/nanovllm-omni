@@ -76,7 +76,9 @@ class SmolVLAVlmStage:
         if wrist is not None:
             images.append(wrist)
 
-        robot_state = extras.get("state") or extras.get("observation.state")
+        robot_state = extras.get("state")
+        if robot_state is None:
+            robot_state = extras.get("observation.state")
 
         # Build chat template input for SmolVLM.
         messages = [

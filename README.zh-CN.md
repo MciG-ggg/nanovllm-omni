@@ -169,7 +169,7 @@ python -m nanovllm_omni.serving.app
 
 ```bash
 # 在 WSL 里(~mcig@mcigs-wsl)—需要 torch + 本地权重 snapshot
-python -m nanovllm_omni.engine.bench time \
+python -m nanovllm_omni.bench time \
     --pipeline full \
     --max-tokens 16 --runs 20 --warmup 1
 ```

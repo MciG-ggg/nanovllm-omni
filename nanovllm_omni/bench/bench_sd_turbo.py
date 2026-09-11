@@ -221,6 +221,10 @@ def _run_cuda_graph(
     walls: list[float] = []
     torch.cuda.reset_peak_memory_stats()
     for _ in range(runs):
+        # state.step_index is a Python int; capture incremented it to 1
+        # (sd-turbo is 1-step) and the next replay would read OOB.
+        # Reset before each replay so the captured loop sees step_index=0.
+        state.step_index = 0
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         g.replay()

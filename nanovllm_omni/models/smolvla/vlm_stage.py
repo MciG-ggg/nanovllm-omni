@@ -41,7 +41,8 @@ class SmolVLAVlmStage:
         model_path = getattr(args, "model", None) or "HuggingFaceTB/SmolVLM-500M-Instruct"
         # For SmolVLA, the backbone is SmolVLM; extract from the lerobot checkpoint
         # or use the standalone SmolVLM if model is the backbone path.
-        load_kwargs: dict[str, Any] = {"dtype": getattr(torch, dtype)}
+        torch_dtype = getattr(torch, dtype)
+        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype, "trust_remote_code": True}
         if not allow_hf:
             load_kwargs["local_files_only"] = True
 

@@ -128,7 +128,18 @@ def _action_stage(deploy: Any, args: Any) -> Any:
             SmolVLAPolicy,
         )
 
-        model_path = getattr(args, "model", None) or "HuggingFaceVLA/smolvla_libero"
+        # extra["action_model"] overrides the model path for the action stage.
+        # When split stages are used, the top-level args.model points to the
+        # VLM backbone, not the lerobot checkpoint.
+        model_path = (
+            extra.get("action_model")
+            or getattr(args, "model", None)
+            or "HuggingFaceVLA/smolvla_libero"
+        )
+        # If the model path looks like a backbone (not a lerobot policy),
+        # fall back to the default lerobot checkpoint.
+        if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
+            model_path = extra.get("action_model") or "HuggingFaceVLA/smolvla_libero"
         load_kwargs: dict[str, Any] = {"strict": False}
         if not allow_hf:
             load_kwargs["local_files_only"] = True
@@ -148,8 +159,9 @@ def _action_stage(deploy: Any, args: Any) -> Any:
                 chunk_len=10,
                 device=device,
             )
-    except ImportError:
-        # lerobot not installed; use fake for testing.
+    except (ImportError, OSError) as e:
+        # lerobot not installed or checkpoint not available; use fake for testing.
+        print(f"  [action_stage] Falling back to fake action expert: {type(e).__name__}: {e}")
         action_expert = _FakeActionExpert(
             action_dim=7,
             chunk_len=10,

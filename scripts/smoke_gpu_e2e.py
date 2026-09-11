@@ -24,6 +24,7 @@ def _fix_flash_attn_stub():
     Python 3.12+: find_spec raises ValueError if __spec__ is None.
     """
     import importlib.machinery
+
     for mod_name in [
         "flash_attn",
         "flash_attn.flash_attn_varlen_func",
@@ -32,9 +33,12 @@ def _fix_flash_attn_stub():
         if mod_name not in sys.modules:
             m = types.ModuleType(mod_name)
             m.__spec__ = importlib.machinery.ModuleSpec(
-                mod_name, loader=None, origin="<stub>",
+                mod_name,
+                loader=None,
+                origin="<stub>",
             )
             sys.modules[mod_name] = m
+
 
 _fix_flash_attn_stub()
 
@@ -48,7 +52,9 @@ from PIL import Image  # noqa: E402
 
 print(f"torch {torch.__version__}, CUDA {torch.cuda.is_available()}")
 if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(
+        f"GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+    )
 
 SDTURBO_MODEL = "stabilityai/sd-turbo"
 SMOLVLM_MODEL = "HuggingFaceTB/SmolVLM-500M-Instruct"
@@ -56,6 +62,7 @@ SMOLVLA_MODEL = "HuggingFaceVLA/smolvla_libero"
 
 passed = 0
 failed = 0
+
 
 def run_test(name, fn):
     global passed, failed
@@ -67,6 +74,7 @@ def run_test(name, fn):
     except Exception as e:
         print(f"  ❌ FAILED: {e}")
         failed += 1
+
 
 # =========================================================================
 # Test 1: SD-Turbo — real weights through DiffusionEngine
@@ -86,19 +94,33 @@ def test_sdturbo_real_weights():
 
     tokenizer = CLIPTokenizer.from_pretrained(SDTURBO_MODEL, subfolder="tokenizer", **load_kw)
     text_encoder = CLIPTextModel.from_pretrained(
-        SDTURBO_MODEL, subfolder="text_encoder", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="text_encoder",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     unet = UNet2DConditionModel.from_pretrained(
-        SDTURBO_MODEL, subfolder="unet", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="unet",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     vae = AutoencoderKL.from_pretrained(
-        SDTURBO_MODEL, subfolder="vae", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="vae",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     scheduler = EulerDiscreteScheduler.from_pretrained(SDTURBO_MODEL, subfolder="scheduler")
 
     pipeline = SdTurboPipeline(
-        tokenizer=tokenizer, text_encoder=text_encoder, unet=unet, vae=vae,
-        scheduler=scheduler, target_device=device, torch_dtype=dtype,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        unet=unet,
+        vae=vae,
+        scheduler=scheduler,
+        target_device=device,
+        torch_dtype=dtype,
     )
 
     runner = DiffusionRunner(pipeline)
@@ -125,6 +147,7 @@ def test_sdturbo_real_weights():
     assert arr.std() > 5.0, f"Image appears blank: std={arr.std():.2f}"
     print(f"  Output: {img.size}, std={arr.std():.1f}")
 
+
 # =========================================================================
 # Test 2: SD-Turbo — DiffusionEngine vs legacy StableDiffusionPipeline
 # =========================================================================
@@ -148,48 +171,78 @@ def test_sdturbo_matches_legacy():
 
     # --- Legacy path ---
     pipe_legacy = StableDiffusionPipeline.from_pretrained(
-        SDTURBO_MODEL, torch_dtype=dtype, variant="fp16", local_files_only=True,
+        SDTURBO_MODEL,
+        torch_dtype=dtype,
+        variant="fp16",
+        local_files_only=True,
     ).to(device)
     gen_legacy = torch.Generator(device=device).manual_seed(seed)
     with torch.inference_mode():
         img_legacy = pipe_legacy(
-            prompt, num_inference_steps=1, guidance_scale=0.0,
-            height=512, width=512, generator=gen_legacy,
+            prompt,
+            num_inference_steps=1,
+            guidance_scale=0.0,
+            height=512,
+            width=512,
+            generator=gen_legacy,
         ).images[0]
 
     # --- Our path ---
     load_kw = {"torch_dtype": dtype, "local_files_only": True}
     tokenizer = CLIPTokenizer.from_pretrained(SDTURBO_MODEL, subfolder="tokenizer", **load_kw)
     text_encoder = CLIPTextModel.from_pretrained(
-        SDTURBO_MODEL, subfolder="text_encoder", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="text_encoder",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     unet = UNet2DConditionModel.from_pretrained(
-        SDTURBO_MODEL, subfolder="unet", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="unet",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     vae = AutoencoderKL.from_pretrained(
-        SDTURBO_MODEL, subfolder="vae", variant="fp16", **load_kw,
+        SDTURBO_MODEL,
+        subfolder="vae",
+        variant="fp16",
+        **load_kw,
     ).to(device)
     scheduler = EulerDiscreteScheduler.from_pretrained(SDTURBO_MODEL, subfolder="scheduler")
 
     our_pipeline = SdTurboPipeline(
-        tokenizer=tokenizer, text_encoder=text_encoder, unet=unet, vae=vae,
-        scheduler=scheduler, target_device=device, torch_dtype=dtype,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder,
+        unet=unet,
+        vae=vae,
+        scheduler=scheduler,
+        target_device=device,
+        torch_dtype=dtype,
     )
 
     # --- Our path (same Generator as legacy for deterministic comparison) ---
     gen_ours = torch.Generator(device=device).manual_seed(seed)
 
     runner = DiffusionRunner(our_pipeline)
-    state = runner.prepare(OmniDiffusionRequest(
-        request_id="compare", prompt=prompt,
-        num_inference_steps=1, guidance_scale=0.0, height=512, width=512,
-    ))
+    state = runner.prepare(
+        OmniDiffusionRequest(
+            request_id="compare",
+            prompt=prompt,
+            num_inference_steps=1,
+            guidance_scale=0.0,
+            height=512,
+            width=512,
+        )
+    )
 
     # Match the scheduler init + use the same generator for latents
     our_pipeline.scheduler.set_timesteps(1)
     latent_shape = (1, our_pipeline.unet.config.in_channels, 512 // 8, 512 // 8)
     state.latents = torch.randn(
-        latent_shape, generator=gen_ours, device=device, dtype=dtype,
+        latent_shape,
+        generator=gen_ours,
+        device=device,
+        dtype=dtype,
     )
     state.latents = state.latents * our_pipeline.scheduler.init_noise_sigma
 
@@ -203,6 +256,7 @@ def test_sdturbo_matches_legacy():
     diff = np.abs(arr_legacy.astype(float) - arr_ours.astype(float)).mean()
     print(f"  Legacy vs ours: mean abs diff = {diff:.3f}")
     assert diff < 2.0, f"Image mismatch: diff = {diff:.3f}"
+
 
 # =========================================================================
 # Test 3: SmolVLA — two-stage pipeline (vlm + action)
@@ -224,17 +278,23 @@ def test_smolvla_split_stages():
         name="smolvla_split_test",
         stages=(
             StageConfig(
-                stage_id=0, name="vlm",
+                stage_id=0,
+                name="vlm",
                 kind=StageExecutionType.LLM_AR,
                 factory=f"{smolvla_family}.vlm_stage:_vlm_stage",
-                process_input=None, input_sources=(), is_terminal=False,
+                process_input=None,
+                input_sources=(),
+                is_terminal=False,
             ),
             StageConfig(
-                stage_id=1, name="action",
+                stage_id=1,
+                name="action",
                 kind=StageExecutionType.DIFFUSION,
                 factory=f"{smolvla_family}.action_stage:_action_stage",
                 process_input=f"{smolvla_family}.stage_processors:vlm2action",
-                input_sources=(0,), is_terminal=True, final_output_type="actions",
+                input_sources=(0,),
+                is_terminal=True,
+                final_output_type="actions",
             ),
         ),
         default_deploy_config_name="smolvla.yaml",
@@ -245,11 +305,16 @@ def test_smolvla_split_stages():
         model=SMOLVLM_MODEL,
         dtype="bfloat16",
         device="cuda",
-        extra={"allow_hf_download": False},
+        extra={
+            "allow_hf_download": False,
+            # Action stage needs the lerobot checkpoint path.
+            "action_model": "HuggingFaceVLA/smolvla_libero",
+        },
     )
 
     # Fake HWC image + state (use PIL Image since vlm_stage expects it)
     from PIL import Image as PILImage
+
     fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
     fake_state = np.random.randn(7).astype(np.float32)
 
@@ -267,7 +332,10 @@ def test_smolvla_split_stages():
 
     assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
     assert result.array.shape[1] == 7, f"Expected 7-DoF, got shape={result.array.shape}"
-    print(f"  Action shape: {result.array.shape}, values range: [{result.array.min():.4f}, {result.array.max():.4f}]")
+    print(
+        f"  Action shape: {result.array.shape}, values range: [{result.array.min():.4f}, {result.array.max():.4f}]"
+    )
+
 
 # =========================================================================
 # Test 4: SmolVLA — legacy single-stage (backward compat)
@@ -275,8 +343,13 @@ def test_smolvla_split_stages():
 def test_smolvla_legacy_single_stage():
     try:
         import lerobot  # noqa: F401
-    except ImportError:
-        print("  ⏭️  SKIPPED: lerobot not installed")
+
+        # Check if the required SmolVLM2 backbone is cached
+        from transformers import AutoConfig
+
+        AutoConfig.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Instruct", local_files_only=True)
+    except (ImportError, OSError) as e:
+        print(f"  ⏭️  SKIPPED: {type(e).__name__}: {e}")
         return
 
     from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
@@ -295,11 +368,14 @@ def test_smolvla_legacy_single_stage():
         name="smolvla_legacy_test",
         stages=(
             StageConfig(
-                stage_id=0, name="vla",
+                stage_id=0,
+                name="vla",
                 kind=StageExecutionType.LLM_GENERATION,
                 factory=f"{smolvla_family}.stage:_vla_stage",
-                process_input=None, input_sources=(),
-                is_terminal=True, final_output_type="actions",
+                process_input=None,
+                input_sources=(),
+                is_terminal=True,
+                final_output_type="actions",
             ),
         ),
         default_deploy_config_name="smolvla.yaml",
@@ -313,6 +389,7 @@ def test_smolvla_legacy_single_stage():
     )
 
     from PIL import Image as PILImage
+
     fake_image = PILImage.fromarray(np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8))
     fake_state = np.random.randn(7).astype(np.float32)
 
@@ -328,7 +405,9 @@ def test_smolvla_legacy_single_stage():
 
     assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
     assert result.array.ndim == 2, f"Expected 2-D, got ndim={result.array.ndim}"
-    print(f"  Action shape: {result.array.shape}, values range: [{result.array.min():.4f}, {result.array.max():.4f}]")
+    print(
+        f"  Action shape: {result.array.shape}, values range: [{result.array.min():.4f}, {result.array.max():.4f}]"
+    )
 
 
 # =========================================================================
@@ -336,9 +415,16 @@ def test_smolvla_legacy_single_stage():
 # =========================================================================
 if __name__ == "__main__":
     run_test("SD-Turbo: real weights → DiffusionEngine → PIL Image", test_sdturbo_real_weights)
-    run_test("SD-Turbo: DiffusionEngine vs legacy StableDiffusionPipeline", test_sdturbo_matches_legacy)
-    run_test("SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact", test_smolvla_split_stages)
-    run_test("SmolVLA: legacy single-stage → ActionArtifact (backward compat)", test_smolvla_legacy_single_stage)
+    run_test(
+        "SD-Turbo: DiffusionEngine vs legacy StableDiffusionPipeline", test_sdturbo_matches_legacy
+    )
+    run_test(
+        "SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact", test_smolvla_split_stages
+    )
+    run_test(
+        "SmolVLA: legacy single-stage → ActionArtifact (backward compat)",
+        test_smolvla_legacy_single_stage,
+    )
 
     print(f"\n{'='*50}")
     print(f"Results: {passed} passed, {failed} failed")

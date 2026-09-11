@@ -229,8 +229,31 @@ def _run_cuda_graph(
 
     # Capture.
     g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g, stream=side):
-        _gpu_only()
+    try:
+        with torch.cuda.graph(g, stream=side):
+            _gpu_only()
+    except RuntimeError as exc:
+        # diffusers + CG capture is brittle: pin_memory fixes the
+        # timesteps CPU->GPU copy but other tensors (tokenizer output,
+        # random latents) still cross the boundary during capture. On
+        # diffusers 0.40 + torch 2.11, capture fails with a CUDA
+        # "operation failed due to a previous error during capture".
+        # Fall back to a one-shot replay of _gpu_only for each timed
+        # run so the bench still produces numbers; the optimization
+        # story is documented in the perf writeup as "tried CG, hit
+        # diffusers CPU->GPU copy friction, defer to Phase 2 cell
+        # design with a non-diffusers pipeline".
+        print(f"[bench] CUDA Graph capture failed ({exc!r}); falling back to one-shot")
+        walls: list[float] = []
+        torch.cuda.reset_peak_memory_stats()
+        for _ in range(runs):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            _gpu_only()
+            torch.cuda.synchronize()
+            walls.append((time.perf_counter() - t0) * 1000.0)
+        peak_vram = torch.cuda.max_memory_allocated() / (1024**2)
+        return walls, peak_vram
 
     # Replay.
     walls: list[float] = []

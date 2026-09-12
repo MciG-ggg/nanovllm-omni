@@ -74,8 +74,9 @@ def test_runner_visits_stages_in_order():
         ]
     )
     runner = PipelineRunner(pipeline, _make_deploy(), _make_args())
-    out = runner.run("hello")
+    out, stage_ms = runner.run("hello")
     assert out == "hello->thinker->talker->code2wav"
+    assert set(stage_ms) == {"thinker", "talker", "code2wav"}
     assert [entry[0] for entry in fac.get_log()] == ["thinker", "talker", "code2wav"]
 
 
@@ -100,7 +101,7 @@ def test_runner_calls_process_input_between_stages():
         ]
     )
     runner = PipelineRunner(pipeline, _make_deploy(), _make_args())
-    out = runner.run("hello")
+    out, _ = runner.run("hello")
     assert out == "tk|br|th|hello"
 
 
@@ -118,7 +119,7 @@ def test_runner_merges_deploy_defaults_with_request_sampling():
         ]
     )
     runner = PipelineRunner(pipeline, _make_deploy(), _make_args())
-    runner.run("hi", SamplingParams(temperature=0.1, max_tokens=8))
+    runner.run_payload("hi", SamplingParams(temperature=0.1, max_tokens=8))
     assert len(fac.get_captures()) == 1
     sp = fac.get_captures()[0]
     assert sp.temperature == 0.1
@@ -140,7 +141,7 @@ def test_runner_uses_deploy_defaults_when_no_request_sampling():
         ]
     )
     runner = PipelineRunner(pipeline, _make_deploy(), _make_args())
-    runner.run("hi")
+    runner.run_payload("hi")
     assert len(fac.get_captures()) == 1
     sp = fac.get_captures()[0]
     assert sp.temperature == 0.7
@@ -166,8 +167,9 @@ def test_single_stage_pipeline_supported():
         default_deploy_config_name="wan2_2_ti2v.yaml",
     )
     runner = PipelineRunner(pipeline, DeployConfig(), _make_args())
-    out = runner.run("a cat")
+    out, stage_ms = runner.run("a cat")
     assert out == "video"
+    assert set(stage_ms) == {"dit"}
     log = fac.get_diffusion_log()
     assert len(log) == 1
     assert log[0][0] == "dit"
@@ -199,7 +201,7 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
             ),
         ),
     )
-    PipelineRunner(pipeline, deploy, _make_args()).run("hello")
+    PipelineRunner(pipeline, deploy, _make_args()).run_payload("hello")
     observed_deploy, observed_args = fac.get_factory_observations()[0]
     assert observed_args.max_num_batched_tokens == 512
     assert observed_args.max_num_seqs == 2

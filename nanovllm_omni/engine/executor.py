@@ -1,8 +1,12 @@
 """PipelineExecutor: async wrapper around PipelineRunner.
 
-Dispatches synchronous ``PipelineRunner.run`` calls to a thread pool
-executor so that multiple HTTP requests or ``AsyncOmni`` consumers can
-share a single GPU. ``max_concurrent=1`` by default (single GPU).
+Dispatches synchronous ``PipelineRunner.run_payload`` calls to a thread
+pool executor so that multiple HTTP requests or ``AsyncOmni`` consumers
+can share a single GPU. ``max_concurrent=1`` by default (single GPU).
+
+Only ``submit`` exists: one request in, one payload out. There is no
+streaming entry — ``AsyncOmni.generate`` already yields per prompt by
+awaiting ``submit`` in a loop, and no caller needs a second shape.
 
 Design basis: 10-round grill session Q3 = (i). Sanity layer for HTTP and
 AsyncOmni; the underlying model loading is synchronous.
@@ -11,7 +15,7 @@ AsyncOmni; the underlying model loading is synchronous.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator  # noqa: F401 (re-exported for callers)
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -47,24 +51,12 @@ class PipelineExecutor:
         prompt: str,
         sampling: SamplingParams | None = None,
     ) -> Any:
-        """Submit one request and await the result."""
+        """Submit one request and await the result (payload only)."""
         async with self._semaphore:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 self._executor,
-                self._runner.run,
+                self._runner.run_payload,
                 prompt,
                 sampling,
             )
-
-    async def stream(
-        self,
-        prompts_with_sampling: AsyncIterator[tuple[str, SamplingParams]],
-    ) -> AsyncIterator[Any]:
-        """Submit a stream of (prompt, sampling) pairs and yield results in
-        submission order. Each call to ``submit`` is awaited sequentially;
-        concurrent submission is the caller's responsibility (yield pairs in
-        parallel to interleave).
-        """
-        async for prompt, sampling in prompts_with_sampling:
-            yield await self.submit(prompt, sampling)

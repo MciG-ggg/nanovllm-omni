@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from nanovllm_omni.diffusion.runner import DiffusionRunner
 from nanovllm_omni.outputs import ActionArtifact
 
 
@@ -148,14 +149,18 @@ def _action_stage(deploy: Any, args: Any) -> Any:
         policy = get_policy(args, extra)
     except (ImportError, OSError):
         # lerobot not installed; use fake for testing.
-        return SmolVLAActionPipeline(
-            policy=_FakePolicy(),
-            num_inference_steps=num_inference_steps,
+        return DiffusionRunner(
+            SmolVLAActionPipeline(
+                policy=_FakePolicy(),
+                num_inference_steps=num_inference_steps,
+            )
         )
 
-    return SmolVLAActionPipeline(
-        policy=policy,
-        num_inference_steps=num_inference_steps,
+    return DiffusionRunner(
+        SmolVLAActionPipeline(
+            policy=policy,
+            num_inference_steps=num_inference_steps,
+        )
     )
 
 

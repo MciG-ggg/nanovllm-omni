@@ -202,12 +202,12 @@ def test_run_one_full_times_e2e_and_derives_frames():
 
 
 def test_run_one_full_records_per_stage_breakdown():
-    """``run_one_full`` reads ``PipelineRunner._last_stage_timings`` into ``stage_ms``.
+    """``run_one_full`` reads ``stage_ms`` from the outputs' public ``custom_output``.
 
-    The fake omni carries an executor -> runner chain that exposes a
-    populated ``_last_stage_timings``; ``run_one_full`` must extract it,
-    map ``thinker`` onto ``generate_ms`` and ``code2wav`` onto
-    ``decode_ms``, and surface the full breakdown via ``stage_ms``.
+    The fake omni's ``generate`` returns outputs carrying
+    ``custom_output["stage_ms"]`` (the entrypoint seam); ``run_one_full``
+    must extract it, map ``thinker`` onto ``generate_ms`` and ``code2wav``
+    onto ``decode_ms``, and surface the full breakdown via ``stage_ms``.
     """
     import json
 
@@ -217,20 +217,7 @@ def test_run_one_full_records_per_stage_breakdown():
     raw_pcm = b"\x00\x00" * 2400
     wav = AudioPayload(data=raw_pcm, sample_rate=24000).wav_bytes()
 
-    class _FakeRunner:
-        _last_stage_timings: list[tuple[str, float]] = [
-            ("thinker", 100.5),
-            ("talker", 200.25),
-            ("code2wav", 50.125),
-        ]
-
-    class _FakeExecutor:
-        _runner = _FakeRunner()
-
     class _FakeOmni:
-        def __init__(self) -> None:
-            self._executor = _FakeExecutor()
-
         def generate(self, _text, _sampling_params):
             out = type(
                 "Out",
@@ -238,7 +225,14 @@ def test_run_one_full_records_per_stage_breakdown():
                 {
                     "multimodal_output": MultimodalPayload.from_dict(
                         {"audio": AudioPayload(data=wav, sample_rate=24000)}
-                    )
+                    ),
+                    "custom_output": {
+                        "stage_ms": {
+                            "thinker": 100.5,
+                            "talker": 200.25,
+                            "code2wav": 50.125,
+                        }
+                    },
                 },
             )()
             return [out]

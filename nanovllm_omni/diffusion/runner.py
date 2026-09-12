@@ -87,6 +87,14 @@ class DiffusionRunner:
             return outputs[0].images[0]
         return None
 
+    def __call__(self, payload: Any, sampling: Any = None) -> Any:
+        """PipelineRunner dispatch entry: ``instance(payload, sampling)``.
+
+        DIFFUSION factories return a ``DiffusionRunner`` directly so
+        ``PipelineRunner.run`` has one dispatch path for every stage.
+        """
+        return self.run(payload, sampling)
+
     def run_sync(self, payload: Any, sampling: Any = None) -> list[DiffusionOutput]:
         """Run the full denoise loop synchronously. Returns [DiffusionOutput]."""
         state = self.prepare(payload, sampling)

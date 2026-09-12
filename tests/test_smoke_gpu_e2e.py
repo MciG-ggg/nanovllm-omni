@@ -284,7 +284,7 @@ def test_smolvla_two_stage_e2e():
     )
 
     runner = PipelineRunner(pipeline, deploy, args)
-    result = runner.run("pick up the red block", sampling)
+    result = runner.run_payload("pick up the red block", sampling)
 
     # Result should be an ActionArtifact.
     from nanovllm_omni.outputs import ActionArtifact

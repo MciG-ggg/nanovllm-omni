@@ -143,3 +143,21 @@ def test_runner_run_returns_none_when_empty():
 
     runner = DiffusionRunner(_EmptyPipeline(num_steps=1))
     assert runner.run("x", _FakeSampling(extra={})) is None
+
+
+def test_runner_callable_matches_run():
+    """DiffusionRunner is the PipelineRunner dispatch entry.
+
+    ``runner(payload, sampling)`` and ``runner.run(payload, sampling)``
+    must return the same value — DIFFUSION factories return a wrapped
+    runner so ``PipelineRunner.run`` uses one ``instance(...)`` path
+    for every stage.
+    """
+    from nanovllm_omni.diffusion.runner import DiffusionRunner
+
+    pipe = _IdentityPipeline(num_steps=2)
+    runner = DiffusionRunner(pipe)
+    sampling = _FakeSampling(extra={"num_inference_steps": 2})
+    assert runner("a cat", sampling) == runner.run("a cat", sampling)
+    assert runner("a cat", sampling) == pytest.approx(0.2)
+    assert runner("a cat") == pytest.approx(0.2)  # sampling=None default

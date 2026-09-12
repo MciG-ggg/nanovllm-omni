@@ -275,7 +275,7 @@ def test_smolvla_alignment():
     runner = PipelineRunner(pipeline, deploy, args)
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
-    our_result = runner.run(instruction, sampling)
+    our_result = runner.run_payload(instruction, sampling)
     our_action = our_result.array
     print(f"  SmolVLA action shape: {our_action.shape}")
     diff = np.abs(baseline_action.astype(float) - our_action.astype(float))

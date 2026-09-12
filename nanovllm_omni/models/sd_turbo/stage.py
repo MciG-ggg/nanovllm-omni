@@ -208,7 +208,7 @@ def _sd_turbo_stage(deploy: Any, args: Any) -> Any:
     unet = unet.to(target_device)
     vae = vae.to(target_device)
 
-    return SdTurboPipeline(
+    pipeline = SdTurboPipeline(
         tokenizer=tokenizer,
         text_encoder=text_encoder,
         unet=unet,
@@ -217,6 +217,11 @@ def _sd_turbo_stage(deploy: Any, args: Any) -> Any:
         target_device=target_device,
         torch_dtype=torch_dtype,
     )
+    # DIFFUSION factories return a wrapped runner so PipelineRunner has
+    # one dispatch path. See engine/runner.py for the consumer contract.
+    from nanovllm_omni.diffusion.runner import DiffusionRunner
+
+    return DiffusionRunner(pipeline)
 
 
 __all__ = ["SdTurboPipeline", "_sd_turbo_stage"]

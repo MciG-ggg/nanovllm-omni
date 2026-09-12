@@ -45,18 +45,11 @@ def test_executor_submit_is_async():
     assert asyncio.run(go()) == "out(hello)"
 
 
-def test_executor_stream_yields_in_order():
-    async def gen():
-        for i in range(3):
-            yield (f"p{i}", None)
-
+def test_executor_submit_sequential():
     async def go() -> list[str]:
         executor = _make_executor()
         try:
-            results: list[str] = []
-            async for payload in executor.stream(gen()):
-                results.append(payload)
-            return results
+            return [await executor.submit(f"p{i}") for i in range(3)]
         finally:
             executor.close()
 

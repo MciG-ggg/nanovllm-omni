@@ -53,8 +53,8 @@ class RunResult:
     vram_peak_mb: float
     audio_bytes: bytes = b""
     # Per-stage wall-clock ms breakdown (thinker/talker/code2wav) populated
-    # only by ``run_one_full`` when the underlying ``PipelineRunner``
-    # exposes ``_last_stage_timings``. ``None`` for thinker-only bench.
+    # only by ``run_one_full`` from the ``(payload, stage_ms)`` return value
+    # of ``PipelineRunner.run``. ``None`` for thinker-only bench.
     # ponytail: dict shape, not a separate dataclass, so adding a stage
     # does not require a schema bump; JSON-serialized into CSV.
     stage_ms: dict[str, float] | None = None
@@ -294,11 +294,15 @@ def run_one_full(
         gen_end.record()
     t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
 
-    # Read per-stage wall ms the runner recorded during ``omni.generate``.
-    # Falls back gracefully when the fake/test stub has no executor.
-    runner = getattr(getattr(omni, "_executor", None), "_runner", None)
-    raw_timings = getattr(runner, "_last_stage_timings", None) if runner is not None else None
-    stage_ms: dict[str, float] | None = dict(raw_timings) if raw_timings else None
+    # Per-stage wall ms ride on the outputs' public ``custom_output`` seam:
+    # the entrypoint copies ``PipelineRunner.run``'s stage_ms dict onto
+    # each ``OmniRequestOutput``. No private reaching; stubs simply omit it.
+    stage_ms: dict[str, float] | None = None
+    for out_item in outs if isinstance(outs, list) else [outs]:
+        custom = getattr(out_item, "custom_output", None) or {}
+        if isinstance(custom, dict) and custom.get("stage_ms"):
+            stage_ms = dict(custom["stage_ms"])
+            break
 
     # Map per-stage timings onto existing StageTimes fields so the CSV's
     # ``generate_ms`` / ``decode_ms`` columns carry the stage-specific

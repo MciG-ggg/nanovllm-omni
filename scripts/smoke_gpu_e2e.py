@@ -328,7 +328,7 @@ def test_smolvla_two_stage():
     )
 
     runner = PipelineRunner(pipeline, deploy, args)
-    result = runner.run("pick up the red block", sampling)
+    result = runner.run_payload("pick up the red block", sampling)
 
     assert isinstance(result, ActionArtifact), f"Expected ActionArtifact, got {type(result)}"
     assert result.array.shape[1] == 7, f"Expected 7-DoF, got shape={result.array.shape}"

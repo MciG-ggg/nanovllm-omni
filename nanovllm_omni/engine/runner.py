@@ -26,7 +26,6 @@ from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import (
     DeployConfig,
     PipelineConfig,
-    StageExecutionType,
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
@@ -52,12 +51,6 @@ class PipelineRunner:
         self._merged = merge_pipeline_deploy(pipeline, deploy)
         self._deploy_stages = {stage.name: stage for stage in deploy.stages}
         self._stage_instances: list[Any] | None = None
-        # Per-stage wall-clock ms for the most recent ``run`` call. Bench
-        # reads this to decompose E2E wall time without touching the public
-        # ``OmniRequestOutput`` shape. ``None`` before the first call.
-        # ponytail: wall-clock only; add CUDA Event timing if per-stage GPU
-        # breakdown is needed (mirrors StageTimes.generate_cuda_ms).
-        self._last_stage_timings: list[tuple[str, float]] | None = None
 
     def _stage_args(self, stage_name: str) -> OmniEngineArgs:
         """Overlay stage-local engine knobs without mutating shared args."""
@@ -87,11 +80,6 @@ class PipelineRunner:
                     self.deploy,
                     self._stage_args(stage.name),
                 )
-                if stage.kind == StageExecutionType.DIFFUSION:
-                    from nanovllm_omni.diffusion.runner import DiffusionRunner
-
-                    # Factory returns a DiffusionPipeline; runner drives it.
-                    instance = DiffusionRunner(instance)
                 instances.append(instance)
             self._stage_instances = instances
         return self._stage_instances
@@ -136,18 +124,21 @@ class PipelineRunner:
             extra={**extras, **(request.extra or {})},
         )
 
-    def run(self, prompt: str, sampling: SamplingParams | None = None) -> Any:
+    def run(
+        self, prompt: str, sampling: SamplingParams | None = None
+    ) -> tuple[Any, dict[str, float]]:
         """Run one request through the pipeline.
 
         ``prompt`` is the initial payload. ``sampling`` is the per-request
-        override; per-stage deploy defaults are merged underneath. Records
-        wall-clock per-stage timings into ``self._last_stage_timings``
-        (list of ``(stage_name, ms)``, in pipeline order) for bench-side
-        decomposition of E2E wall time.
+        override; per-stage deploy defaults are merged underneath. Returns
+        ``(payload, stage_ms)`` — per-stage wall-clock ms in pipeline
+        order, so bench reads timings from the return value instead of
+        reaching through privates. The executor/entrypoint seam only ever
+        sees the payload (see ``run_payload``).
         """
         stages = self._ensure_stages()
         payload: Any = prompt
-        timings: list[tuple[str, float]] = []
+        stage_ms: dict[str, float] = {}
         for _, ((stage_cfg, stage_defaults), instance) in enumerate(
             zip(self._merged, stages, strict=True)
         ):
@@ -155,11 +146,11 @@ class PipelineRunner:
                 payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
             t0 = time.perf_counter()
-            if stage_cfg.kind == StageExecutionType.DIFFUSION:
-                # DiffusionClient wraps the pipeline; instance is the client.
-                payload = instance.run(payload, stage_sampling)
-            else:
-                payload = instance(payload, stage_sampling)
-            timings.append((stage_cfg.name, (time.perf_counter() - t0) * 1000.0))
-        self._last_stage_timings = timings
+            payload = instance(payload, stage_sampling)
+            stage_ms[stage_cfg.name] = (time.perf_counter() - t0) * 1000.0
+        return payload, stage_ms
+
+    def run_payload(self, prompt: str, sampling: SamplingParams | None = None) -> Any:
+        """Run one request, return only the payload (executor/entrypoint seam)."""
+        payload, _ = self.run(prompt, sampling)
         return payload

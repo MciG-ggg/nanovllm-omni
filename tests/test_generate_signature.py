@@ -28,9 +28,13 @@ class _RunnerStub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object | None]] = []
 
-    def run(self, prompt: str, sampling: SamplingParams | None) -> SimpleNamespace:
+    def run(self, prompt: str, sampling: SamplingParams | None) -> tuple:
         self.calls.append((prompt, sampling))
-        return SimpleNamespace(audio=b"RIFF....", sample_rate=24000)
+        return SimpleNamespace(audio=b"RIFF....", sample_rate=24000), {"s": 1.0}
+
+    def run_payload(self, prompt: str, sampling: SamplingParams | None) -> SimpleNamespace:
+        payload, _ = self.run(prompt, sampling)
+        return payload
 
 
 def _make_omni(runner: _RunnerStub) -> object:
@@ -50,7 +54,7 @@ class _AsyncSubmitStub:
 
     async def submit(self, prompt: str, sampling: SamplingParams | None) -> SimpleNamespace:
         self.submit_calls.append((prompt, sampling))
-        return self._runner.run(prompt, sampling)
+        return self._runner.run_payload(prompt, sampling)
 
 
 def _make_omni_output(out: SimpleNamespace) -> OmniRequestOutput:

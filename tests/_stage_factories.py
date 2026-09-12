@@ -212,5 +212,7 @@ class _LoggedDiffusionPipeline:
 
 
 def logged_diffusion(deploy: Any, args: Any) -> Any:
-    """Diffusion (single-stage) factory: returns a logged pipeline."""
-    return _LoggedDiffusionPipeline(_diffusion_log)
+    """Diffusion (single-stage) factory: returns a ``DiffusionRunner``."""
+    from nanovllm_omni.diffusion.runner import DiffusionRunner
+
+    return DiffusionRunner(_LoggedDiffusionPipeline(_diffusion_log))

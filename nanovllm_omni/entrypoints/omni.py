@@ -56,11 +56,13 @@ class Omni(OmniBase):
                 if sampling_params is not None
                 else SamplingParams(extra=extra)
             )
-        payload = executor._runner.run(text, sampling_params)
-        return OmniRequestOutput.from_pipeline(
+        payload, stage_ms = executor._runner.run(text, sampling_params)
+        output = OmniRequestOutput.from_pipeline(
             payload,
             final_output_type=self._final_output_type(),
         )
+        output.custom_output = {**output.custom_output, "stage_ms": stage_ms}
+        return output
 
     def _collect_kwargs(
         self,

@@ -46,6 +46,10 @@ from nanovllm_omni.engine.stage_runner import (
     get_stage_config,
     stage_kwargs_from_args,
 )
+from nanovllm_omni.models.minimind_omni.stage_runner import (
+    decode_minimind,
+    recapture_bridge_minimind,
+)
 
 # ---------------------------------------------------------------------------
 # ThinkerStage / TalkerStage.
@@ -316,7 +320,8 @@ class ThinkerStage:
         if eos_id is None:
             eos_id = self.config.eos
 
-        generated, bridge_hidden, text_state = self.stage_runner.decode(
+        generated, bridge_hidden, text_state = decode_minimind(
+            self.stage_runner,
             token_ids,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -328,9 +333,11 @@ class ThinkerStage:
         )
 
         # Re-capture the bridge with one full-sequence prefill pass so the
-        # talker sees full-attention rows (see StageRunner.recapture_bridge).
-        bridge_hidden = self.stage_runner.recapture_bridge(
-            token_ids + list(generated), bridge_hidden
+        # talker sees full-attention rows.
+        bridge_hidden = recapture_bridge_minimind(
+            self.stage_runner,
+            token_ids + list(generated),
+            bridge_hidden,
         )
 
         return ThinkerStageOutput(

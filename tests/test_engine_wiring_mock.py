@@ -21,7 +21,10 @@ def _get_stage_runner():
     following refactor).
     """
     try:
-        from nanovllm_omni.engine.stage_runner import SharedBlockManager, StageRunner
+        from nanovllm_omni.engine.stage_runner import (
+            SharedBlockManager,
+            StageRunner,
+        )
 
         return SharedBlockManager, StageRunner
     except Exception:

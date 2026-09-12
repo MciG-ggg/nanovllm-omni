@@ -1,35 +1,25 @@
 """Import-guard tests for the diffusion module.
 
-Per ``docs/dev/nanovllm-omni-sdturbo-diffusion-migration.md`` §5.4:
-the ``nanovllm_omni/diffusion/`` module must be importable without
-torch / diffusers installed, so CPU-only CI can run engine-level tests.
+The ``nanovllm_omni/diffusion/`` module must be importable without
+torch installed, so CPU-only CI can run runner-level tests.
 
 Heavy deps (torch, diffusers) stay inside the pipeline factories
 (``models/sd_turbo/stage.py``) and lazy-imported in client implementations.
 """
 
-from __future__ import annotations
-
 
 def test_diffusion_submodule_imports_without_torch():
     """All submodules must import in a torch-less environment.
 
-    Simulate torch / diffusers absence via import guard at top level —
-    the diffusion package only imports stdlib + typing/dataclasses,
+    The diffusion package only imports stdlib + typing/dataclasses,
     so the test passes if the module structure is clean.
     """
-    # Imports should work without torch installed (CI §5.4 gate).
-    # Only import from submodules to avoid redefinition warnings.
-    from nanovllm_omni.diffusion.client import InlineDiffusionClient  # noqa: F401
-    from nanovllm_omni.diffusion.engine import DiffusionEngine  # noqa: F401
     from nanovllm_omni.diffusion.interface import (  # noqa: F401
         DiffusionOutput,
         DiffusionPipeline,
         StepState,
     )
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest  # noqa: F401
     from nanovllm_omni.diffusion.runner import DiffusionRunner  # noqa: F401
-    from nanovllm_omni.diffusion.scheduler import RequestScheduler  # noqa: F401
 
 
 def test_diffusion_module_does_not_pull_torch_at_import():
@@ -40,25 +30,19 @@ def test_diffusion_module_does_not_pull_torch_at_import():
     """
     from pathlib import Path
 
-    # Locate the diffusion package directory.
     import nanovllm_omni.diffusion
 
     pkg_dir = Path(nanovllm_omni.diffusion.__file__).resolve().parent
 
     files = [
         "__init__.py",
-        "client.py",
-        "engine.py",
         "interface.py",
-        "request.py",
         "runner.py",
-        "scheduler.py",
     ]
 
     for fname in files:
         path = pkg_dir / fname
         source = path.read_text()
-        # Strip docstrings and comments before checking.
         lines = []
         for line in source.splitlines():
             stripped = line.strip()

@@ -5,7 +5,7 @@ VAE, scheduler) and returns a ``SdTurboPipeline`` object that implements
 the ``DiffusionPipeline`` 4-method protocol (prepare_encode / denoise_step
 / step_scheduler / post_decode).
 
-``DiffusionEngine`` drives the denoise loop through these 4 methods;
+``DiffusionRunner`` drives the denoise loop through these 4 methods;
 the stage factory no longer calls ``pipe(...)`` directly.
 
 SD-Turbo specifics (verified against the Stability blog + diffusers docs):

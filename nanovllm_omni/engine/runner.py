@@ -88,10 +88,10 @@ class PipelineRunner:
                     self._stage_args(stage.name),
                 )
                 if stage.kind == StageExecutionType.DIFFUSION:
-                    from nanovllm_omni.diffusion.client import InlineDiffusionClient
+                    from nanovllm_omni.diffusion.runner import DiffusionRunner
 
-                    # Factory returns a DiffusionPipeline; wrap in client.
-                    instance = InlineDiffusionClient(instance)
+                    # Factory returns a DiffusionPipeline; runner drives it.
+                    instance = DiffusionRunner(instance)
                 instances.append(instance)
             self._stage_instances = instances
         return self._stage_instances

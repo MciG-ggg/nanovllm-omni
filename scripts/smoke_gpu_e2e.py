@@ -5,8 +5,8 @@ Standalone script (no conftest.py dependency) — runs on WSL (RTX 3050 4GB)
 with real weights in HF cache (offline).
 
 Verifies:
-  1. SD-Turbo: SdTurboPipeline → DiffusionEngine → valid PIL Image
-  2. SD-Turbo: DiffusionEngine output vs legacy StableDiffusionPipeline
+  1. SD-Turbo: SdTurboPipeline → DiffusionRunner → valid PIL Image
+  2. SD-Turbo: DiffusionRunner output vs legacy StableDiffusionPipeline
   3. SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact
 """
 
@@ -76,14 +76,12 @@ def run_test(name, fn):
 
 
 # =========================================================================
-# Test 1: SD-Turbo — real weights through DiffusionEngine
+# Test 1: SD-Turbo — real weights through DiffusionRunner
 # =========================================================================
 def test_sdturbo_real_weights():
     from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    from nanovllm_omni.diffusion.engine import DiffusionEngine
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest
     from nanovllm_omni.diffusion.runner import DiffusionRunner
     from nanovllm_omni.models.sd_turbo.stage import SdTurboPipeline
 
@@ -122,9 +120,10 @@ def test_sdturbo_real_weights():
         torch_dtype=dtype,
     )
 
+    from types import SimpleNamespace
+
     runner = DiffusionRunner(pipeline)
-    engine = DiffusionEngine(runner)
-    request = OmniDiffusionRequest(
+    request = SimpleNamespace(
         request_id="gpu-test-1",
         prompt="a photo of a cat wearing sunglasses",
         num_inference_steps=1,
@@ -133,7 +132,7 @@ def test_sdturbo_real_weights():
         width=512,
     )
 
-    outputs = engine.run_sync(request)
+    outputs = runner.run_sync(request)
     assert len(outputs) == 1
     assert outputs[0].finished is True
     assert outputs[0].images is not None and len(outputs[0].images) == 1
@@ -148,7 +147,7 @@ def test_sdturbo_real_weights():
 
 
 # =========================================================================
-# Test 2: SD-Turbo — DiffusionEngine vs legacy StableDiffusionPipeline
+# Test 2: SD-Turbo — DiffusionRunner vs legacy StableDiffusionPipeline
 # =========================================================================
 def test_sdturbo_matches_legacy():
     from diffusers import (
@@ -159,7 +158,6 @@ def test_sdturbo_matches_legacy():
     )
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest
     from nanovllm_omni.diffusion.runner import DiffusionRunner
     from nanovllm_omni.models.sd_turbo.stage import SdTurboPipeline
 
@@ -222,9 +220,11 @@ def test_sdturbo_matches_legacy():
     # --- Our path (same Generator as legacy for deterministic comparison) ---
     gen_ours = torch.Generator(device=device).manual_seed(seed)
 
+    from types import SimpleNamespace
+
     runner = DiffusionRunner(our_pipeline)
     state = runner.prepare(
-        OmniDiffusionRequest(
+        SimpleNamespace(
             request_id="compare",
             prompt=prompt,
             num_inference_steps=1,
@@ -341,9 +341,9 @@ def test_smolvla_two_stage():
 # Main
 # =========================================================================
 if __name__ == "__main__":
-    run_test("SD-Turbo: real weights → DiffusionEngine → PIL Image", test_sdturbo_real_weights)
+    run_test("SD-Turbo: real weights → DiffusionRunner → PIL Image", test_sdturbo_real_weights)
     run_test(
-        "SD-Turbo: DiffusionEngine vs legacy StableDiffusionPipeline", test_sdturbo_matches_legacy
+        "SD-Turbo: DiffusionRunner vs legacy StableDiffusionPipeline", test_sdturbo_matches_legacy
     )
     run_test("SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact", test_smolvla_two_stage)
 

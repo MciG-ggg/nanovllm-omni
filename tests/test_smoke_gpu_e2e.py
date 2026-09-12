@@ -2,7 +2,7 @@
 
 Runs on WSL (RTX 3050 4GB) with real weights.
 Verifies:
-  1. SD-Turbo: SdTurboPipeline → DiffusionEngine → valid PIL Image
+  1. SD-Turbo: SdTurboPipeline → DiffusionRunner → valid PIL Image
   2. SmolVLA: two-stage pipeline (vlm + action) → ActionArtifact
 
 See docs/dev/nanovllm-omni-sdturbo-diffusion-migration.md §5.2.
@@ -20,7 +20,7 @@ SMOLVLA_MODEL = "HuggingFaceVLA/smolvla_libero"
 
 
 # ---------------------------------------------------------------------------
-# SD-Turbo: SdTurboPipeline + DiffusionEngine
+# SD-Turbo: SdTurboPipeline + DiffusionRunner
 # ---------------------------------------------------------------------------
 
 
@@ -30,8 +30,6 @@ def test_sdturbo_pipeline_real_weights():
     from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    from nanovllm_omni.diffusion.engine import DiffusionEngine
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest
     from nanovllm_omni.diffusion.runner import DiffusionRunner
     from nanovllm_omni.models.sd_turbo.stage import SdTurboPipeline
 
@@ -71,10 +69,11 @@ def test_sdturbo_pipeline_real_weights():
         torch_dtype=dtype,
     )
 
-    # Run through DiffusionEngine.
+    from types import SimpleNamespace
+
+    # Run through DiffusionRunner.
     runner = DiffusionRunner(pipeline)
-    engine = DiffusionEngine(runner)
-    request = OmniDiffusionRequest(
+    request = SimpleNamespace(
         request_id="gpu-test-1",
         prompt="a photo of a cat wearing sunglasses",
         num_inference_steps=1,
@@ -83,7 +82,7 @@ def test_sdturbo_pipeline_real_weights():
         width=512,
     )
 
-    outputs = engine.run_sync(request)
+    outputs = runner.run_sync(request)
     assert len(outputs) == 1
     assert outputs[0].finished is True
     assert outputs[0].images is not None
@@ -106,7 +105,7 @@ def test_sdturbo_pipeline_real_weights():
 
 @pytest.mark.smoke
 def test_sdturbo_pipeline_matches_legacy():
-    """SD-Turbo via DiffusionEngine vs legacy StableDiffusionPipeline —
+    """SD-Turbo via DiffusionRunner vs legacy StableDiffusionPipeline —
     should be bit-exact for same seed + guidance=0.0 + 1 step.
     """
     from diffusers import (
@@ -180,12 +179,13 @@ def test_sdturbo_pipeline_matches_legacy():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    from nanovllm_omni.diffusion.request import OmniDiffusionRequest
+    from types import SimpleNamespace
+
     from nanovllm_omni.diffusion.runner import DiffusionRunner
 
     runner = DiffusionRunner(our_pipeline)
     state = runner.prepare(
-        OmniDiffusionRequest(
+        SimpleNamespace(
             request_id="compare",
             prompt=prompt,
             num_inference_steps=1,
@@ -225,7 +225,7 @@ def test_sdturbo_pipeline_matches_legacy():
 @pytest.mark.smoke
 def test_smolvla_two_stage_e2e():
     """Run the two-stage smolvla pipeline through PipelineRunner.
-    Uses real SmolVLM backbone + real DiffusionEngine action stage.
+    Uses real SmolVLM backbone + real DiffusionRunner action stage.
     """
     from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
     from nanovllm_omni.config.registry import (

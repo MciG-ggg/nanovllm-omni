@@ -284,9 +284,6 @@ class ThinkerStage:
             ThinkerStageOutput with bridge_states, token_ids, text_token_ids.
         """
         import torch
-        from nanovllm.engine.scheduler import Scheduler
-        from nanovllm.engine.sequence import Sequence
-        from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
 
         from .stage_processors import ThinkerStageOutput
 
@@ -309,167 +306,32 @@ class ThinkerStage:
         if temperature <= 1e-10:
             temperature = 1e-5
 
-        # Create fork Sequence and Scheduler.
-        fork_sp = ForkSamplingParams(
-            temperature=temperature, max_tokens=max_tokens, ignore_eos=True
-        )
-        scheduler = Scheduler(self.config)
-        sequence = Sequence(token_ids, fork_sp)
-        scheduler.add(sequence)
+        # Create fork Sequence and Scheduler inside StageRunner.decode.
 
-        model = self.stage_runner.model_runner.model
-        runner = self.stage_runner.model_runner
-        # Vendor ``stream_generate`` divides logits at every seen token by
-        # ``rp=1.05`` and applies nucleus filtering with ``top_p=0.90``;
-        # the fork ``Sampler`` only knows per-call ``history``/``top_p``.
-        # Wrap ``runner.sampler`` so every decode step gets the full
-        # sequence (prompt + generated) as history plus the right top_p.
-        # ``repetition_penalty`` rides through ``sampling.extra``.
-        _base_sampler = runner.sampler
         _rp = float(
             (getattr(sampling, "extra", None) or {}).get("repetition_penalty", 1.05) or 1.05
         )
         _top_p = float(getattr(sampling, "top_p", 1.0) or 1.0)
-
-        def _sampler_with_rp(logits, temperatures):
-            # Match vendor stream_generate: divide the last-token logits,
-            # apply the full-history penalty and top-p filter, then call
-            # torch.multinomial directly. Gumbel-max is distributionally
-            # equivalent but consumes a different RNG path; a different
-            # text token changes every later bridge/audio-buffer row.
-            logits_i = logits[0].clone() / (temperatures[0] + 1e-9)
-            for token in set(sequence.token_ids):
-                logits_i[token] /= _rp
-            if _top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits_i, descending=True)
-                remove = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > _top_p
-                remove[1:] = remove[:-1].clone()
-                remove[0] = False
-                logits_i[sorted_indices[remove]] = -float("inf")
-            return torch.multinomial(torch.softmax(logits_i, dim=-1), 1).view(-1)
-
-        runner.sampler = _sampler_with_rp
-        generated: list[int] = []
-        bridge_hidden: torch.Tensor | None = None
-        # Vendor ``stream_generate`` does NOT end the loop at text EOS:
-        # it sets ``text_finished`` and keeps clocking the forward pass
-        # with throwaway filler (``enter_token_id`` once, then
-        # ``pad_token_id``) so the talker's delay-interleaved 8-codebook
-        # tail can drain. The sampler is still called on those steps so
-        # the RNG stream advances identically; only the resulting token
-        # is discarded. Bridge rows keep accumulating across filler
-        # steps, which is exactly what the talker needs.
-        text_finished = False
-        first_finished = True
-        # Fork ``Config.eos`` defaults to -1 and nothing sets it, so the
-        # EOS test must come from the tokenizer (``<|im_end|>`` = 2 for
-        # MiniMind). Falling back to ``config.eos`` keeps non-MiniMind
-        # callers working.
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is None:
             eos_id = self.config.eos
 
-        try:
-            while not scheduler.is_finished():
-                seqs, is_prefill = scheduler.schedule()
-                torch.cuda.synchronize()
-                input_ids, positions = (
-                    runner.prepare_prefill(seqs) if is_prefill else runner.prepare_decode(seqs)
-                )
-                temperatures = runner.prepare_sample(seqs)
-                logits = runner.run_model(input_ids, positions, is_prefill)
+        generated, bridge_hidden, text_state = self.stage_runner.decode(
+            token_ids,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            repetition_penalty=_rp,
+            top_p=_top_p,
+            eos_id=eos_id,
+            enter_token=_THINKER_ENTER_TOKEN,
+            pad_token=_THINKER_PAD_TOKEN,
+        )
 
-                # Extract bridge hidden. Decode steps only see the last token
-                # (prepare_decode appends ``seq.last_token``), so the forward
-                # for each decode step only produces ONE valid bridge row: the
-                # last one. Prefill covers the prompt; each decode step adds
-                # exactly one row. Take ``bh[-1:]`` on decode steps so the
-                # bridge stays token-aligned with ``token_ids + generated``
-                # (vendor recomputes the full sequence each step, which for
-                # matched sampling only matters through token alignment).
-                bh = model.get_bridge_hidden()
-                if bh is not None:
-                    bh = bh.detach().clone()
-                    if is_prefill:
-                        bridge_hidden = bh
-                    elif bridge_hidden is not None:
-                        bridge_hidden = torch.cat([bridge_hidden, bh[-1:]], dim=0)
-
-                # Sampler runs unconditionally so the RNG stream matches the
-                # vendor even on post-EOS filler steps.
-                token_id_list = runner.sampler(logits, temperatures).tolist()
-                sampled_id = token_id_list[0]
-                if text_finished:
-                    effective_id = _THINKER_ENTER_TOKEN if first_finished else _THINKER_PAD_TOKEN
-                    first_finished = False
-                    token_id_list = [effective_id]
-                else:
-                    effective_id = sampled_id
-                scheduler.postprocess(seqs, token_id_list, is_prefill)
-                self.stage_runner.reset_context()
-
-                generated.append(effective_id)
-                if not text_finished and sampled_id == eos_id:
-                    text_finished = True
-
-                # Only ``max_tokens`` bounds the loop — vendor's while bound
-                # is ``input_ids.shape[1] < start_pos + max_new_tokens``.
-                if sequence.num_completion_tokens >= max_tokens:
-                    break
-        finally:
-            # Restore the original Sampler so a second call to the
-            # same ModelRunner doesn't end up wrapping an already-wrapped
-            # callable (which would explode on signature mismatch).
-            runner.sampler = _base_sampler
-
-        # Extract text_state (final hidden from last forward).
-        text_state = logits[0].detach() if logits is not None else None
-
-        # Clone bridge_hidden so it survives the talker's model load.
-        if bridge_hidden is not None:
-            bridge_hidden = bridge_hidden.clone()
-
-        # Re-capture the bridge with one full-sequence prefill pass.
-        #
-        # The loop above uses ``prepare_decode`` (paged KV-cache; only the
-        # last token is forwarded, so ``bh[-1:]`` is the only new bridge
-        # row). Vendor ``MiniMindOmni`` does not use a KV cache — each
-        # step runs ``forward(cat(audio_buffer, input_ids))`` over the
-        # whole prefix with ``use_cache=False``, so its bridge row at
-        # position ``i`` is computed from a FULL-sequence attention pass.
-        # The two are not bit-equal (bf16 attention differences propagate
-        # through softmax and into lm_head logits), and the talker
-        # cross-attends to those rows, so the frame codes diverge by
-        # hundreds. One extra full-sequence prefill at the end replaces
-        # the paged-KV-decode bridge with a full-attention bridge that
-        # matches vendor's per-step semantics exactly.
-        full_ids = token_ids + list(generated)
-        if len(full_ids) > 0 and bridge_hidden is not None:
-            from nanovllm.utils.context import reset_context as _rc
-            from nanovllm.utils.context import set_context as _sc
-
-            n_total = len(full_ids)
-            dev = bridge_hidden.device
-            _sc(
-                is_prefill=True,
-                cu_seqlens_q=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
-                cu_seqlens_k=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
-                max_seqlen_q=n_total,
-                max_seqlen_k=n_total,
-                slot_mapping=torch.arange(n_total, dtype=torch.int32, device=dev),
-                context_lens=None,
-                block_tables=None,
-            )
-            try:
-                with torch.no_grad():
-                    _in = torch.tensor(full_ids, dtype=torch.int64, device=dev)
-                    _pos = torch.arange(n_total, dtype=torch.int64, device=dev)
-                    _ = model(_in, _pos)
-                _full_bridge = model.get_bridge_hidden()
-                if _full_bridge is not None:
-                    bridge_hidden = _full_bridge.detach().to(dev).clone()
-            finally:
-                _rc()
+        # Re-capture the bridge with one full-sequence prefill pass so the
+        # talker sees full-attention rows (see StageRunner.recapture_bridge).
+        bridge_hidden = self.stage_runner.recapture_bridge(
+            token_ids + list(generated), bridge_hidden
+        )
 
         return ThinkerStageOutput(
             bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),

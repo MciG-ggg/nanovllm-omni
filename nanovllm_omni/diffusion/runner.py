@@ -1,8 +1,13 @@
-"""DiffusionRunner: wraps a DiffusionPipeline and drives the denoise loop.
+"""DiffusionRunner: owns one DiffusionPipeline and drives the denoise loop.
 
-Owns one ``DiffusionPipeline`` instance and exposes the step-by-step
-API that ``DiffusionEngine`` calls.  The runner is the bridge between
-the engine's scheduling loop and the model's 4-method contract.
+Entry points:
+- ``run_sync(payload, sampling)`` — full loop, returns [DiffusionOutput]
+- ``run(payload, sampling)`` — run_sync + first image/artifact, for PipelineRunner
+
+``num_steps`` is resolved in one place (``_resolve_num_steps``):
+state.metadata wins (the pipeline already folded payload/sampling
+into it during prepare_encode), then payload attribute, then
+sampling extras. One definition, no second loop elsewhere.
 
 See ``docs/dev/nanovllm-omni-diffusion-mirror.md`` §2.3.
 """
@@ -12,6 +17,25 @@ from __future__ import annotations
 from typing import Any
 
 from .interface import DiffusionOutput, DiffusionPipeline, StepState
+
+
+def _resolve_num_steps(payload: Any, sampling: Any, state: StepState) -> int:
+    """Single definition of the num_steps priority.
+
+    state.metadata wins: the pipeline's prepare_encode already folded
+    payload + sampling into it. Payload attribute and sampling extras
+    are fallbacks for pipelines that don't.
+    """
+    metadata = getattr(state, "metadata", None) or {}
+    if "num_steps" in metadata:
+        return int(metadata["num_steps"])
+    if hasattr(payload, "num_inference_steps"):
+        return int(payload.num_inference_steps)
+    if sampling is not None and getattr(sampling, "extra", None):
+        extra_steps = int(sampling.extra.get("num_inference_steps", 0))
+        if extra_steps > 0:
+            return extra_steps
+    return 1
 
 
 class DiffusionRunner:
@@ -51,17 +75,22 @@ class DiffusionRunner:
         """Decode latents → final output."""
         return self.pipeline.post_decode(state)
 
+    def run(self, payload: Any, sampling: Any = None) -> Any:
+        """Run to completion; return the first image/artifact (or None).
+
+        The shape PipelineRunner needs. Synchronous single-process call —
+        no thread pool (the old InlineDiffusionClient built one and never
+        used it).
+        """
+        outputs = self.run_sync(payload, sampling)
+        if outputs and outputs[0].images:
+            return outputs[0].images[0]
+        return None
+
     def run_sync(self, payload: Any, sampling: Any = None) -> list[DiffusionOutput]:
         """Run the full denoise loop synchronously. Returns [DiffusionOutput]."""
         state = self.prepare(payload, sampling)
-        # Determine num_steps from state metadata or sampling extras.
-        num_steps = 1
-        if sampling is not None and getattr(sampling, "extra", None):
-            num_steps = int(sampling.extra.get("num_inference_steps", 1))
-        if hasattr(state, "metadata") and "num_steps" in state.metadata:
-            num_steps = state.metadata["num_steps"]
-        if hasattr(payload, "num_inference_steps"):
-            num_steps = payload.num_inference_steps
+        num_steps = _resolve_num_steps(payload, sampling, state)
         for step in range(num_steps):
             noise_pred = self.denoise_step(state, step=step, num_steps=num_steps)
             self.step_scheduler(state, noise_pred)

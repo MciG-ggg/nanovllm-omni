@@ -3,7 +3,7 @@
 
 Runs on WSL (RTX 3050 4GB) with real weights. Verifies:
 
-  1. SD-Turbo: DiffusionEngine output == StableDiffusionPipeline output
+  1. SD-Turbo: DiffusionRunner output == StableDiffusionPipeline output
      (bit-exact, same seed + 1 step + guidance=0).
   2. SmolVLA: vlm_stage + action_stage == policy.predict_action_chunk(obs).
   3. SmolVLM (greedy): custom generate loop == model.generate() (token-level).
@@ -67,10 +67,10 @@ def record(name, aligned, max_diff, mean_diff, atol, msg=""):
 
 
 # =========================================================================
-# Test 1: SD-Turbo — DiffusionEngine vs legacy StableDiffusionPipeline
+# Test 1: SD-Turbo — DiffusionRunner vs legacy StableDiffusionPipeline
 # =========================================================================
 def test_sdturbo_alignment():
-    print("\n--- SD-Turbo: DiffusionEngine vs StableDiffusionPipeline ---")
+    print("\n--- SD-Turbo: DiffusionRunner vs StableDiffusionPipeline ---")
     from diffusers import (
         AutoencoderKL,
         EulerDiscreteScheduler,

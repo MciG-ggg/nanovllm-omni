@@ -218,21 +218,32 @@ class MiniMindThinker(nn.Module):
         self.audio_head = nn.Linear(
             hidden_size, self.num_audio_heads * self.audio_vocab_size, bias=False
         )
-        # Bridge hidden is stored as a plain Python attribute because the
-        # alternative — a registered buffer updated by
-        # ``buffer[:n] = hidden_states`` inside forward — doesn't survive
-        # CUDA-graph replay cleanly: the captured slice-assign fixes ``n``
-        # at capture time, and per-bs graphs only help when replay bs
-        # equals capture bs for every step. The captured buffer also
-        # keeps stale rows beyond ``n``.
+        # Bridge hidden state capture that survives CUDA-graph replay.
         #
-        # The robust path is to set ``Config.enforce_eager=True`` for the
-        # thinker stage so forward runs Python line-by-line and this
-        # attribute assignment actually executes each step. The
-        # enforcement lives in the thinker's stage kwargs; here we
-        # just make sure the attribute is in place when eager forward
-        # finishes.
-        self._bridge_hidden: torch.Tensor | None = None
+        # The old design used a plain Python attribute (``_bridge_hidden``)
+        # which doesn't survive CUDA-graph replay — Python attribute
+        # assignment doesn't get re-executed when the captured graph
+        # re-runs its kernels. The fork's ``ModelRunner`` enables CUDA-graph
+        # capture for decode steps when ``enforce_eager=False`` (controlled
+        # by ``deploy.use_thinker_cuda_graph``); in that mode we need a
+        # registered buffer that the captured graph can write into at a
+        # fixed memory address.
+        #
+        # Layout: row 0 is the decode-step bridge (last token per step,
+        # overwritten on every replay); rows [0:seq_len] are also written
+        # during prefill in eager mode (``is_prefill`` branch in fork's
+        # ``ModelRunner``). ``decode_minimind`` slices
+        # ``_bridge_buffer[:1]`` after each decode replay and
+        # ``_bridge_buffer[:seq_len]`` once after prefill.
+        #
+        # Size: ``max_position`` rows × ``hidden_size`` columns. Matches
+        # the longest sequence the model can handle; fork-allocated KV
+        # tensors are sized similarly.
+        self.register_buffer(
+            "_bridge_buffer",
+            torch.zeros(max_position, hidden_size),
+            persistent=False,
+        )
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """ModelRunner-compatible forward: returns hidden_states."""
@@ -241,7 +252,21 @@ class MiniMindThinker(nn.Module):
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(positions, hidden_states, residual)
             if i == self.bridge_layer:
-                self._bridge_hidden = hidden_states
+                seq_len = hidden_states.size(0)
+                if seq_len > 1:
+                    # Prefill: eager in fork's ModelRunner
+                    # (``is_prefill or self.enforce_eager`` short-circuits
+                    # graph capture). Write the full hidden_states to the
+                    # buffer's first ``seq_len`` rows; the decode loop
+                    # reads them once via ``get_bridge_hidden``.
+                    self._bridge_buffer[:seq_len].copy_(hidden_states)
+                else:
+                    # Decode (CUDA-graph captured): write the single
+                    # last-token row at the buffer's row 0 — a fixed
+                    # address that survives replay. Each replay
+                    # overwrites row 0; ``decode_minimind`` reads it out
+                    # between replays via ``get_bridge_hidden``.
+                    self._bridge_buffer[0].copy_(hidden_states[0])
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -249,7 +274,13 @@ class MiniMindThinker(nn.Module):
         return self.lm_head(hidden_states)
 
     def get_bridge_hidden(self) -> torch.Tensor | None:
-        return self._bridge_hidden
+        """Return the buffer holding the most-recent bridge rows.
+
+        Decode consumers slice ``[:1]`` per step; the prefill consumer
+        slices ``[:seq_len]`` once. Row 0 is the just-replayed decode
+        row (or the first row of a prefill pass).
+        """
+        return self._bridge_buffer
 
     def get_audio_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.audio_head(hidden_states)

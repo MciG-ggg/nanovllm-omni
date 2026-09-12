@@ -107,16 +107,17 @@ def decode_minimind(
             temperatures = runner.prepare_sample(seqs)
             logits = runner.run_model(input_ids, positions, is_prefill)
 
-            # Decode steps only see the last token, so only the last
-            # bridge row is new. Prefill covers the prompt; each decode
-            # step appends exactly one row.
+            # Decode steps only see the last token, so only row 0 of
+            # the bridge buffer is new (overwritten on every replay);
+            # Prefill covers the prompt and writes all rows eagerly.
             bh = model.get_bridge_hidden()
             if bh is not None:
                 bh = bh.detach().clone()
                 if is_prefill:
-                    bridge_hidden = bh
+                    seq_len = input_ids.size(0)
+                    bridge_hidden = bh[:seq_len]
                 elif bridge_hidden is not None:
-                    bridge_hidden = torch.cat([bridge_hidden, bh[-1:]], dim=0)
+                    bridge_hidden = torch.cat([bridge_hidden, bh[:1]], dim=0)
 
             token_id_list = runner.sampler(logits, temperatures).tolist()
             sampled_id = token_id_list[0]

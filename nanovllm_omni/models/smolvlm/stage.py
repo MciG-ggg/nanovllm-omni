@@ -1,80 +1,148 @@
-"""SmolVLM-500M-Instruct VLM stage factory consumed by PipelineRunner.
+"""SmolVLM stage class: vision prefill + fork StageRunner AR decode.
 
-Mirrors ``sd_turbo._sd_turbo_stage``: the factory closes over the loaded
-``AutoModelForVision2Seq`` + ``AutoProcessor`` and returns
-``forward(payload, sampling)``. Heavy deps (transformers / torch) stay
-inside the factory and forward so the registry imports cleanly without
-them.
+Per ``docs/dev/nanovllm-omni-smolvlm-ar-migration.md`` ADR-016 (revised,
+2026-09) + ADR-017 + ADR-019:
 
-SmolVLM specifics (per HuggingFaceTB model card + transformers docs):
+- Vision tower (HF SiglipVisionModel) + connector (GeLU + Linear) run
+  once on prefill to build merged text embeddings; image-token
+  positions get vision features, the rest get text embeddings.
+- Text decoder + sampler ride the fork ``StageRunner`` (paged KV +
+  CUDA graph on the decode loop); mirrors minimind's
+  ``decode_minimind`` scheduler pattern.
+- Stage is a class instance returned by the factory
+  ``_vlm_stage(deploy, args)``; the factory's dotted path stays the
+  same so ``pipeline.py`` and deploy yaml need no edits.
 
-- 500M params; BF16 weights (~1 GB). Fits comfortably in 4 GB VRAM.
-- Input is one or more PIL images plus a text prompt; the chat template
-  accepts both via ``processor.apply_chat_template``.
-- Generation is text-only via ``model.generate(...)``; we slice off the
-  prompt tokens and decode the new ones (``skip_special_tokens=True``).
-- Default ``local_files_only=True``; opt-in Hub download via
-  ``OmniEngineArgs.extra["allow_hf_download"]``.
-
-Call contract: ``payload`` is the text prompt (str / {"prompt": ...});
+Call contract: ``payload`` is text prompt (str / ``{"prompt": ...}``);
 images are passed via ``SamplingParams.extra["images"]`` as a list of
-``PIL.Image.Image`` (the registry contract is text-prompt-shaped; the
-image list rides in ``sampling.extra`` so the runner shape stays the
-same as every other family). The example ``run.py`` opens the image on
-the caller side and stuffs it in extras.
+``PIL.Image.Image``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import torch
+
+from .smolvlm import SmolVLMForConditionalGeneration
+
 _MODEL_ID = "HuggingFaceTB/SmolVLM-500M-Instruct"
-_REGISTERED_HANDLES = {"smolvlm"}
-# SmolVLM was released in BF16; the recipe is BF16. fp16 is acceptable
-# but loses numerical headroom on the SigLIP vision encoder.
 _DTYPE_ALLOWED = ("bfloat16", "float16", "float32")
 
 
 def _vlm_stage(deploy: Any, args: Any) -> Any:
-    """Stage 0 factory: load SmolVLM-500M-Instruct, return forward callable."""
-    import torch
+    """Stage 0 factory: build + return ``SmolVLMStage`` instance."""
+    return SmolVLMStage(deploy, args)
 
-    # AutoModelForVision2Seq was renamed to AutoModelForImageTextToText in
-    # transformers 4.56+. We try the new name first (canonical) and fall
-    # back to the legacy one for older installs; both resolve to
-    # ``SmolVLMForConditionalGeneration`` for the SmolVLM model_type.
-    try:
-        from transformers import AutoModelForImageTextToText as _AutoModelCls
-    except ImportError:  # pragma: no cover - very old transformers
-        from transformers import AutoModelForVision2Seq as _AutoModelCls  # type: ignore[no-redef]
-    from transformers import AutoProcessor
 
-    extra = dict(getattr(args, "extra", None) or {})
-    allow_hf = bool(extra.get("allow_hf_download", False))
-    device = getattr(args, "device", None)
-    dtype = getattr(args, "dtype", None) or "bfloat16"
-    if dtype not in _DTYPE_ALLOWED:
-        raise ValueError(
-            f"smolvlm stage: dtype {dtype!r} not in supported "
-            f"{list(_DTYPE_ALLOWED)}; SmolVLM-500M-Instruct ships BF16"
+class SmolVLMStage:
+    """Vision prefill + fork AR decode loop for SmolVLM-500M-Instruct."""
+
+    def __init__(self, deploy: Any, args: Any) -> None:
+        from transformers import AutoConfig, AutoProcessor
+
+        from nanovllm_omni.engine.stage_runner import (
+            StageRunner,
+            get_stage_config,
+            stage_kwargs_from_args,
         )
-    torch_dtype = getattr(torch, dtype)
-    model = getattr(args, "model", None) or _MODEL_ID
-    model_id = _MODEL_ID if model in _REGISTERED_HANDLES else model
 
-    kwargs: dict[str, Any] = {"dtype": torch_dtype}
-    if not allow_hf:
-        kwargs["local_files_only"] = True
-    processor = AutoProcessor.from_pretrained(model_id, **kwargs)
-    model = _AutoModelCls.from_pretrained(model_id, **kwargs)
-    # SmolVLM's tokenizer pad id (128002) sits outside the LM vocab range
-    # and emits a warning on first generate; resetting to None is harmless.
-    model.config.pad_token_id = None
-    if device:
-        model = model.to(device)
+        extra = dict(getattr(args, "extra", None) or {})
+        allow_hf = bool(extra.get("allow_hf_download", False))
+        self.device = getattr(args, "device", None) or "cuda"
+        dtype_str = getattr(args, "dtype", None) or "bfloat16"
+        if dtype_str not in _DTYPE_ALLOWED:
+            raise ValueError(
+                f"smolvlm: dtype {dtype_str!r} not in supported {list(_DTYPE_ALLOWED)}"
+            )
+        self.dtype = getattr(torch, dtype_str)
+        model_id = getattr(args, "model", None) or _MODEL_ID
 
-    def vlm_forward(payload: Any, sampling: Any) -> Any:
-        # prompt: str or {"prompt": ...} per the OmniPromptType contract
+        kwargs: dict[str, Any] = {"dtype": self.dtype}
+        if not allow_hf:
+            kwargs["local_files_only"] = True
+
+        # 1) Build our model from HF config
+        hf_config = AutoConfig.from_pretrained(model_id, **kwargs)
+        self.model = SmolVLMForConditionalGeneration(hf_config)
+
+        # 2) Load HF weights via fork loader (default prefix=""; submodule
+        # names mirror HF checkpoint keys, so weights land directly).
+        from nanovllm.utils.loader import load_model
+
+        try:
+            load_model(self.model, model_id)
+        except (FileNotFoundError, OSError):
+            # Hub snapshot fallback when offline cache misses
+            from huggingface_hub import snapshot_download
+
+            local_dir = snapshot_download(model_id, local_files_only=not allow_hf)
+            load_model(self.model, local_dir)
+
+        self.model = self.model.to(device=self.device, dtype=self.dtype)
+        self.model.eval()
+
+        # 3) Build fork StageRunner wrapping the language_model-only forward
+        stage_kwargs = stage_kwargs_from_args(args)
+        config = get_stage_config("smolvlm_vlm", model_id, **stage_kwargs)
+        config.dtype = dtype_str
+        self.stage_runner = StageRunner(
+            model_class=SmolVLMForConditionalGeneration,
+            config=config,
+            rank=0,
+        )
+
+        # 4) Processor + image-token metadata
+        self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
+        image_token_id = getattr(hf_config, "image_token_id", None)
+        if image_token_id is None:
+            tok = self.processor.tokenizer
+            try:
+                image_token_id = tok.convert_tokens_to_ids("<image>")
+            except KeyError:
+                image_token_id = None
+        self.image_token_id = image_token_id
+        eos = getattr(hf_config, "eos_token_id", None) or self.processor.tokenizer.eos_token_id
+        self.eos_token_id = eos if isinstance(eos, int) else int(eos[0])
+
+    def _build_merged_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        pixel_values: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Return [T, hidden] merged embeddings, or None for text-only."""
+        if pixel_values is None:
+            return None
+        if self.image_token_id is None:
+            raise RuntimeError(
+                "smolvlm: image_token_id not resolved; "
+                "SmolVLMConfig.image_token_id or tokenizer <image> token missing"
+            )
+
+        with torch.inference_mode():
+            vision_out = self.model.model.vision_model(pixel_values=pixel_values)
+            image_features = vision_out.last_hidden_state  # [B, P, v_dim]
+            image_embeds = self.model.model.connector(image_features)  # [B, P, t_dim]
+            text_embeds = self.model.model.language_model.model.embed_tokens(
+                input_ids
+            )  # [1, T, t_dim]
+            image_mask = input_ids == self.image_token_id  # [1, T]
+            n_image_tokens = int(image_mask.sum().item())
+            n_image_patches = int(image_embeds.shape[1])
+            if n_image_tokens != n_image_patches:
+                raise RuntimeError(
+                    f"smolvlm: image-token positions {n_image_tokens} "
+                    f"!= vision patches {n_image_patches}; check processor expansion"
+                )
+            merged = text_embeds.clone()
+            merged[image_mask] = image_embeds[0]
+        return merged.flatten(0, 1)  # [T, t_dim]
+
+    def __call__(self, payload: Any, sampling: Any) -> str:
+        from nanovllm.engine.scheduler import Scheduler
+        from nanovllm.engine.sequence import Sequence
+        from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
+
         prompt_text = (
             payload.get("prompt", "")
             if isinstance(payload, dict)
@@ -85,12 +153,12 @@ def _vlm_stage(deploy: Any, args: Any) -> Any:
             if sampling is not None and getattr(sampling, "extra", None)
             else {}
         )
-        # Images are a list of PIL.Image; empty list is allowed (text-only VQA).
         images = list(extras.get("images") or [])
         max_new_tokens = int(extras.get("max_new_tokens", 512))
+        temperature = float(getattr(sampling, "temperature", 0.0) or 0.0)
 
-        # Build the chat-template input. SmolVLM expects image blocks before
-        # the text block; an empty list means text-only.
+        # Build chat-template input; processor expands <image> placeholders
+        # into the right number of patch tokens per image.
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -100,17 +168,62 @@ def _vlm_stage(deploy: Any, args: Any) -> Any:
                 ],
             }
         ]
-        chat = processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = processor(text=chat, images=images or None, return_tensors="pt")
-        target_device = device if device else next(model.parameters()).device
-        inputs = {k: (v.to(target_device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(self.device)
+        pixel_values = inputs.get("pixel_values")
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(self.device, dtype=self.dtype)
 
-        with torch.inference_mode():
-            output = model.generate(**inputs, max_new_tokens=max_new_tokens)
-        new_tokens = output[:, inputs["input_ids"].shape[1] :]
-        return processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
+        # Prefill: vision + connector + merge (or None for text-only)
+        merged_embeds = self._build_merged_embeddings(input_ids, pixel_values)
 
-    return vlm_forward
+        # Fork scheduler path — mirrors minimind decode_minimind shape.
+        runner = self.stage_runner.model_runner
+        config = self.stage_runner.config
+        fork_sp = ForkSamplingParams(
+            temperature=temperature,
+            max_tokens=max_new_tokens,
+            ignore_eos=False,
+        )
+        sequence = Sequence(input_ids[0].tolist(), fork_sp)
+        scheduler = Scheduler(config)
+        scheduler.add(sequence)
+
+        # Prefill step (one shot)
+        seqs, is_prefill = scheduler.schedule()
+        prefill_ids, prefill_positions = runner.prepare_prefill(seqs)
+        temperatures = runner.prepare_sample(seqs)
+        if merged_embeds is not None:
+            logits = runner.run_model(
+                prefill_ids,
+                prefill_positions,
+                is_prefill,
+                inputs_embeds=merged_embeds,
+            )
+        else:
+            logits = runner.run_model(prefill_ids, prefill_positions, is_prefill)
+        token_ids = runner.sampler(logits, temperatures).tolist()
+        scheduler.postprocess(seqs, token_ids, is_prefill)
+        self.stage_runner.reset_context()
+        generated: list[int] = list(token_ids)
+
+        # AR decode loop
+        while not scheduler.is_finished():
+            seqs, is_prefill = scheduler.schedule()
+            decode_ids, decode_positions = runner.prepare_decode(seqs)
+            temperatures = runner.prepare_sample(seqs)
+            logits = runner.run_model(decode_ids, decode_positions, is_prefill)
+            token_ids = runner.sampler(logits, temperatures).tolist()
+            scheduler.postprocess(seqs, token_ids, is_prefill)
+            self.stage_runner.reset_context()
+            generated.extend(token_ids)
+            if generated[-1] == self.eos_token_id:
+                break
+            if sequence.num_completion_tokens >= max_new_tokens:
+                break
+
+        return self.processor.batch_decode([generated], skip_special_tokens=True)[0]
 
 
-__all__ = ["_vlm_stage"]
+__all__ = ["SmolVLMStage", "_vlm_stage"]

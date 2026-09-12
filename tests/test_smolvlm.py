@@ -20,7 +20,7 @@ def test_pipeline_registry_resolves_smolvlm():
     config = resolve_pipeline_config("smolvlm")
     assert config is not None
     assert [s.name for s in config.stages] == ["vlm"]
-    assert config.stages[0].kind == StageExecutionType.LLM_GENERATION
+    assert config.stages[0].kind == StageExecutionType.LLM_AR
     assert config.stages[0].is_terminal is True
     assert config.stages[0].final_output_type == "text"
     assert config.default_deploy_config_name == "smolvlm.yaml"

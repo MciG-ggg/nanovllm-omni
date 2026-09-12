@@ -3,3 +3,11 @@ stages:
   - name: vlm
     default_sampling_params:
       max_new_tokens: 512
+    # Fork paged-attention resource budget for the SmolVLM-500M text
+    # decoder (BF16, ~135M SmolLM2 + ~430M SigLIP, hidden=576). 4 GB
+    # RTX 3050: vision + connector + decoder fit comfortably at 0.85
+    # gpu_memory_utilization; per-smolvlm-ar-migration §6.3-bis
+    # profile gate remains pending WSL measurement.
+    gpu_memory_utilization: 0.85
+    max_num_batched_tokens: 8192
+    max_num_seqs: 1

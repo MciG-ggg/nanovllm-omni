@@ -1,11 +1,12 @@
 """SmolVLM-500M-Instruct pipeline topology (frozen, declarative).
 
-Single terminal LLM_GENERATION stage: ``transformers.AutoModelForVision2Seq``
-loads ``HuggingFaceTB/SmolVLM-500M-Instruct`` (BF16, image+text -> text).
-``kind=LLM_GENERATION`` is the closest existing StageExecutionType; the
-vllm-omni taxonomy has no pure-VLM member and the closed-set test locks
-the four names. ``final_output_type="text"`` so the engine wraps the
-generated string via ``OmniRequestOutput.from_pipeline(...)``.
+Single terminal ``LLM_AR`` stage: vision prefill (HF SigLIP + GeLU
+connector) then fork paged-attention AR decode loop on the SmolLM2
+text decoder. ``kind=LLM_AR`` (per ADR-018) replaces the prior
+``LLM_GENERATION`` placeholder; the stage is genuinely autoregressive
+now that it rides the fork ``StageRunner``. ``final_output_type="text"``
+so the engine wraps the generated string via
+``OmniRequestOutput.from_pipeline(...)``.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ SMOLVLM_PIPELINE = PipelineConfig(
         StageConfig(
             stage_id=0,
             name="vlm",
-            kind=StageExecutionType.LLM_GENERATION,
+            kind=StageExecutionType.LLM_AR,
             factory=f"{_SMOLVLM_FAMILY}.stage:_vlm_stage",
             process_input=None,
             input_sources=(),

@@ -104,8 +104,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
 def _load_pipeline(device: str | None) -> tuple[Any, Any]:
     """Load both SmolVLA stages via the project's factories.
 
-    vlm_stage and action_stage share a process-level policy cache
-    (see ``action_stage._POLICY_CACHE``), so calling both loads the
+    vlm_stage and action_stage share one policy via ``smolvla.policy``, so calling both loads the
     lerobot SmolVLAPolicy exactly once.
     """
     from nanovllm_omni.models.smolvla.action_stage import _action_stage

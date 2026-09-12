@@ -189,3 +189,59 @@ def test_smolvla_libero_handle_resolves():
     assert config is not None
     assert config.name == "smolvla"
     assert len(config.stages) == 2
+
+
+def test_policy_identity_fixed_at_construction():
+    """C3: policy ownership lives in smolvla.policy, not in metadata.
+
+    - resolve_model_path: explicit action_model wins; backbone paths reset.
+    - get_policy returns the same instance for the same key (shared cache).
+    - prepare_encode raises (not silently falls back) when no policy anywhere.
+    """
+    from types import SimpleNamespace
+
+    from nanovllm_omni.models.smolvla import policy as policy_mod
+
+    args = SimpleNamespace(model="HuggingFaceVLA/smolvla_libero", device="cpu", extra={})
+    assert policy_mod.resolve_model_path(args, {}) == "HuggingFaceVLA/smolvla_libero"
+    assert (
+        policy_mod.resolve_model_path(
+            SimpleNamespace(model="backbone-only", device="cpu", extra={}), {}
+        )
+        == "HuggingFaceVLA/smolvla_libero"
+    )
+    assert (
+        policy_mod.resolve_model_path(args, {"action_model": "lerobot/custom"}) == "lerobot/custom"
+    )
+
+    fake = object()
+    key = policy_mod.cache_key("HuggingFaceVLA/smolvla_libero", False)
+    policy_mod._POLICY_CACHE[key] = fake
+    try:
+        assert policy_mod.get_policy(args, {}) is fake
+    finally:
+        del policy_mod._POLICY_CACHE[key]
+
+    import torch
+
+    from nanovllm_omni.models.smolvla.action_stage import SmolVLAActionPipeline
+    from nanovllm_omni.models.smolvla.stage_processors import ActionInputPayload
+
+    with __import__("pytest").raises(ValueError, match="requires a policy"):
+        SmolVLAActionPipeline(policy=None)
+    # metadata 无 policy 且 self.policy 被置空 → 必须抛而不是静默用错权重
+    pipe = SmolVLAActionPipeline(policy=_FakePolicy(), num_inference_steps=3)
+    pipe.policy = None
+    with __import__("pytest").raises(ValueError, match="no policy"):
+        pipe.prepare_encode(
+            ActionInputPayload(
+                prefix_states=torch.ones(1, 4),
+                robot_state=torch.zeros(7),
+                chunk_len=10,
+                action_dim=7,
+                metadata={
+                    "past_key_values": {"fake": True},
+                    "prefix_pad_masks": torch.ones(1, 4),
+                },
+            )
+        )

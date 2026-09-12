@@ -34,32 +34,16 @@ class SmolVLAVlmStage:
 
     def __init__(self, deploy: Any, args: Any) -> None:
         from lerobot.policies import make_pre_post_processors
-        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
         extra = dict(getattr(args, "extra", None) or {})
-        allow_hf = bool(extra.get("allow_hf_download", False))
         self.device = getattr(args, "device", None) or "cuda"
 
-        # Load the full lerobot policy (vlm_stage needs vlm_with_expert + preprocessor).
-        model_path = getattr(args, "model", None) or "HuggingFaceVLA/smolvla_libero"
-        # If the model path looks like a backbone (not a lerobot policy), use default.
-        if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
-            model_path = "HuggingFaceVLA/smolvla_libero"
-        # Share one policy instance with the action stage (same process,
-        # same checkpoint → same cache key). Avoids a second ~2GB load on
-        # the 4GB card and keeps sample_noise RNG state identical.
-        from .action_stage import _POLICY_CACHE
+        # Policy identity is fixed here at construction (see policy.py).
+        # Same instance flows to the action stage via payload metadata.
+        from .policy import get_policy, resolve_model_path
 
-        cache_key = model_path + ("" if allow_hf else "_offline")
-        self.policy = _POLICY_CACHE.get(cache_key)
-        if self.policy is None:
-            load_kwargs: dict[str, Any] = {"strict": False}
-            if not allow_hf:
-                load_kwargs["local_files_only"] = True
-            self.policy = SmolVLAPolicy.from_pretrained(model_path, **load_kwargs)
-            if self.device:
-                self.policy = self.policy.to(self.device)
-            _POLICY_CACHE[cache_key] = self.policy
+        model_path = resolve_model_path(args, extra)
+        self.policy = get_policy(args, extra)
 
         # Cache references for speed.
         self.config = self.policy.config

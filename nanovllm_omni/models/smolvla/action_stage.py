@@ -35,6 +35,8 @@ class SmolVLAActionPipeline:
         num_inference_steps: int | None = None,
     ) -> None:
         """policy: lerobot SmolVLAPolicy (provides denoise_step + sample_noise)."""
+        if policy is None:
+            raise ValueError("SmolVLAActionPipeline requires a policy (got None)")
         self.policy = policy
         self.config = policy.config
         self.num_inference_steps = num_inference_steps or self.config.num_steps
@@ -54,8 +56,13 @@ class SmolVLAActionPipeline:
         if past_key_values is None or prefix_pad_masks is None:
             raise ValueError("ActionInputPayload missing past_key_values or prefix_pad_masks")
 
-        # Use the vlm_stage's policy to ensure bit-exact alignment.
+        # Policy identity was fixed at construction (see policy.py): the
+        # vlm_stage's instance arrives in metadata, self.policy is the
+        # same object in production (same cache key) and the test double
+        # in unit tests. No third option — a missing policy is a bug.
         policy = metadata.get("policy") or metadata.get("policy_ref") or self.policy
+        if policy is None:
+            raise ValueError("ActionInputPayload carries no policy and stage has none")
         config = policy.config
 
         # Sample initial noise (same as lerobot's sample_noise).
@@ -125,53 +132,26 @@ class SmolVLAActionPipeline:
         )
 
 
-_POLICY_CACHE: dict[str, Any] = {}
-
-
 def _action_stage(deploy: Any, args: Any) -> Any:
     """Stage 1 factory: return SmolVLAActionPipeline.
 
-    Uses a process-level cache to avoid loading the same policy twice.
-    In production, vlm_stage already loaded the full SmolVLA policy; this
-    factory only needs to return a pipeline that uses ``policy_ref`` from
-    the vlm_stage metadata at runtime.
+    Same shared instance as vlm_stage (same cache key → same object),
+    so no second ~2GB load on the 4GB card and identical sample_noise
+    RNG state. Falls back to a fake only when lerobot is missing.
     """
-    extra = dict(getattr(args, "extra", None) or {})
-    allow_hf = bool(extra.get("allow_hf_download", False))
+    from .policy import get_policy
 
+    extra = dict(getattr(args, "extra", None) or {})
     num_inference_steps = int(extra.get("num_inference_steps", 0)) or None
 
-    model_path = (
-        extra.get("action_model") or getattr(args, "model", None) or "HuggingFaceVLA/smolvla_libero"
-    )
-    if "smolvla" not in model_path.lower() and "lerobot" not in model_path.lower():
-        model_path = extra.get("action_model") or "HuggingFaceVLA/smolvla_libero"
-
-    cache_key = model_path + ("" if allow_hf else "_offline")
-    policy = _POLICY_CACHE.get(cache_key)
-
-    if policy is None:
-        try:
-            from lerobot.policies.smolvla.modeling_smolvla import (  # type: ignore[import-not-found]
-                SmolVLAPolicy,
-            )
-
-            load_kwargs: dict[str, Any] = {"strict": False}
-            if not allow_hf:
-                load_kwargs["local_files_only"] = True
-            policy = SmolVLAPolicy.from_pretrained(model_path, **load_kwargs)
-
-            device = getattr(args, "device", None) or "cuda"
-            if device:
-                policy = policy.to(device)
-
-            _POLICY_CACHE[cache_key] = policy
-        except (ImportError, OSError):
-            # lerobot not installed; use fake for testing.
-            return SmolVLAActionPipeline(
-                policy=_FakePolicy(),
-                num_inference_steps=num_inference_steps,
-            )
+    try:
+        policy = get_policy(args, extra)
+    except (ImportError, OSError):
+        # lerobot not installed; use fake for testing.
+        return SmolVLAActionPipeline(
+            policy=_FakePolicy(),
+            num_inference_steps=num_inference_steps,
+        )
 
     return SmolVLAActionPipeline(
         policy=policy,

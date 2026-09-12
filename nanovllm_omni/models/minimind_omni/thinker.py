@@ -262,7 +262,7 @@ class MiniMindThinker(nn.Module):
 
 
 def _thinker_stage(deploy, args):
-    """Stage 0 factory — fork ``ModelRunner`` + ``SharedBlockManager`` wiring.
+    """Stage 0 factory — fork ``ModelRunner`` wiring.
 
     Returns a ``ThinkerStage`` whose ``ModelRunner`` already has its KV
     tensors allocated and CUDA graphs captured. The actual decode loop

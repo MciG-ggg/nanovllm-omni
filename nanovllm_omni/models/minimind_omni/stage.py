@@ -2,12 +2,10 @@
 they need). Mirrors the ``stage.py`` convention used by
 ``models/sd_turbo/`` / ``smolvla/`` / ``smolvlm/``.
 
-The fork-AR-Engine adapter layer (``SharedBlockManager`` /
-``StageRunner`` / ``_ensure_dist`` / ``get_stage_config`` /
+The fork-AR-Engine adapter layer (``StageRunner`` /
+``_ensure_dist`` / ``get_stage_config`` /
 ``stage_kwargs_from_args``) lives in
-:mod:`nanovllm_omni.engine.stage_runner` (extracted so the second model
-family that needs the same fork-AR-Engine adapter can reuse it). This
-module owns
+:mod:`nanovllm_omni.engine.stage_runner`. This module owns
 only the MiniMind-O specific bits:
 
   - weight slicing for thinker-only / talker-only safetensors
@@ -42,7 +40,6 @@ from typing import Any
 from nanovllm_omni.engine.stage_runner import (
     StageRunner,
     _ensure_dist,
-    get_shared_block_manager,
     get_stage_config,
     stage_kwargs_from_args,
 )
@@ -263,18 +260,11 @@ class ThinkerStage:
             **stage_kwargs_from_args(args),
             enforce_eager=True,
         )
-        # The first ``get_shared_block_manager`` call wins; the
-        # talker's later call reuses this same instance.
-        self.shared_block_manager = get_shared_block_manager(
-            num_blocks=self.config.num_kvcache_blocks,
-            block_size=self.config.kvcache_block_size,
-        )
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
         self.stage_runner = StageRunner(
             model_class=MiniMindThinker,
             config=self.config,
-            shared_block_manager=self.shared_block_manager,
         )
 
     def __call__(self, payload: Any, sampling: Any) -> Any:

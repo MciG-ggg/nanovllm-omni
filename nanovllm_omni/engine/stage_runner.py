@@ -7,10 +7,6 @@ attention (currently only MiniMind-O) write their own decode recipe
 on top — see ``models/minimind_omni/stage_runner.py``.
 
 Contents:
-- ``SharedBlockManager`` + ``get_shared_block_manager`` — logical
-  block table shared across stages that want it. Each stage still
-  allocates its own KV tensor (thinker 12 layers, talker 4 layers —
-  incompatible shapes), so this is shared *logical* block IDs only.
 - ``_ensure_dist`` — monkey-patches ``dist.init_process_group`` so
   two ``ModelRunner`` instances can co-exist in one process.
 - ``_stage_configs`` / ``get_stage_config`` — per-stage fork
@@ -22,6 +18,12 @@ Contents:
   (``set_context`` / ``forward`` / ``sample`` / ``reset_context``)
   wrap the fork's module-level globals.
 
+Each stage owns its own KV cache. Cross-stage state (thinker →
+talker bridge hidden states) is passed through ``decode_minimind`` /
+``recapture_bridge_minimind`` rather than shared memory or shared
+block tables — same pattern as vllm-omni's ``StagePool``, where
+every stage has independent KV.
+
 Fork imports are lazy: ``nanovllm.engine.model_runner`` and
 ``nanovllm.layers.attention`` pull in ``triton``, which a CPU-only
 host may lack. Smoke tests that import this module don't trigger
@@ -31,80 +33,6 @@ the fork import.
 from __future__ import annotations
 
 from typing import Any
-
-# ---------------------------------------------------------------------------
-# SharedBlockManager
-# ---------------------------------------------------------------------------
-
-
-class SharedBlockManager:
-    """Thin wrapper over fork ``BlockManager``.
-
-    The *logical* block table (which block ID holds which tokens) is
-    shared across stages; the *physical* KV tensors are per-stage
-    because layer counts differ (thinker 12 layers, talker 4 layers —
-    incompatible tensor shapes). Fork ``BlockManager`` only tracks
-    logical block IDs; the per-stage KV tensors are allocated by each
-    stage's ``ModelRunner`` independently.
-    """
-
-    def __init__(self, num_blocks: int, block_size: int) -> None:
-        # Lazy: pulling fork ``BlockManager`` requires ``triton``.
-        from nanovllm.engine.block_manager import BlockManager
-
-        self._inner = BlockManager(num_blocks, block_size)
-
-    @property
-    def block_size(self) -> int:
-        return self._inner.block_size
-
-    def can_allocate(self, seq: Any) -> int:
-        return self._inner.can_allocate(seq)
-
-    def allocate(self, seq: Any, num_cached_blocks: int) -> None:
-        self._inner.allocate(seq, num_cached_blocks)
-
-    def deallocate(self, seq: Any) -> None:
-        self._inner.deallocate(seq)
-
-    def can_append(self, seq: Any) -> bool:
-        return self._inner.can_append(seq)
-
-    def may_append(self, seq: Any) -> None:
-        self._inner.may_append(seq)
-
-    def hash_blocks(self, seq: Any) -> None:
-        # ponytail: single instance shared across two stages. If we ever
-        # need per-stage BlockManager caches, drop this method and pass
-        # the inner BlockManager directly.
-        self._inner.hash_blocks(seq)
-
-
-# single ``SharedBlockManager``. The first caller (constructed first per
-# ``PipelineRunner._ensure_stages`` order) wins; later callers reuse
-# the same instance regardless of the ``num_blocks`` they pass.
-
-_shared_block_manager: SharedBlockManager | None = None
-
-
-def get_shared_block_manager(num_blocks: int, block_size: int) -> SharedBlockManager:
-    """Return the process-wide ``SharedBlockManager`` (lazy-init).
-
-    ``num_blocks`` / ``block_size`` are taken from the first caller's
-    ``Config``. Both stages use the same ``block_size`` (fork default
-    256); ``num_blocks`` is set per-stage by
-    ``ModelRunner.allocate_kv_cache`` based on per-stage
-    ``gpu_memory_utilization``, so the two stages' values may differ.
-    We accept the first caller's value; the second stage's own
-    ``ModelRunner`` will still allocate its own KV tensors sized to
-    the right per-stage ``num_kvcache_blocks``. Sharing the
-    BlockManager is about logical block-ID uniqueness, not KV sizing.
-    """
-    global _shared_block_manager
-    if _shared_block_manager is None:
-        _shared_block_manager = SharedBlockManager(num_blocks, block_size)
-    return _shared_block_manager
-
 
 # ---------------------------------------------------------------------------
 # Per-stage Config cache.
@@ -247,7 +175,6 @@ class StageRunner:
         self,
         model_class: type,
         config: Any,
-        shared_block_manager: SharedBlockManager,
         rank: int = 0,
     ) -> None:
         # Lazy: importing ``ModelRunner`` pulls in
@@ -258,7 +185,6 @@ class StageRunner:
 
         self.model_class = model_class
         self.config = config
-        self.shared_block_manager = shared_block_manager
         # ``ModelRunner.__init__`` is heavy: ``dist.init_process_group``,
         # model load, weight loader, KV allocate, optional CUDA graph
         # capture. Side effects all live here.
@@ -355,10 +281,8 @@ class StageRunner:
 
 
 __all__ = [
-    "SharedBlockManager",
     "StageRunner",
     "_ensure_dist",
-    "get_shared_block_manager",
     "get_stage_config",
     "stage_kwargs_from_args",
 ]

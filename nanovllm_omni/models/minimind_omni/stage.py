@@ -471,26 +471,19 @@ class TalkerStage:
 
         bridge = bridge.unsqueeze(0).to(device=device, dtype=model.embed_proj[0].weight.dtype)
         spk_emb = payload.speaker_embedding
-        # Vendor seeds ``audio_buffer`` at the prompt length and feeds
-        # ``cat(audio_buffer, input_ids)`` every forward, so position
-        # ``start_pos + p`` is the p-th GENERATED token and positions
-        # ``0..start_pos-1`` are prompt rows carrying pad audio.
-        start_pos = len(payload.prompt_token_ids)
+        # ``start_pos``/``num_steps`` arrive precomputed from thinker2talker
+        # (prompt length / generated-row count); no second split here.
+        from collections.abc import Mapping as _Mapping
+
+        meta = dict(payload.metadata) if isinstance(payload.metadata, _Mapping) else {}
         bridge_len = bridge.shape[1]
+        start_pos = int(meta.get("start_pos", len(payload.prompt_token_ids)))
+        num_steps = int(meta.get("num_steps", bridge_len - start_pos))
         if start_pos >= bridge_len:
             # Degenerate payload (no generated rows): fall back to the
             # last row as the single decode position.
             start_pos = max(0, bridge_len - 1)
-        # Vendor's loop runs exactly ``max_new_tokens`` iterations with
-        # ``while input_ids.shape[1] < start_pos + max_new_tokens``, i.e.
-        # one iteration per generated token. The bridge has one row per
-        # generated token (the row at position ``start_pos + i`` is the
-        # hidden state after processing text position ``start_pos + i``),
-        # so ``num_steps = bridge_len - start_pos`` matches vendor.
-        num_steps = bridge_len - start_pos
-        # Vendor runs one iteration per generated token; at iteration
-        # ``step`` the forward covers ``start_pos + step`` positions, so
-        # ``step`` may reach ``bridge_len - start_pos`` inclusive.
+            num_steps = bridge_len - start_pos
         if watchdog_limit is not None:
             num_steps = min(num_steps, watchdog_limit)
 

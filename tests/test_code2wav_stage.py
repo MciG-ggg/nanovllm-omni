@@ -120,3 +120,48 @@ def test_existing_codec_helpers_remain_usable() -> None:
 
     assert mimi.input_shape == (1, 8, 2)
     assert wav_bytes.startswith(b"RIFF")
+
+
+def test_thinker2talker_rejects_non_strong_type():
+    """C4: thinker2talker 只收 ThinkerStageOutput，其余 TypeError。"""
+    import pytest
+
+    from nanovllm_omni.models.minimind_omni.stage_processors import thinker2talker
+
+    with pytest.raises(TypeError, match="ThinkerStageOutput"):
+        thinker2talker({"bridge_states": None}, prompt="x")
+    with pytest.raises(TypeError, match="ThinkerStageOutput"):
+        thinker2talker("raw string", prompt="x")
+
+
+def test_thinker2talker_computes_start_pos_once():
+    """C4: start_pos/num_steps 由 thinker2talker 一处计算进 metadata。"""
+    import torch
+
+    from nanovllm_omni.models.minimind_omni.stage_processors import (
+        ThinkerStageOutput,
+        thinker2talker,
+    )
+
+    bridge = torch.randn(5, 8)
+    out = thinker2talker(
+        ThinkerStageOutput(
+            bridge_states=bridge,
+            prompt_token_ids=(1, 2),
+            output_token_ids=(3, 4, 5),
+            text_token_ids=(1, 2, 3, 4, 5),
+        )
+    )
+    assert out.metadata["start_pos"] == 2
+    assert out.metadata["num_steps"] == 3
+    assert out.bridge_states.shape[0] == 5
+
+
+def test_talker2code2wav_rejects_non_talker_output():
+    """C4: talker2code2wav 只收 TalkerOutput，其余 TypeError。"""
+    import pytest
+
+    from nanovllm_omni.models.minimind_omni.stage_processors import talker2code2wav
+
+    with pytest.raises(TypeError, match="TalkerOutput"):
+        talker2code2wav({"audio_codes": None}, prompt="x")

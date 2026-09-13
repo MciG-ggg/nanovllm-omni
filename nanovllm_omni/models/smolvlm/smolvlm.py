@@ -168,12 +168,16 @@ class SmolLM2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # fork RMSNorm.forward returns a bare tensor when residual is
-        # None (first layer) and a (tensor, residual) pair otherwise.
+        # First layer: residual is None, the fork RMSNorm returns a bare
+        # tensor; subsequent layers pass residual through and get a
+        # (tensor, residual) pair back. Use the (hidden, residual) tuple
+        # form everywhere once the first layer has produced a residual
+        # pair; initialise residual = hidden_states for the first call so
+        # add_rms_forward's `x.add_(residual.float())` has something to add
+        # (it adds the previous residual to the new hidden states).
         if residual is None:
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            residual = hidden_states
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(positions, hidden_states)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)

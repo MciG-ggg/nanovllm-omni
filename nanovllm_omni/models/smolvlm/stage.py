@@ -149,7 +149,7 @@ class SmolVLMStage:
             image_embeds = torch.nn.functional.gelu(
                 self.model.model.connector(image_features)
             )  # [B, P, t_dim]
-            text_embeds = self.model.model.text_model.model.embed_tokens(input_ids)  # [1, T, t_dim]
+            text_embeds = self.model.model.text_model.embed_tokens(input_ids)  # [1, T, t_dim]
             image_mask = input_ids == self.image_token_id  # [1, T]
             n_image_tokens = int(image_mask.sum().item())
             n_image_patches = int(image_embeds.shape[1])

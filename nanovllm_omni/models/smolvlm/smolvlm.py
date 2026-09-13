@@ -242,10 +242,6 @@ class SmolLM2ForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight.data = self.embed_tokens.weight.data
-        # Compatibility alias so existing minimind-style forward() calls
-        # that did ``self.model(input_ids, positions, ...)`` keep
-        # working if the wrapper is ever reused outside SmolVLM.
-        self.model = self
 
     def forward(
         self,
@@ -372,7 +368,7 @@ class SmolVLMForConditionalGeneration(nn.Module):
         text_config = config.text_config
         self.lm_head = ParallelLMHead(text_config.vocab_size, text_config.hidden_size)
         if getattr(text_config, "tie_word_embeddings", False):
-            self.lm_head.weight.data = self.model.text_model.model.embed_tokens.weight.data
+            self.lm_head.weight.data = self.model.text_model.embed_tokens.weight.data
 
     def forward(
         self,

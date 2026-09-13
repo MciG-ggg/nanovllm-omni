@@ -378,12 +378,25 @@ class SmolVLMForConditionalGeneration(nn.Module):
         super().__init__()
         from nanovllm.layers.embed_head import ParallelLMHead
 
-        # The fork's ModelRunner.allocate_kv_cache reads ``model.config``
-        # to discover head count, head dim, num_layers for the KV
-        # tensor shape. Mirror the relevant text-backbone fields onto
-        # self.config so the runner can introspect without walking
-        # into the multimodal shell structure.
+        # The fork's ModelRunner reads ``self.model.config`` at
+        # several points (allocate_kv_cache, capture_cudagraph,
+        # etc.). Mirror the SmolLM2 text backbone config onto
+        # ``self.config`` so the runner can introspect without
+        # walking into the multimodal shell. Also pin
+        # ``model.config.hidden_size`` etc. to text_config so the
+        # CUDA-graph capture path's direct ``hf_config.hidden_size``
+        # read doesn't hit the wrong config level.
         self.config = config.text_config
+        # Top-level hf_config fields used by ModelRunner.capture_cudagraph:
+        # the SmolVLM hf_config is an Idefics3Config with no direct
+        # hidden_size/vocab_size. The fork ModelRunner loads
+        # ``config.hf_config`` from the fork ``Config`` object
+        # (get_stage_config). Our model.config alias above plus this
+        # ensures text_config is the hf_config the runner sees.
+        # (The fork Config's hf_config is what model_runner reads as
+        # hf_config = self.config.hf_config; after Config.__post_init__
+        # it is already the mounted text_config Proxy that SmolVLM passes
+        # via model.config assignment in Config.__post_init__.)
         self.model = SmolVLMModel(config)
         text_config = config.text_config
         self.lm_head = ParallelLMHead(text_config.vocab_size, text_config.hidden_size)

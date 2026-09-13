@@ -4,7 +4,7 @@ The thinker's bridge hidden state must live in a registered buffer, not
 a plain Python attribute. Plain attributes don't survive CUDA-graph
 replay — Python attribute assignment isn't re-executed when the
 captured graph re-runs its kernels — so a registered buffer with a
-fixed memory address is required for ``use_thinker_cuda_graph=True``
+fixed memory address is required when fork ``ModelRunner`` captures
 (when fork ``ModelRunner`` captures decode steps into a CUDA graph).
 
 These tests are source-level rather than constructing
@@ -15,7 +15,7 @@ behaviour we care about is captured by what the source code says:
 a registered buffer in ``__init__``, a ``copy_`` write in ``forward``,
 and ``get_bridge_hidden`` returning the buffer. If the source drifts,
 these tests catch it before it reaches production and silently
-breaks ``use_thinker_cuda_graph=True``.
+breaks CUDA-graph capture.
 
 Run alongside the engine wiring tests; the contract they lock is:
 - bridge state is captured in a buffer with a fixed memory address,

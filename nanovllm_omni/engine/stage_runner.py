@@ -65,7 +65,9 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
         # default is "cuda"; an explicit ``device`` kwarg wins.
         if "device" in kwargs:
             _stage_configs[stage_name].device = kwargs["device"]
-        _stage_configs[stage_name].enforce_eager = bool(kwargs.get("enforce_eager", False))
+        # Per-stage graph-vs-eager defaults live in the stage code
+        # itself (see ADR-0005). Stage decides whether to set
+        # ``cfg.enforce_eager`` after ``get_stage_config`` returns.
         # Reference torch so an unused-import lint doesn't kick in on
         # environments where the import is needed for the side-effect
         # of the cached Config later.

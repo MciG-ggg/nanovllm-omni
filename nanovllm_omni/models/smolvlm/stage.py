@@ -95,11 +95,9 @@ class SmolVLMStage:
         self.model.eval()
 
         # 3) Build fork StageRunner wrapping the language_model-only forward
-        stage_kwargs = stage_kwargs_from_args(args)
         # CUDA graph capture fails on this shell (pending debugging;
         # talker also skips graph per ADR-006). Force eager for now;
         # the paged-KV path still works, just without graph replay.
-        stage_kwargs["enforce_eager"] = True
         # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
         # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
         from huggingface_hub import snapshot_download
@@ -108,7 +106,12 @@ class SmolVLMStage:
             model_dir = snapshot_download(model_id, local_files_only=not allow_hf)
         except Exception:  # pragma: no cover - rely on load_model to fail loud
             model_dir = model_id
-        config = get_stage_config("smolvlm_vlm", model_dir, **stage_kwargs)
+        config = get_stage_config(
+            "smolvlm_vlm",
+            model_dir,
+            **stage_kwargs_from_args(args),
+        )
+        config.enforce_eager = True
         # fork Config is a frozen-ish dataclass; dtype is a process-wide
         # torch default, not a per-stage attribute. Set it for downstream
         # model construction (smolvlm.py weights load as bf16).

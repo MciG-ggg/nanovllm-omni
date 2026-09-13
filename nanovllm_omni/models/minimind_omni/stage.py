@@ -248,23 +248,16 @@ class ThinkerStage:
         self.deploy = deploy
         self.args = args
         self.model_class = model_class or MiniMindThinker
-        # ``enforce_eager=True`` so the thinker's bridge-layer hidden
-        # state can be captured as a plain Python attribute inside
-        # ``forward``. Direct forward is required because CUDA-graph
-        # ``use_thinker_cuda_graph`` from the deploy YAML controls whether
-        # the fork's ``ModelRunner`` captures decode-step CUDA graphs.
-        # When True, ``enforce_eager=False``; the bridge is captured
-        # into ``MiniMindThinker._bridge_buffer`` (a registered buffer
-        # whose row 0 is overwritten on every replay — Python reads it
-        # out between replays). When False, ``enforce_eager=True`` and
-        # forward runs line-by-line (the original behavior).
-        use_thinker_cuda_graph = bool(getattr(self.deploy, "use_thinker_cuda_graph", False))
+        # Graph capture fails on RTX 3050 with the current minimind-3o
+        # fork Config (cudaErrorStreamCaptureInvalidated); eager is the
+        # safe path. See ADR-0005. Bridge-buffer wiring lives in thinker.py
+        # and is exercised by test_thinker_bridge_buffer.py.
         self.config = get_stage_config(
             "thinker",
             model_path=_resolve_model_path(args, stage="thinker"),
             **stage_kwargs_from_args(args),
-            enforce_eager=not use_thinker_cuda_graph,
         )
+        self.config.enforce_eager = True
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
         self.stage_runner = StageRunner(

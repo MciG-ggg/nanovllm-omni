@@ -41,7 +41,7 @@ class SmolVLMStage:
     def __init__(self, deploy: Any, args: Any) -> None:
         from transformers import AutoConfig, AutoProcessor
 
-        from nanovllm_omni.engine.nanovllm_adapter import (
+        from nanovllm_omni.engine.stage_runner import (
             StageRunner,
             _ensure_dist,
             get_stage_config,

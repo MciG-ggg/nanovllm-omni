@@ -79,16 +79,36 @@ class ThinkerAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+        import os
+
+        _dbg = os.environ.get("DEBUG_MINIMIND_ATTN")
         qkv = self.qkv_proj(hidden_states)
+        if _dbg:
+            print(
+                f"  [ATTN] qkv nan={torch.isnan(qkv).any().item()} max={qkv.float().abs().max().item():.4f}"
+            )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.reshape(-1, self.num_heads, self.head_dim).contiguous()
         k = k.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         v = v.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         q = self.q_norm(q)
         k = self.k_norm(k)
+        if _dbg:
+            print(
+                f"  [ATTN] q nan={torch.isnan(q).any().item()} k nan={torch.isnan(k).any().item()} v nan={torch.isnan(v).any().item()}"
+            )
         q, k = self.rotary_emb(positions, q, k)
+        if _dbg:
+            print(
+                f"  [ATTN] after rope q nan={torch.isnan(q).any().item()} k nan={torch.isnan(k).any().item()}"
+            )
         o = self.attn(q, k, v)
-        return self.o_proj(o.flatten(1, -1))
+        if _dbg:
+            print(f"  [ATTN] o nan={torch.isnan(o).any().item()}")
+        out = self.o_proj(o.flatten(1, -1))
+        if _dbg:
+            print(f"  [ATTN] o_proj nan={torch.isnan(out).any().item()}")
+        return out
 
 
 class ThinkerMLP(nn.Module):
@@ -105,7 +125,21 @@ class ThinkerMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.act_fn(self.gate_up_proj(x)))
+        import os
+
+        _dbg = os.environ.get("DEBUG_MINIMIND_MLP")
+        gu = self.gate_up_proj(x)
+        if _dbg:
+            print(
+                f"    [MLP] gate_up nan={torch.isnan(gu).any().item()} max={gu.float().abs().max().item():.4f}"
+            )
+        a = self.act_fn(gu)
+        if _dbg:
+            print(f"    [MLP] act nan={torch.isnan(a).any().item()}")
+        out = self.down_proj(a)
+        if _dbg:
+            print(f"    [MLP] down nan={torch.isnan(out).any().item()}")
+        return out
 
 
 class ThinkerBlock(nn.Module):
@@ -249,8 +283,19 @@ class MiniMindThinker(nn.Module):
         """ModelRunner-compatible forward: returns hidden_states."""
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        import os
+
+        _dbg = os.environ.get("DEBUG_MINIMIND_FORWARD")
+        if _dbg:
+            print(
+                f"[EMBED] shape={input_ids.shape} ids_first10={input_ids[:10].tolist()} ids_last10={input_ids[-10:].tolist()} h_nan={torch.isnan(hidden_states).any().item()} h_max={hidden_states.float().abs().max().item():.6f} h_std={hidden_states.float().std().item():.6f}"
+            )
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if _dbg and i in (0, self.bridge_layer, len(self.layers) - 1):
+                print(
+                    f"[FWD] i={i} h_nan={torch.isnan(hidden_states).any().item()} h_max={hidden_states.float().abs().max().item():.4f}"
+                )
             if i == self.bridge_layer:
                 seq_len = hidden_states.size(0)
                 if seq_len > 1:

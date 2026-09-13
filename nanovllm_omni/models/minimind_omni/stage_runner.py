@@ -67,12 +67,32 @@ def decode_minimind(
     _base_sampler = runner.sampler
 
     def _sampler_with_rp(logits, temperatures):
-        # Match vendor stream_generate: divide the last-token logits,
-        # apply the full-history penalty and top-p filter, then call
-        # torch.multinomial directly. Gumbel-max is distributionally
-        # equivalent but consumes a different RNG path; a different
-        # text token changes every later bridge/audio-buffer row.
-        logits_i = logits[0].clone() / (temperatures[0] + 1e-9)
+        # Match vendor stream_generate: take the LAST position only,
+        # divide by temperature, apply the full-history penalty and
+        # top-p filter, then call torch.multinomial directly. Gumbel-max
+        # is distributionally equivalent but consumes a different RNG
+        # path; a different text token changes every later
+        # bridge/audio-buffer row.
+        #
+        # ``.float()`` is load-bearing on RTX 3050 / torch 2.11: the
+        # minimind-3o lm_head emits BF16 logits that overflow
+        # ``torch.softmax`` in low precision (NaN/inf), then
+        # ``torch.multinomial`` rejects with ``device-side assert:
+        # probability tensor contains inf, nan or element < 0``.
+        # Vendor's reference is FP32 throughout; we mirror that here.
+        logits_i = logits[-1, :].float() / (temperatures[0] + 1e-9)
+        import os
+
+        if os.environ.get("DEBUG_MINIMIND_SAMPLER"):
+            print(f"[DEBUG] logits dtype={logits.dtype} shape={logits.shape}")
+            print(f"[DEBUG] logits_i max={logits_i.max().item()} min={logits_i.min().item()}")
+            print(
+                f"[DEBUG] logits_i has_nan={torch.isnan(logits_i).any().item()} has_inf={torch.isinf(logits_i).any().item()}"
+            )
+            sm = torch.softmax(logits_i, dim=-1)
+            print(
+                f"[DEBUG] softmax max={sm.max().item()} min={sm.min().item()} sum={sm.sum().item()}"
+            )
         for token in set(sequence.token_ids):
             logits_i[token] /= repetition_penalty
         if top_p < 1.0:

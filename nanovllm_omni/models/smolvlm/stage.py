@@ -144,10 +144,12 @@ class SmolVLMStage:
         with torch.inference_mode():
             vision_out = self.model.model.vision_model(pixel_values=pixel_values)
             image_features = vision_out.last_hidden_state  # [B, P, v_dim]
-            image_embeds = self.model.model.connector(image_features)  # [B, P, t_dim]
-            text_embeds = self.model.model.language_model.model.embed_tokens(
-                input_ids
-            )  # [1, T, t_dim]
+            # Connector is single Linear; HF GeLU is folded here per
+            # the connector's documented contract.
+            image_embeds = torch.nn.functional.gelu(
+                self.model.model.connector(image_features)
+            )  # [B, P, t_dim]
+            text_embeds = self.model.model.text_model.model.embed_tokens(input_ids)  # [1, T, t_dim]
             image_mask = input_ids == self.image_token_id  # [1, T]
             n_image_tokens = int(image_mask.sum().item())
             n_image_patches = int(image_embeds.shape[1])

@@ -263,10 +263,10 @@ class SmolVLMConnector(nn.Module):
         t_dim = config.text_config.hidden_size
         self.scale_factor = scale_factor
         self.text_dim = t_dim
-        self.modality_projection = nn.Sequential(
-            nn.GELU(),
-            nn.Linear(v_dim * (scale_factor**2), t_dim, bias=True),
-        )
+        # Single Linear so the loader finds the HF key at
+        # ``modality_projection.proj.{weight,bias}``. The HF GeLU is
+        # folded into the stage's connector call (see stage.py).
+        self.modality_projection = nn.Linear(v_dim * (scale_factor**2), t_dim, bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         """image_features: [num_patches_after_shuffle, v_dim * scale_factor**2]"""
@@ -310,7 +310,9 @@ class SmolVLMModel(nn.Module):
         # touching the real transformers import.
         self.vision_model = _resolve_siglip_backbone()(config.vision_config)
         self.connector = SmolVLMConnector(config)
-        self.language_model = SmolLM2ForCausalLM(config.text_config)
+        # HF key prefix is ``model.text_model.*`` (SmolVLM wraps a SmolLM2
+        # text backbone under that name, not ``language_model``).
+        self.text_model = SmolLM2ForCausalLM(config.text_config)
 
 
 class SmolVLMForConditionalGeneration(nn.Module):
@@ -326,7 +328,7 @@ class SmolVLMForConditionalGeneration(nn.Module):
         text_config = config.text_config
         self.lm_head = ParallelLMHead(text_config.vocab_size, text_config.hidden_size)
         if getattr(text_config, "tie_word_embeddings", False):
-            self.lm_head.weight.data = self.model.language_model.model.embed_tokens.weight.data
+            self.lm_head.weight.data = self.model.text_model.model.embed_tokens.weight.data
 
     def forward(
         self,
@@ -334,7 +336,7 @@ class SmolVLMForConditionalGeneration(nn.Module):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model.language_model(input_ids, positions, inputs_embeds=inputs_embeds)
+        return self.model.text_model(input_ids, positions, inputs_embeds=inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.lm_head(hidden_states)

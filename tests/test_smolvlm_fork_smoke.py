@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import torch
+
 from nanovllm_omni.models.smolvlm.smolvlm import (
     SmolLM2ForCausalLM,
     SmolVLMConnector,
@@ -80,8 +82,8 @@ def test_smolvlm_submodule_layout(monkeypatch):
     assert hasattr(model.model, "vision_model"), "missing model.vision_model"
     assert hasattr(model.model, "connector"), "missing model.connector"
     assert isinstance(model.model.connector, SmolVLMConnector)
-    assert hasattr(model.model, "language_model"), "missing model.language_model"
-    assert isinstance(model.model.language_model, SmolLM2ForCausalLM)
+    assert hasattr(model.model, "text_model"), "missing model.text_model"
+    assert isinstance(model.model.text_model, SmolLM2ForCausalLM)
     assert hasattr(model, "lm_head"), "missing lm_head"
 
 
@@ -95,22 +97,23 @@ def test_smolvlm_packed_modules_mapping():
 
 
 def test_smolvlm_connector_shape():
-    """Connector projects (v_dim * scale^2) -> t_dim; mirrors HF key layout."""
+    """Connector is a single Linear projecting (v_dim * scale^2) -> t_dim."""
     config = _mock_smolvlm_config()
     connector = SmolVLMConnector(config)
-    # ``modality_projection`` is nn.Sequential(GeLU, Linear) per HF.
+    # ``modality_projection`` is a single nn.Linear; HF key path is
+    # ``model.connector.modality_projection.proj.{weight,bias}``.
     assert hasattr(connector, "modality_projection")
-    linear = connector.modality_projection[1]
-    assert linear.in_features == config.vision_config.hidden_size * (config.scale_factor**2)
-    assert linear.out_features == config.text_config.hidden_size
+    assert isinstance(connector.modality_projection, torch.nn.Linear)
+    assert connector.modality_projection.in_features == config.vision_config.hidden_size * (
+        config.scale_factor**2
+    )
+    assert connector.modality_projection.out_features == config.text_config.hidden_size
 
 
 def test_smolvlm_connector_pure_linear():
     """Connector holds no fork state (no paged-KV / triton dep)."""
     config = _mock_smolvlm_config()
     connector = SmolVLMConnector(config)
-    import torch
-
     # Smoke: forward on random features returns right shape, runs on CPU
     # without pulling triton (fork dependency stays out of vision path).
     feats = torch.randn(2, 16, config.vision_config.hidden_size * (config.scale_factor**2))

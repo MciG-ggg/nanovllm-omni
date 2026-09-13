@@ -88,12 +88,22 @@ def test_smolvlm_submodule_layout(monkeypatch):
 
 
 def test_smolvlm_packed_modules_mapping():
-    """Loader needs fused-proj mapping on the top-level class."""
-    mapping = SmolVLMForConditionalGeneration.packed_modules_mapping
+    """The loader picks up fused-proj mapping from the text backbone submodule.
+
+    ``SmolVLMForConditionalGeneration`` itself does NOT expose
+    ``packed_modules_mapping`` -- the SigLIP vision tower uses
+    per-head projections. The text backbone ``SmolLM2ForCausalLM``
+    declares the fused mapping; ``_resolve_packed_modules_mapping``
+    walks the module path to find it for the right subkeys.
+    """
+    from nanovllm_omni.models.smolvlm.smolvlm import SmolLM2ForCausalLM
+
+    mapping = SmolLM2ForCausalLM.packed_modules_mapping
     for src, (dst, shard) in mapping.items():
         assert isinstance(src, str) and src.endswith("_proj"), src
         assert isinstance(dst, str) and dst.endswith("_proj"), (src, dst)
         assert isinstance(shard, (str, int)), (src, shard)
+    assert not hasattr(SmolVLMForConditionalGeneration, "packed_modules_mapping")
 
 
 def test_smolvlm_connector_shape():

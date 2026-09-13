@@ -356,9 +356,14 @@ class SmolVLMModel(nn.Module):
 
 
 class SmolVLMForConditionalGeneration(nn.Module):
-    """SmolVLM full model. forward is text-decoder only; stage handles vision."""
+    """SmolVLM full model. forward is text-decoder only; stage handles vision.
 
-    packed_modules_mapping = SmolLM2ForCausalLM.packed_modules_mapping
+    No top-level ``packed_modules_mapping``: the SigLIP vision tower
+    uses per-head projections while the text backbone fuses them
+    into ``qkv_proj``. ``SmolLM2ForCausalLM.packed_modules_mapping``
+    owns the fused convention; the loader walks to that submodule
+    to pick it up (see ``_resolve_packed_modules_mapping``).
+    """
 
     def __init__(self, config) -> None:
         super().__init__()

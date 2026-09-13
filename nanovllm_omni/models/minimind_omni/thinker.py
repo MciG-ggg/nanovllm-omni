@@ -300,10 +300,9 @@ class MiniMindThinker(nn.Module):
         # which doesn't survive CUDA-graph replay — Python attribute
         # assignment doesn't get re-executed when the captured graph
         # re-runs its kernels. The fork's ``ModelRunner`` enables CUDA-graph
-        # capture for decode steps when ``enforce_eager=False`` (controlled
-        # by ``deploy.use_thinker_cuda_graph``); in that mode we need a
-        # registered buffer that the captured graph can write into at a
-        # fixed memory address.
+        # capture for decode steps when ``enforce_eager=False``; in that mode
+        # we need a registered buffer that the captured graph can write
+        # into at a fixed memory address.
         #
         # Layout: row 0 is the decode-step bridge (last token per step,
         # overwritten on every replay); rows [0:seq_len] are also written

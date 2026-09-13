@@ -38,11 +38,10 @@
 | **C** fusion + thinker graph | on | on | off | “32 layer capture 不全” |
 | **D** full stack | on | on | on | “production 当前态” |
 
-> talker CUDA Graph 默认由 deploy YAML `use_talker_cuda_graph: true` 控制，
-> bench CLI **目前不直接 expose**。要么临时改 deploy YAML、要么后续给
-> bench 加 `--use-talker-cuda-graph` 镜像 thinker 那条。本次协议默认
-> **deploy YAML 不动**——Cell D 的 talker graph 行为以现有 deploy 配置为准，
-> cell A / B / C 都没启用。
+> talker CUDA Graph 由 stage 默认决定（不走 graph capture；ADR-006）；
+> bench CLI **目前不直接 expose** `--use-talker-cuda-graph`。本次协议默认
+> 以 stage 默认为准——Cell D 的 talker graph 行为与 thinker 一致，cell A /
+> B / C 都没启用。详见 ADR-0005。
 
 ### Cell A 命令（baseline）
 
@@ -98,9 +97,7 @@ python -m nanovllm_omni.bench time \
 ### Cell D 命令（full stack）
 
 ```bash
-# 1. 临时改 deploy YAML 把 talker CUDA Graph 打开（默认就是 true，确认即可）
-grep use_talker_cuda_graph nanovllm_omni/deploy/minimind_omni.yaml
-# 期望输出: use_talker_cuda_graph: true
+# 1. talker graph 行为由 stage 默认决定，无需改 deploy YAML（ADR-0005）
 
 # 2. 跑
 python -m nanovllm_omni.bench time \

@@ -241,14 +241,10 @@ class DeployConfig:
 
     stages: tuple[DeployStageConfig, ...] = ()
     max_batch: int = 2
-    #: Stage-0 thinker CUDA Graph (joint text+audio decode).
-    use_thinker_cuda_graph: bool = True
-    #: Stage-1 talker CUDA Graph. Forces ``do_sample=False`` at the call
-    #: site when engaged (graph can't capture stochastic sampling). Eager
-    #: fallback on CPU/MPS or when the wrapper shape doesn't match a
-    #: captured graph.
-    use_talker_cuda_graph: bool = True
     # Full three-stage MiniMind-O mode: post-EOS bridge sequence + watchdog.
+    # Graph-vs-eager used to live here (use_*_cuda_graph flags) — moved to
+    # each stage's own default; comparison code belongs in bench, not in
+    # deploy config.
     post_eos_padding_count: int = 128
     internal_stop_token_id: int = 17
     talker_max_steps_after_last_thinker_token: int = 192
@@ -420,8 +416,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
             for s in data.get("stages", [])
         ),
         max_batch=max_batch,
-        use_thinker_cuda_graph=bool(data.get("use_thinker_cuda_graph", True)),
-        use_talker_cuda_graph=bool(data.get("use_talker_cuda_graph", True)),
         post_eos_padding_count=post_eos_padding_count,
         internal_stop_token_id=internal_stop_token_id,
         talker_max_steps_after_last_thinker_token=talker_max_steps_after_last_thinker_token,

@@ -93,7 +93,15 @@ class SmolVLMStage:
 
         # 3) Build fork StageRunner wrapping the language_model-only forward
         stage_kwargs = stage_kwargs_from_args(args)
-        config = get_stage_config("smolvlm_vlm", model_id, **stage_kwargs)
+        # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
+        # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
+        from huggingface_hub import snapshot_download
+
+        try:
+            model_dir = snapshot_download(model_id, local_files_only=not allow_hf)
+        except Exception:  # pragma: no cover - rely on load_model to fail loud
+            model_dir = model_id
+        config = get_stage_config("smolvlm_vlm", model_dir, **stage_kwargs)
         config.dtype = dtype_str
         self.stage_runner = StageRunner(
             model_class=SmolVLMForConditionalGeneration,

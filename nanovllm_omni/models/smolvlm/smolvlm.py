@@ -266,11 +266,28 @@ class SmolVLMConnector(nn.Module):
         # Single Linear so the loader finds the HF key at
         # ``modality_projection.proj.{weight,bias}``. The HF GeLU is
         # folded into the stage's connector call (see stage.py).
-        self.modality_projection = nn.Linear(v_dim * (scale_factor**2), t_dim, bias=True)
+        self.modality_projection = _ProjWrapper(v_dim * (scale_factor**2), t_dim, bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         """image_features: [num_patches_after_shuffle, v_dim * scale_factor**2]"""
         return self.modality_projection(image_features)
+
+
+class _ProjWrapper(nn.Module):
+    """Holds a Linear under ``self.proj`` to mirror HF key layout.
+
+    SmolVLM's HF connector stores the actual Linear at
+    ``modality_projection.proj``. The wrapper above calls this with
+    a child Linear so the loader can land weights at
+    ``model.connector.modality_projection.proj.{weight,bias}``.
+    """
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.proj = nn.Linear(in_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
 
 
 # ---------------------------------------------------------------------------

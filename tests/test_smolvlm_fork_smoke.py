@@ -97,17 +97,17 @@ def test_smolvlm_packed_modules_mapping():
 
 
 def test_smolvlm_connector_shape():
-    """Connector is a single Linear projecting (v_dim * scale^2) -> t_dim."""
+    """Connector wraps a Linear under ``proj`` to mirror HF key path."""
     config = _mock_smolvlm_config()
     connector = SmolVLMConnector(config)
-    # ``modality_projection`` is a single nn.Linear; HF key path is
-    # ``model.connector.modality_projection.proj.{weight,bias}``.
+    # ``modality_projection`` is a wrapper; the actual Linear lives at
+    # ``modality_projection.proj`` so the HF loader can land weights
+    # at ``model.connector.modality_projection.proj.{weight,bias}``.
     assert hasattr(connector, "modality_projection")
-    assert isinstance(connector.modality_projection, torch.nn.Linear)
-    assert connector.modality_projection.in_features == config.vision_config.hidden_size * (
-        config.scale_factor**2
-    )
-    assert connector.modality_projection.out_features == config.text_config.hidden_size
+    proj = connector.modality_projection.proj
+    assert isinstance(proj, torch.nn.Linear)
+    assert proj.in_features == config.vision_config.hidden_size * (config.scale_factor**2)
+    assert proj.out_features == config.text_config.hidden_size
 
 
 def test_smolvlm_connector_pure_linear():

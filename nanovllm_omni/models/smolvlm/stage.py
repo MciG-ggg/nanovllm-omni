@@ -209,8 +209,16 @@ class SmolVLMStage:
         # Fork scheduler path — mirrors minimind decode_minimind shape.
         runner = self.stage_runner.model_runner
         config = self.stage_runner.config
+        # Fork SamplingParams forbids temperature=0 (assert > 1e-10).
+        # Map greedy (temperature=0 from omni params) to the fork's
+        # argmax path: pass temperature=1e-5 so the assert passes but
+        # Gumbel-max still collapses to the same argmax (highest logit
+        # wins). True temperature=0 greedy would require a separate
+        # sampler path; this is enough for the e2e smoke until we
+        # expose the right fork knob.
+        _fork_temp = max(float(temperature), 1e-5)
         fork_sp = ForkSamplingParams(
-            temperature=temperature,
+            temperature=_fork_temp,
             max_tokens=max_new_tokens,
             ignore_eos=False,
         )

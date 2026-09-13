@@ -102,14 +102,19 @@ class SmolVLMStage:
         except Exception:  # pragma: no cover - rely on load_model to fail loud
             model_dir = model_id
         config = get_stage_config("smolvlm_vlm", model_dir, **stage_kwargs)
-        config.dtype = dtype_str
+        # fork Config is a frozen-ish dataclass; dtype is a process-wide
+        # torch default, not a per-stage attribute. Set it for downstream
+        # model construction (smolvlm.py weights load as bf16).
         self.stage_runner = StageRunner(
             model_class=SmolVLMForConditionalGeneration,
             config=config,
             rank=0,
         )
 
-        # 4) Processor + image-token metadata
+        # 4) Set process-wide torch default dtype before ModelRunner init
+        torch.set_default_dtype(self.dtype)
+
+        # 5) Processor + image-token metadata
         self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
         image_token_id = getattr(hf_config, "image_token_id", None)
         if image_token_id is None:

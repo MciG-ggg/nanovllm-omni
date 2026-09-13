@@ -2,6 +2,8 @@
 
 Raw traces from the WSL 3050 + Colab T4 rerun. No post-processing.
 
+三模型最新 Phase 1 结论见 [`docs/adr/0003-profile-results-2026-09-13.md`](../adr/0003-profile-results-2026-09-13.md)。`docs/perf/` 默认用于本地原始产物；大型 trace 不纳入 git，能复现的结论写入受版本控制的 `docs/dev/` 或 `docs/adr/`。
+
 ## torch.profiler / Kineto (WSL RTX 3050)
 
 | file | what |

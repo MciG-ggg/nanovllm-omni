@@ -63,11 +63,11 @@ Replaces the prior `LLM_GENERATION` placeholder. SmolVLM is now
 genuinely an AR paged decode, same execution shape as minimind thinker.
 `StageExecutionType` is a closed `StrEnum`; `LLM_AR` already exists.
 
-### ADR-019: `SmolVLMStage` class, factory path unchanged
+### ADR-019: `SmolVLMStage` class, tuple factory registration
 
 `_vlm_stage(deploy, args)` returns a `SmolVLMStage` instance instead
-of a closure. The factory's dotted path (`smolvlm.stage:_vlm_stage`)
-stays the same so `pipeline.py` and the deploy yaml need no edits.
+of a closure. The factory's tuple registration stays stable so
+`pipeline.py` remains declarative.
 
 ### Fork loader `prefix` kwarg (forward-compatible enabler)
 

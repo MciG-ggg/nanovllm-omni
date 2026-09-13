@@ -36,6 +36,18 @@ Each model gets its own NVTX range names (not a shared schema):
 
 Forcing a uniform schema would lose per-flow-step visibility in `smolvla`.
 
+## 实际状态（2026-09-13）
+
+Phase 1 已在 WSL RTX 3050 4GB 上为三个模型完成重跑，并使用 `profile_range()` 把阶段同时记录到 Kineto 和 NVTX。详细结果见 [`docs/adr/0003-profile-results-2026-09-13.md`](0003-profile-results-2026-09-13.md)。
+
+当前结论：
+
+- `sd-turbo`：baseline p50 503.554 ms，峰值显存 3098 MiB；阶段均值中 `:vae-decode` 358.1 ms 最大，`:unet` 275.1 ms 次之。
+- `smolvlm`：short / medium / long baseline p50 为 291.197 / 5075.190 / 4449.954 ms，峰值显存约 2.18 GiB；AR decode 明显高于 prefill。
+- `smolvla`：baseline p50 1385.219 ms，峰值显存 2021 MiB；`:flow-step` 均值 1126.3 ms，是主要热点。
+
+这些结果只完成 Phase 1。尚未完成 CUDA Graph、fusion、static KV cache、batch cell 或 reference parity，因此当前不能声称三个模型已经做过性能优化。阶段 annotation 会增加 profiler 开销；smolvlm 的部分内部 annotation 还受到 Kineto cycle event 清理影响，详细限制写在结果文档中。
+
 ## Considered alternatives
 
 - **Pre-defined cell matrix upfront** (the minimind 4-cell protocol). Rejected because it bakes in an optimization direction before any profile exists for the new models.

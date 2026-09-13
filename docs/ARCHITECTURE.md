@@ -28,6 +28,13 @@ MiniMind-O's Thinker -> Talker -> Code2Wav generation is not a Qwen3
 `LLMEngine` workload, so making `OmniBase` inherit `LLMEngine` would only add a
 nominal parent class while violating the model and scheduler contracts.
 
+Model declaration has three separate responsibilities. `OMNI_MODELS` maps
+stable stage architecture names to lazy `(folder, module, class)` entries;
+`OMNI_PIPELINES` maps model handles to pipeline topology or a config resolver;
+and each `StageConfig` names both its model architecture and its stage wrapper
+constructor. The generic runner resolves those declarations without branching
+on a model name.
+
 The fork package initializer is lazy. Importing `nanovllm.engine.block_manager`
 does not import or construct `LLM`; constructing the fork's `LLM` remains an
 explicit operation with its own CUDA and distributed-runtime requirements.
@@ -39,7 +46,7 @@ module name.
 
 | Local module | Responsibility | vllm-omni relationship |
 |---|---|---|
-| `config/registry.py` | Pipeline and deploy registry; dotted-path stage factories | Small local counterpart to pipeline registry and stage config |
+| `config/registry.py` | Lazy model registry, pipeline/deploy registry, tuple stage factories | Small local counterpart to vllm-omni's model and pipeline registries |
 | `config/params.py` | `OmniEngineArgs`, aligned `SamplingParams` | Consumer-facing subset, not the fork's sampling class |
 | `outputs.py` | `OmniRequestOutput` and modality artifacts | Consumer-facing output envelope |
 | `entrypoints/base.py` | Model and pipeline resolution; lazy executor setup | Local `OmniBase` counterpart |
@@ -69,10 +76,11 @@ For a normal synchronous request:
 2. `Omni._one(...)` resolves the executor and converts a multimodal prompt
    dictionary into text plus `SamplingParams.extra`.
 3. `PipelineExecutor._runner.run(...)` lazily constructs the configured stage
-   instances.
+   instances. For stages with `model_architecture`, the runner resolves the
+   model class from `OmniModelRegistry` and injects it into the stage wrapper.
 4. `PipelineRunner.run(...)` applies each stage's optional `process_input`,
-   merges deploy defaults with request sampling, and calls the stage instance
-   in pipeline order.
+   merges deploy defaults with request sampling, calls the stage instance in
+   pipeline order, and adapts terminal output by `final_output_type`.
 5. `OmniRequestOutput.from_pipeline(...)` wraps the terminal stage result.
 
 For MiniMind-O the stage order is:
@@ -88,7 +96,9 @@ prompt
 The Thinker stage may select eager decoding, the contiguous fixed-KV CUDA
 Graph decoder, or the paged single-graph decoder. These are implementation
 choices inside the stage; none of them calls fork `LLMEngine.generate`,
-`add_request`, or `step`.
+`add_request`, or `step`. Model-specific fused projections, bridge capture,
+and unusual attention semantics stay in the model family; the engine exposes
+only shared primitives and execution kinds.
 
 ## Paged KV bridge
 

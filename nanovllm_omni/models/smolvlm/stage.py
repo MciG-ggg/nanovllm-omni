@@ -41,7 +41,7 @@ class SmolVLMStage:
     def __init__(self, deploy: Any, args: Any) -> None:
         from transformers import AutoConfig, AutoProcessor
 
-        from nanovllm_omni.engine.stage_runner import (
+        from nanovllm_omni.engine.nanovllm_adapter import (
             StageRunner,
             _ensure_dist,
             get_stage_config,
@@ -93,6 +93,10 @@ class SmolVLMStage:
 
         # 3) Build fork StageRunner wrapping the language_model-only forward
         stage_kwargs = stage_kwargs_from_args(args)
+        # CUDA graph capture fails on this shell (pending debugging;
+        # talker also skips graph per ADR-006). Force eager for now;
+        # the paged-KV path still works, just without graph replay.
+        stage_kwargs["enforce_eager"] = True
         # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
         # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
         from huggingface_hub import snapshot_download

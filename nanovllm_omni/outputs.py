@@ -198,6 +198,21 @@ class AudioPayload:
         return out.getvalue()
 
 
+def adapt_terminal_output(output: Any, output_type: str) -> Any:
+    """Normalize only the shared terminal contract by output type."""
+    if output_type == "text":
+        if isinstance(output, str):
+            return output
+        text = getattr(output, "text", None)
+        if isinstance(text, str):
+            return text
+        raise TypeError(
+            "text terminal output must be a string or expose a string ``text`` attribute, "
+            f"got {type(output).__name__}"
+        )
+    return output
+
+
 @dataclass
 class OmniRequestOutput:
     """Unified request output (mirrors the reference's ``OmniRequestOutput`` shape).

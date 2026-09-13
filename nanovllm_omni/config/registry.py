@@ -2,17 +2,18 @@
 
 The data-driven pipeline abstraction (PipelineConfig + StageConfig) and the
 deploy / runtime split (DeployConfig + DeployStageConfig) live here. This
-module is the registry-of-record: it exposes ``OMNI_PIPELINES``,
-``register_pipeline``, ``resolve_pipeline_config``, ``load_deploy_config``,
-``merge_pipeline_deploy``, ``StageExecutionType``, and
-``resolve_stage_factory``.
+module is the registry-of-record: it exposes ``OMNI_MODELS``,
+``OmniModelRegistry``, ``OMNI_PIPELINES``, ``register_pipeline``,
+``resolve_pipeline_config``, ``load_deploy_config``, ``merge_pipeline_deploy``,
+``StageExecutionType``, and ``resolve_stage_factory``.
 
 Design basis: 10-round grill session. Field set and alignment boundary
 are enforced by the registry contract tests.
 
-Phase 2 (TK-016): ``StageConfig.factory`` / ``process_input`` are now
-dotted-path strings (``"package.module:attr"``) resolved via
-``resolve_stage_factory``; ``kind`` is the :class:`StageExecutionType` enum
+The registry keeps model classes and stage wrappers separate. Model classes
+use lazy HF-architecture registrations; stage factories and processors use
+``(module_name, attribute_name)`` tuples resolved via ``resolve_stage_factory``.
+``kind`` is the :class:`StageExecutionType` enum
 mirroring the reference's LLM_AR / LLM_GENERATION / DIFFUSION / CODEC taxonomy.
 Per-stage modules are no longer statically imported by ``pipeline.py``; the
 pipeline topology file is now fully declarative.
@@ -25,9 +26,62 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import yaml
+
+ModelRegistration: TypeAlias = tuple[str, str, str]
+StageFactoryRegistration: TypeAlias = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class LazyRegisteredModel:
+    """Import a registered model class only when a caller resolves it."""
+
+    module_name: str
+    class_name: str
+
+    def resolve(self) -> type[Any]:
+        module = importlib.import_module(self.module_name)
+        return getattr(module, self.class_name)
+
+
+class ModelRegistry:
+    """Architecture-to-model registry with lazy module imports."""
+
+    def __init__(self, registrations: Mapping[str, ModelRegistration] | None = None) -> None:
+        self._registrations = dict(registrations or {})
+
+    def register(self, architecture: str, registration: ModelRegistration) -> None:
+        if architecture in self._registrations:
+            raise ValueError(f"model architecture {architecture!r} is already registered")
+        self._registrations[architecture] = registration
+
+    def resolve(self, architecture: str) -> type[Any]:
+        try:
+            folder, module, class_name = self._registrations[architecture]
+        except KeyError as exc:
+            raise KeyError(f"unknown model architecture {architecture!r}") from exc
+        return LazyRegisteredModel(
+            module_name=f"nanovllm_omni.models.{folder}.{module}",
+            class_name=class_name,
+        ).resolve()
+
+    def registrations(self) -> Mapping[str, ModelRegistration]:
+        return self._registrations.copy()
+
+
+OMNI_MODELS: dict[str, ModelRegistration] = {
+    "MiniMindThinker": ("minimind_omni", "thinker", "MiniMindThinker"),
+    "MiniMindTalker": ("minimind_omni", "talker", "MiniMindTalker"),
+    "SmolVLMForConditionalGeneration": (
+        "smolvlm",
+        "smolvlm",
+        "SmolVLMForConditionalGeneration",
+    ),
+}
+
+OmniModelRegistry = ModelRegistry(OMNI_MODELS)
 
 
 class StageExecutionType(StrEnum):
@@ -46,34 +100,27 @@ class StageExecutionType(StrEnum):
     CODEC = "codec"
 
 
-def resolve_stage_factory(path: str) -> Callable[..., Any]:
-    """Resolve a ``"package.module:attr"`` string to a live Python callable.
-
-    Convention: module path and attribute are separated by a single colon,
-    matching Python's entry-point / setuptools convention. The module is
-    imported (or fetched from ``sys.modules``) and the attribute looked up
-    by ``getattr``.
-
-    Raises:
-        ValueError: path is empty, not a string, or not in ``module:attr``
-            form.
-        ImportError: the module cannot be imported.
-        AttributeError: the module imported but the attribute is missing.
-    """
-    if not isinstance(path, str) or not path:
-        raise ValueError(f"factory path must be a non-empty string, got {path!r}")
-    module_name, sep, attr = path.partition(":")
-    if not sep or not module_name or not attr:
-        raise ValueError(f"factory path {path!r} must be in 'package.module:attr' form")
+def resolve_stage_factory(registration: StageFactoryRegistration) -> Callable[..., Any]:
+    """Resolve a ``(module_name, attribute_name)`` reference lazily."""
+    if (
+        not isinstance(registration, tuple)
+        or len(registration) != 2
+        or not all(isinstance(value, str) and value for value in registration)
+    ):
+        raise ValueError(
+            "stage registration must be a (module_name, attribute_name) tuple, "
+            f"got {registration!r}"
+        )
+    module_name, attr = registration
     try:
         module = importlib.import_module(module_name)
     except ImportError as e:
-        raise ImportError(f"factory path {path!r}: cannot import module {module_name!r}") from e
+        raise ImportError(f"stage registration {registration!r}: cannot import module") from e
     try:
         return getattr(module, attr)
     except AttributeError as e:
         raise AttributeError(
-            f"factory path {path!r}: module {module_name!r} has no attribute {attr!r}"
+            f"stage registration {registration!r}: module has no attribute {attr!r}"
         ) from e
 
 
@@ -81,9 +128,9 @@ def resolve_stage_factory(path: str) -> Callable[..., Any]:
 class StageConfig:
     """Frozen description of a single pipeline stage.
 
-    ``kind`` is a :class:`StageExecutionType` member. ``factory`` and
-    ``process_input`` are dotted-path strings (``"package.module:attr"``)
-    that :func:`resolve_stage_factory` turns into live callables.
+    ``kind`` is a :class:`StageExecutionType` member. ``stage_factory`` and
+    ``process_input`` are ``(module_name, attribute_name)`` tuples that
+    :func:`resolve_stage_factory` turns into live callables.
     ``process_input`` is the bridge hook that converts the previous
     stage's output into this stage's input; ``None`` means the engine
     passes the previous output through unchanged.
@@ -92,49 +139,37 @@ class StageConfig:
     stage_id: int
     name: str
     kind: StageExecutionType
-    factory: str
-    process_input: str | None = None
+    stage_factory: StageFactoryRegistration
+    model_architecture: str | None = None
+    process_input: StageFactoryRegistration | None = None
     input_sources: tuple[int, ...] = ()
     is_terminal: bool = False
     final_output_type: str | None = None
     diffusers_class_name: str | None = None
 
     def __post_init__(self) -> None:
-        # Eagerly validate kind + factory / process_input paths so
-        # topology mistakes fail at construction time (when the pipeline
-        # is registered) rather than at first request run. The factory
-        # resolution also forces per-stage modules to be importable from
-        # the registry's vantage point, mirroring the reference's
-        # pipeline-registry contract.
+        # Validate the declaration shape at registration time, but keep
+        # imports lazy so CPU-only hosts can inspect topology safely.
         if not isinstance(self.kind, StageExecutionType):
             raise TypeError(
                 f"StageConfig.kind must be a StageExecutionType member, "
                 f"got {type(self.kind).__name__}: {self.kind!r}"
             )
-        if not isinstance(self.factory, str):
-            raise TypeError(
-                f"StageConfig.factory must be a dotted-path string "
-                f"('package.module:attr'), got {type(self.factory).__name__}"
-            )
-        # On macOS, nanovllm.layers requires triton (Linux only).
-        # Defer nanovllm-related ImportErrors to first actual use on WSL/GPU.
-        # Other modules' ImportErrors still raise at construction time.
-        try:
-            resolve_stage_factory(self.factory)
-        except ImportError as e:
-            if "nanovllm" not in str(e):
-                raise
-        if self.process_input is not None:
-            if not isinstance(self.process_input, str):
+        for field_name, registration in (
+            ("stage_factory", self.stage_factory),
+            ("process_input", self.process_input),
+        ):
+            if registration is None:
+                continue
+            if (
+                not isinstance(registration, tuple)
+                or len(registration) != 2
+                or not all(isinstance(value, str) and value for value in registration)
+            ):
                 raise TypeError(
-                    f"StageConfig.process_input must be a dotted-path "
-                    f"string or None, got {type(self.process_input).__name__}"
+                    f"StageConfig.{field_name} must be a "
+                    f"(module_name, attribute_name) tuple, got {registration!r}"
                 )
-            try:
-                resolve_stage_factory(self.process_input)
-            except ImportError as e:
-                if "nanovllm" not in str(e):
-                    raise
 
 
 @dataclass(frozen=True)
@@ -302,6 +337,15 @@ def _resolve_value(
     return value(hf_config) if callable(value) else value
 
 
+def _register_pipeline_key(key: str, value: PipelineConfig | PipelineResolver) -> None:
+    existing = OMNI_PIPELINES.get(key)
+    if existing is value:
+        return
+    if existing is not None:
+        raise ValueError(f"pipeline key {key!r} is already registered")
+    OMNI_PIPELINES[key] = value
+
+
 def register_pipeline(
     pipeline: PipelineConfig | PipelineResolver,
     model_type: str | None = None,
@@ -315,31 +359,26 @@ def register_pipeline(
     resolver needs an explicit ``model_type`` (it can resolve to different
     pipelines depending on ``hf_config``).
 
-    .. warning::
-        Same-name (and same-``registration_handles``) re-registration
-        **silently overrides** the prior entry. This is a deliberate
-        in-scope divergence from the reference, which raises on duplicate
-        registration. The override is locked by
-        ``tests/test_registry_resolver.py``; if you need a warn-or-raise
-        policy, read the "Definition of aligned" section of ``AGENTS.md``
-        first.
+    Duplicate keys raise ``ValueError``. The one exception is registering
+    the same declaration object under its own name and an identical alias;
+    that is one declaration with two lookup keys, not a collision.
     """
     if callable(pipeline):
         if model_type is None:
             raise ValueError("model_type must be provided when registering a pipeline resolver")
-        OMNI_PIPELINES[model_type] = pipeline
+        _register_pipeline_key(model_type, pipeline)
         if registration_handles:
             for handle in registration_handles:
-                OMNI_PIPELINES[handle] = pipeline
+                _register_pipeline_key(handle, pipeline)
         return
     if not isinstance(pipeline, PipelineConfig):
         raise TypeError(
             f"register_pipeline expected PipelineConfig or callable, "
             f"got {type(pipeline).__name__}"
         )
-    OMNI_PIPELINES[pipeline.name] = pipeline
+    _register_pipeline_key(pipeline.name, pipeline)
     for handle in pipeline.registration_handles:
-        OMNI_PIPELINES[handle] = pipeline
+        _register_pipeline_key(handle, pipeline)
 
 
 def resolve_pipeline_config(model_type: str, hf_config: Any | None = None) -> PipelineConfig | None:

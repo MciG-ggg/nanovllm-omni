@@ -10,9 +10,10 @@ Orchestrator are designed for multi-replica routing and cross-stage
 request lifecycle management; neither is needed for this project's
 single-process, single-GPU scope.
 
-Phase 2 (TK-016): stage factories and ``process_input`` hooks are
-dotted-path strings on ``StageConfig``; this runner resolves them via
-``resolve_stage_factory`` once per pipeline on first ``run``.
+Stage factories and ``process_input`` hooks are tuple registrations on
+``StageConfig``; this runner resolves them once per pipeline on first ``run``.
+Registered model classes are resolved at the same point and injected into the
+stage wrapper without any model-name branch in the runner.
 """
 
 from __future__ import annotations
@@ -25,10 +26,12 @@ from typing import Any
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
 from nanovllm_omni.config.registry import (
     DeployConfig,
+    OmniModelRegistry,
     PipelineConfig,
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
+from nanovllm_omni.outputs import adapt_terminal_output
 
 
 class PipelineRunner:
@@ -76,9 +79,14 @@ class PipelineRunner:
         if self._stage_instances is None:
             instances = []
             for stage in self.pipeline.stages:
-                instance = resolve_stage_factory(stage.factory)(
+                factory = resolve_stage_factory(stage.stage_factory)
+                kwargs: dict[str, Any] = {}
+                if stage.model_architecture is not None:
+                    kwargs["model_class"] = OmniModelRegistry.resolve(stage.model_architecture)
+                instance = factory(
                     self.deploy,
                     self._stage_args(stage.name),
+                    **kwargs,
                 )
                 instances.append(instance)
             self._stage_instances = instances
@@ -147,6 +155,8 @@ class PipelineRunner:
             stage_sampling = self._stage_sampling(stage_defaults, sampling)
             t0 = time.perf_counter()
             payload = instance(payload, stage_sampling)
+            if stage_cfg.is_terminal and stage_cfg.final_output_type is not None:
+                payload = adapt_terminal_output(payload, stage_cfg.final_output_type)
             stage_ms[stage_cfg.name] = (time.perf_counter() - t0) * 1000.0
         return payload, stage_ms
 

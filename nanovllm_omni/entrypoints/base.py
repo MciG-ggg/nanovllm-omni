@@ -94,7 +94,7 @@ def try_infer_model_type(
     config = _load_pretrained_config(model, trust_remote_code)
     if config is not None:
         mt = getattr(config, "model_type", None)
-        if mt and mt in OMNI_PIPELINES:
+        if mt and resolve_pipeline_config(mt, config) is not None:
             return mt
 
     # L2 / L3: config.json's ``model_type`` (gated by registry membership
@@ -105,7 +105,7 @@ def try_infer_model_type(
         data = _read_json(model_dir / "config.json")
         if data is not None:
             mt = data.get("model_type")
-            if isinstance(mt, str) and mt and mt in OMNI_PIPELINES:
+            if isinstance(mt, str) and mt and resolve_pipeline_config(mt, data) is not None:
                 return mt
             for key in ("type", "architecture"):
                 raw = data.get(key)
@@ -145,7 +145,10 @@ def _pipeline_from_local_dir(model_dir: Path) -> PipelineConfig | None:
     """Local-dir fallback: ask ``try_infer_model_type`` and MiniMind-O default."""
     model_type = try_infer_model_type(str(model_dir))
     if model_type:
-        found = resolve_pipeline_config(model_type)
+        config = _load_pretrained_config(str(model_dir), trust_remote_code=True) or _read_json(
+            model_dir / "config.json"
+        )
+        found = resolve_pipeline_config(model_type, config)
         if found is not None:
             return found
     return resolve_pipeline_config("minimind_o")
@@ -162,10 +165,13 @@ class OmniBase:
     def _resolve_pipeline(self) -> PipelineConfig:
         if self._pipeline is None:
             extra = self.engine_args.extra or {}
+            hf_config = _load_pretrained_config(self.model, self.engine_args.trust_remote_code)
+            if hf_config is None and Path(self.model).is_dir():
+                hf_config = _read_json(Path(self.model) / "config.json")
             explicit = extra.get("pipeline")
-            pipeline = resolve_pipeline_config(explicit) if explicit else None
+            pipeline = resolve_pipeline_config(explicit, hf_config) if explicit else None
             if pipeline is None:
-                pipeline = resolve_pipeline_config(self.model)
+                pipeline = resolve_pipeline_config(self.model, hf_config)
             if pipeline is None and Path(self.model).is_dir():
                 pipeline = _pipeline_from_local_dir(Path(self.model))
             if pipeline is None:

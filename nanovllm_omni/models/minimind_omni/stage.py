@@ -242,11 +242,12 @@ class ThinkerStage:
     instance with ``(payload, sampling)``.
     """
 
-    def __init__(self, deploy: Any, args: Any) -> None:
+    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
         from .thinker import MiniMindThinker
 
         self.deploy = deploy
         self.args = args
+        self.model_class = model_class or MiniMindThinker
         # ``enforce_eager=True`` so the thinker's bridge-layer hidden
         # state can be captured as a plain Python attribute inside
         # ``forward``. Direct forward is required because CUDA-graph
@@ -267,7 +268,7 @@ class ThinkerStage:
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
         self.stage_runner = StageRunner(
-            model_class=MiniMindThinker,
+            model_class=self.model_class,
             config=self.config,
         )
 
@@ -339,6 +340,7 @@ class ThinkerStage:
             prompt_token_ids=tuple(token_ids),
             output_token_ids=tuple(generated),
             text_token_ids=tuple(token_ids + generated),
+            text=tokenizer.decode(generated, skip_special_tokens=True),
             text_state=text_state,
             request_id=getattr(sampling, "request_id", None),
         )
@@ -375,9 +377,10 @@ class TalkerStage:
     ``ModelRunner``; we set up the fork ``Context`` directly.
     """
 
-    def __init__(self, deploy: Any, args: Any) -> None:
+    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
         self.deploy = deploy
         self.args = args
+        self.model_class = model_class
         self._model: Any = None
         self._device: str | None = None
         self._config: Any = None
@@ -394,6 +397,7 @@ class TalkerStage:
 
         from .talker import MiniMindTalker
 
+        model_class = self.model_class or MiniMindTalker
         model_path = _resolve_model_path(self.args, stage="talker")
 
         # Build the fork Config with trust_remote_code so MiniMind's
@@ -411,7 +415,7 @@ class TalkerStage:
         torch.set_default_dtype(hf_cfg.dtype)
         torch.set_default_device("cuda")
         try:
-            model = MiniMindTalker(hf_cfg)
+            model = model_class(hf_cfg)
             load_model(model, model_path)
         finally:
             torch.set_default_device("cpu")

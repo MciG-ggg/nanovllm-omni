@@ -411,11 +411,11 @@ class MiniMindTalker(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Stage factory (called by pipeline.py via dotted-path resolution)
+#  Stage factory (called by pipeline.py via tuple registration)
 # ---------------------------------------------------------------------------
 
 
-def _talker_stage(deploy, args):
+def _talker_stage(deploy, args, model_class=None):
     """Stage 1 factory — defers heavy model load to ``TalkerStage.__init__``.
 
     The MTP decode loop that consumes ``TalkerInputPayload`` and emits
@@ -423,4 +423,4 @@ def _talker_stage(deploy, args):
     """
     from .stage import TalkerStage
 
-    return TalkerStage(deploy, args)
+    return TalkerStage(deploy, args, model_class=model_class)

@@ -288,11 +288,11 @@ class MiniMindThinker(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-#  Stage factory (called by pipeline.py via dotted-path resolution)
+#  Stage factory (called by pipeline.py via tuple registration)
 # ---------------------------------------------------------------------------
 
 
-def _thinker_stage(deploy, args):
+def _thinker_stage(deploy, args, model_class=None):
     """Stage 0 factory — fork ``ModelRunner`` wiring.
 
     Returns a ``ThinkerStage`` whose ``ModelRunner`` already has its KV
@@ -303,4 +303,4 @@ def _thinker_stage(deploy, args):
     """
     from .stage import ThinkerStage
 
-    return ThinkerStage(deploy, args)
+    return ThinkerStage(deploy, args, model_class=model_class)

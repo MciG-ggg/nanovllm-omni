@@ -35,6 +35,7 @@ class ThinkerStageOutput:
     prompt_token_ids: Sequence[int] = ()
     output_token_ids: Sequence[int] = ()
     text_token_ids: Sequence[int] = ()
+    text: str | None = None
     input_ids: Any | None = None
     text_state: Any = None
     speaker_embedding: torch.Tensor | None = None

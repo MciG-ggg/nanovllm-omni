@@ -1,7 +1,18 @@
 """MiniMind-O thinker stage.
 
-Owns the ``ThinkerAttention``, ``ThinkerBlock``, and ``MiniMindThinker``
-model components using fork layers (``nanovllm.layers.*``).
+Owns the ``ThinkerAttention``, ``ThinkerBlock``, ``MiniMindThinkerBackbone``
+and ``MiniMindThinker`` model components using fork layers
+(``nanovllm.layers.*``).
+
+The backbone/wrapper split mirrors the upstream ``MiniMindForCausalLM``
+shape (``self.model = MiniMindModel``) so the fork's weight loader can
+land the HF ``model.embed_tokens.*`` / ``model.layers.*`` / ``model.norm.*``
+checkpoint keys directly. The previous flat layout (``self.embed_tokens``,
+``self.layers``, ``self.norm`` at the top level) silently failed to load
+on RTX 3050 / torch 2.11: every forward returned a hidden state of all
+zeros because no checkpoint key matched a top-level parameter, leaving
+both ``embed_tokens`` and the tied ``lm_head`` at their init values, and
+the QKV / gate-up projections likewise.
 
 Public symbols: ``MiniMindThinker``, ``_thinker_stage``.
 """
@@ -26,7 +37,20 @@ from torch import nn
 
 
 class ThinkerAttention(nn.Module):
-    """Multi-head attention with paged KV cache (via fork's Attention)."""
+    """Multi-head attention with paged KV cache (via fork's Attention).
+
+    ``packed_modules_mapping`` lives here so the fork's per-key weight
+    loader walks down to ``self_attn`` and resolves the q/k/v merge
+    against ``qkv_proj``. A model-level mapping would short-circuit
+    non-merged keys (``embed_tokens``, ``norm``, ``q_norm``, ``k_norm``,
+    ``o_proj``) and skip them.
+    """
+
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+    }
 
     def __init__(
         self,
@@ -79,40 +103,29 @@ class ThinkerAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
-        import os
-
-        _dbg = os.environ.get("DEBUG_MINIMIND_ATTN")
         qkv = self.qkv_proj(hidden_states)
-        if _dbg:
-            print(
-                f"  [ATTN] qkv nan={torch.isnan(qkv).any().item()} max={qkv.float().abs().max().item():.4f}"
-            )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.reshape(-1, self.num_heads, self.head_dim).contiguous()
         k = k.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         v = v.reshape(-1, self.num_kv_heads, self.head_dim).contiguous()
         q = self.q_norm(q)
         k = self.k_norm(k)
-        if _dbg:
-            print(
-                f"  [ATTN] q nan={torch.isnan(q).any().item()} k nan={torch.isnan(k).any().item()} v nan={torch.isnan(v).any().item()}"
-            )
         q, k = self.rotary_emb(positions, q, k)
-        if _dbg:
-            print(
-                f"  [ATTN] after rope q nan={torch.isnan(q).any().item()} k nan={torch.isnan(k).any().item()}"
-            )
         o = self.attn(q, k, v)
-        if _dbg:
-            print(f"  [ATTN] o nan={torch.isnan(o).any().item()}")
-        out = self.o_proj(o.flatten(1, -1))
-        if _dbg:
-            print(f"  [ATTN] o_proj nan={torch.isnan(out).any().item()}")
-        return out
+        return self.o_proj(o.flatten(1, -1))
 
 
 class ThinkerMLP(nn.Module):
-    """SwiGLU MLP with fused gate+up projection."""
+    """SwiGLU MLP with fused gate+up projection.
+
+    ``packed_modules_mapping`` lives here so the loader's per-key walk
+    resolves the gate/up merge against ``gate_up_proj``.
+    """
+
+    packed_modules_mapping = {
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
 
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
@@ -125,21 +138,7 @@ class ThinkerMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        import os
-
-        _dbg = os.environ.get("DEBUG_MINIMIND_MLP")
-        gu = self.gate_up_proj(x)
-        if _dbg:
-            print(
-                f"    [MLP] gate_up nan={torch.isnan(gu).any().item()} max={gu.float().abs().max().item():.4f}"
-            )
-        a = self.act_fn(gu)
-        if _dbg:
-            print(f"    [MLP] act nan={torch.isnan(a).any().item()}")
-        out = self.down_proj(a)
-        if _dbg:
-            print(f"    [MLP] down nan={torch.isnan(out).any().item()}")
-        return out
+        return self.down_proj(self.act_fn(self.gate_up_proj(x)))
 
 
 class ThinkerBlock(nn.Module):
@@ -186,23 +185,63 @@ class ThinkerBlock(nn.Module):
         return hidden_states, residual
 
 
+class MiniMindThinkerBackbone(nn.Module):
+    """Embed + transformer stack + final norm.
+
+    Lives at ``self.model`` on ``MiniMindThinker`` so the fork's weight
+    loader can land HF keys with the ``model.*`` prefix without rewriting
+    the loader. Mirrors the upstream ``MiniMindForCausalLM`` /
+    ``MiniMindModel`` split used by the minimind-3o checkpoint.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_layers: int,
+        num_heads: int,
+        num_kv_heads: int,
+        intermediate_size: int,
+        max_position: int,
+        rms_norm_eps: float,
+        rope_theta: float,
+        head_dim: int | None,
+    ) -> None:
+        super().__init__()
+        self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
+        self.layers = nn.ModuleList(
+            [
+                ThinkerBlock(
+                    hidden_size,
+                    num_heads,
+                    num_kv_heads,
+                    intermediate_size,
+                    max_position,
+                    head_dim,
+                    rms_norm_eps,
+                    rope_theta,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+
+
 class MiniMindThinker(nn.Module):
     """MiniMind thinker stage using fork layers.
 
     Produces text logits for AR decoding and exposes bridge hidden states
-    for the talker stage.  No vendor code, no host reads, CUDA-graph safe.
+    for the talker stage. No vendor code, no host reads, CUDA-graph safe.
 
-    ``packed_modules_mapping`` enables HF weight loading via the fork's
-    weight loader mechanism.
+    The ``self.model`` backbone holds ``embed_tokens`` / ``layers`` /
+    ``norm`` so the fork loader matches the HF ``MiniMindForCausalLM``
+    checkpoint layout. Per-submodule ``packed_modules_mapping`` lives on
+    ``ThinkerAttention`` / ``ThinkerMLP`` (not on this class) so the
+    loader's per-key walk only fires for q/k/v / gate / up keys; keys
+    for the un-merged submodules (``embed_tokens``, ``norm``, ``o_proj``,
+    ``q_norm``, ``k_norm``, ``down_proj``, layernorms) fall through to
+    the plain-loader branch.
     """
-
-    packed_modules_mapping = {
-        "q_proj": ("qkv_proj", "q"),
-        "k_proj": ("qkv_proj", "k"),
-        "v_proj": ("qkv_proj", "v"),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     def __init__(self, config) -> None:
         """HF config in, same contract as ``Qwen3ForCausalLM(hf_config)``.
@@ -231,24 +270,27 @@ class MiniMindThinker(nn.Module):
         self.hidden_size = hidden_size
         self.config = config
 
-        self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
-        self.layers = nn.ModuleList(
-            [
-                ThinkerBlock(
-                    hidden_size,
-                    num_heads,
-                    num_kv_heads,
-                    intermediate_size,
-                    max_position,
-                    head_dim,
-                    rms_norm_eps,
-                    rope_theta,
-                )
-                for _ in range(num_layers)
-            ]
+        # Backbone at ``self.model`` — same shape as upstream
+        # ``MiniMindForCausalLM`` so the fork's weight loader can land
+        # HF ``model.embed_tokens.*`` / ``model.layers.*`` / ``model.norm.*``
+        # keys directly.
+        self.model = MiniMindThinkerBackbone(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            intermediate_size=intermediate_size,
+            max_position=max_position,
+            rms_norm_eps=rms_norm_eps,
+            rope_theta=rope_theta,
+            head_dim=head_dim,
         )
-        self.norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.lm_head = ParallelLMHead(vocab_size, hidden_size)
+        # minimind-3o ships with ``tie_word_embeddings=True``; alias
+        # ``lm_head`` to the backbone's ``embed_tokens`` so the tied
+        # checkpoint weight lands in both places.
+        self.lm_head.weight.data = self.model.embed_tokens.weight.data
         self.audio_head = nn.Linear(
             hidden_size, self.num_audio_heads * self.audio_vocab_size, bias=False
         )
@@ -281,21 +323,10 @@ class MiniMindThinker(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """ModelRunner-compatible forward: returns hidden_states."""
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.model.embed_tokens(input_ids)
         residual = None
-        import os
-
-        _dbg = os.environ.get("DEBUG_MINIMIND_FORWARD")
-        if _dbg:
-            print(
-                f"[EMBED] shape={input_ids.shape} ids_first10={input_ids[:10].tolist()} ids_last10={input_ids[-10:].tolist()} h_nan={torch.isnan(hidden_states).any().item()} h_max={hidden_states.float().abs().max().item():.6f} h_std={hidden_states.float().std().item():.6f}"
-            )
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.model.layers):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            if _dbg and i in (0, self.bridge_layer, len(self.layers) - 1):
-                print(
-                    f"[FWD] i={i} h_nan={torch.isnan(hidden_states).any().item()} h_max={hidden_states.float().abs().max().item():.4f}"
-                )
             if i == self.bridge_layer:
                 seq_len = hidden_states.size(0)
                 if seq_len > 1:
@@ -312,7 +343,7 @@ class MiniMindThinker(nn.Module):
                     # overwrites row 0; ``decode_minimind`` reads it out
                     # between replays via ``get_bridge_hidden``.
                     self._bridge_buffer[0].copy_(hidden_states[0])
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states, _ = self.model.norm(hidden_states, residual)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

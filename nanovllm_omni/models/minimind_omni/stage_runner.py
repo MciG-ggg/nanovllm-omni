@@ -81,18 +81,6 @@ def decode_minimind(
         # probability tensor contains inf, nan or element < 0``.
         # Vendor's reference is FP32 throughout; we mirror that here.
         logits_i = logits[-1, :].float() / (temperatures[0] + 1e-9)
-        import os
-
-        if os.environ.get("DEBUG_MINIMIND_SAMPLER"):
-            print(f"[DEBUG] logits dtype={logits.dtype} shape={logits.shape}")
-            print(f"[DEBUG] logits_i max={logits_i.max().item()} min={logits_i.min().item()}")
-            print(
-                f"[DEBUG] logits_i has_nan={torch.isnan(logits_i).any().item()} has_inf={torch.isinf(logits_i).any().item()}"
-            )
-            sm = torch.softmax(logits_i, dim=-1)
-            print(
-                f"[DEBUG] softmax max={sm.max().item()} min={sm.min().item()} sum={sm.sum().item()}"
-            )
         for token in set(sequence.token_ids):
             logits_i[token] /= repetition_penalty
         if top_p < 1.0:

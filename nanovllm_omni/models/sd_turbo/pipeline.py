@@ -17,6 +17,7 @@ from nanovllm_omni.config.registry import (
 )
 
 _SD_TURBO_FAMILY = "nanovllm_omni.models.sd_turbo"
+_SD_TURBO_FACTORY = (_SD_TURBO_FAMILY + ".stage", "_sd_turbo_stage")
 
 SD_TURBO_PIPELINE = PipelineConfig(
     name="sd_turbo",
@@ -25,7 +26,7 @@ SD_TURBO_PIPELINE = PipelineConfig(
             stage_id=0,
             name="sd_turbo",
             kind=StageExecutionType.DIFFUSION,
-            factory=f"{_SD_TURBO_FAMILY}.stage:_sd_turbo_stage",
+            stage_factory=_SD_TURBO_FACTORY,
             process_input=None,
             input_sources=(),
             is_terminal=True,

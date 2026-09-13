@@ -19,6 +19,7 @@ from nanovllm_omni.config.registry import (
 )
 
 _SMOLVLM_FAMILY = "nanovllm_omni.models.smolvlm"
+_VLM_FACTORY = (_SMOLVLM_FAMILY + ".stage", "_vlm_stage")
 
 SMOLVLM_PIPELINE = PipelineConfig(
     name="smolvlm",
@@ -27,7 +28,8 @@ SMOLVLM_PIPELINE = PipelineConfig(
             stage_id=0,
             name="vlm",
             kind=StageExecutionType.LLM_AR,
-            factory=f"{_SMOLVLM_FAMILY}.stage:_vlm_stage",
+            stage_factory=_VLM_FACTORY,
+            model_architecture="SmolVLMForConditionalGeneration",
             process_input=None,
             input_sources=(),
             is_terminal=True,

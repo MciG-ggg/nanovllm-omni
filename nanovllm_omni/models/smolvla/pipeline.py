@@ -21,6 +21,9 @@ from nanovllm_omni.config.registry import (
 )
 
 _SMOLVLA_FAMILY = "nanovllm_omni.models.smolvla"
+_VLM_FACTORY = (_SMOLVLA_FAMILY + ".vlm_stage", "_vlm_stage")
+_ACTION_FACTORY = (_SMOLVLA_FAMILY + ".action_stage", "_action_stage")
+_PROCESSOR_MODULE = _SMOLVLA_FAMILY + ".stage_processors"
 
 SMOLVLA_PIPELINE = PipelineConfig(
     name="smolvla",
@@ -29,7 +32,7 @@ SMOLVLA_PIPELINE = PipelineConfig(
             stage_id=0,
             name="vlm",
             kind=StageExecutionType.LLM_AR,
-            factory=f"{_SMOLVLA_FAMILY}.vlm_stage:_vlm_stage",
+            stage_factory=_VLM_FACTORY,
             process_input=None,
             input_sources=(),
             is_terminal=False,
@@ -39,8 +42,8 @@ SMOLVLA_PIPELINE = PipelineConfig(
             stage_id=1,
             name="action",
             kind=StageExecutionType.DIFFUSION,
-            factory=f"{_SMOLVLA_FAMILY}.action_stage:_action_stage",
-            process_input=f"{_SMOLVLA_FAMILY}.stage_processors:vlm2action",
+            stage_factory=_ACTION_FACTORY,
+            process_input=(_PROCESSOR_MODULE, "vlm2action"),
             input_sources=(0,),
             is_terminal=True,
             final_output_type="actions",

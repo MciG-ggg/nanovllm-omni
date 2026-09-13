@@ -10,8 +10,8 @@ Per ``docs/dev/nanovllm-omni-smolvlm-ar-migration.md`` ADR-016 (revised,
   CUDA graph on the decode loop); mirrors minimind's
   ``decode_minimind`` scheduler pattern.
 - Stage is a class instance returned by the factory
-  ``_vlm_stage(deploy, args)``; the factory's dotted path stays the
-  same so ``pipeline.py`` and deploy yaml need no edits.
+  ``_vlm_stage(deploy, args)``; the factory's tuple registration keeps
+  ``pipeline.py`` declarative.
 
 Call contract: ``payload`` is text prompt (str / ``{"prompt": ...}``);
 images are passed via ``SamplingParams.extra["images"]`` as a list of
@@ -24,21 +24,23 @@ from typing import Any
 
 import torch
 
+from nanovllm_omni.utils.profiling import profile_range
+
 from .smolvlm import SmolVLMForConditionalGeneration
 
 _MODEL_ID = "HuggingFaceTB/SmolVLM-500M-Instruct"
 _DTYPE_ALLOWED = ("bfloat16", "float16", "float32")
 
 
-def _vlm_stage(deploy: Any, args: Any) -> Any:
+def _vlm_stage(deploy: Any, args: Any, model_class: Any = None) -> Any:
     """Stage 0 factory: build + return ``SmolVLMStage`` instance."""
-    return SmolVLMStage(deploy, args)
+    return SmolVLMStage(deploy, args, model_class=model_class)
 
 
 class SmolVLMStage:
     """Vision prefill + fork AR decode loop for SmolVLM-500M-Instruct."""
 
-    def __init__(self, deploy: Any, args: Any) -> None:
+    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
         from transformers import AutoConfig, AutoProcessor
 
         from nanovllm_omni.engine.stage_runner import (
@@ -73,7 +75,8 @@ class SmolVLMStage:
 
         # 1) Build our model from HF config
         hf_config = AutoConfig.from_pretrained(model_id, **kwargs)
-        self.model = SmolVLMForConditionalGeneration(hf_config)
+        model_class = model_class or SmolVLMForConditionalGeneration
+        self.model = model_class(hf_config)
 
         # 2) Load HF weights via fork loader (default prefix=""; submodule
         # names mirror HF checkpoint keys, so weights land directly).
@@ -110,7 +113,7 @@ class SmolVLMStage:
         # torch default, not a per-stage attribute. Set it for downstream
         # model construction (smolvlm.py weights load as bf16).
         self.stage_runner = StageRunner(
-            model_class=SmolVLMForConditionalGeneration,
+            model_class=model_class,
             config=config,
             rank=0,
         )
@@ -185,79 +188,82 @@ class SmolVLMStage:
         max_new_tokens = int(extras.get("max_new_tokens", 512))
         temperature = float(getattr(sampling, "temperature", 0.0) or 0.0)
 
-        # Build chat-template input; processor expands <image> placeholders
-        # into the right number of patch tokens per image.
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": [
-                    *[{"type": "image"} for _ in images],
-                    {"type": "text", "text": prompt_text},
-                ],
-            }
-        ]
-        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
-        input_ids = inputs["input_ids"].to(self.device)
-        pixel_values = inputs.get("pixel_values")
-        if pixel_values is not None:
-            pixel_values = pixel_values.to(self.device, dtype=self.dtype)
+        with profile_range(":tokenize"):
+            # Build chat-template input; processor expands <image> placeholders
+            # into the right number of patch tokens per image.
+            messages: list[dict[str, Any]] = [
+                {
+                    "role": "user",
+                    "content": [
+                        *[{"type": "image"} for _ in images],
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }
+            ]
+            chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
+            input_ids = inputs["input_ids"].to(self.device)
+            pixel_values = inputs.get("pixel_values")
+            if pixel_values is not None:
+                pixel_values = pixel_values.to(self.device, dtype=self.dtype)
 
-        # Prefill: vision + connector + merge (or None for text-only)
-        merged_embeds = self._build_merged_embeddings(input_ids, pixel_values)
+        with profile_range(":vlm-prefill"):
+            # Vision + connector + merge (or None for text-only).
+            merged_embeds = self._build_merged_embeddings(input_ids, pixel_values)
 
-        # Fork scheduler path — mirrors minimind decode_minimind shape.
-        runner = self.stage_runner.model_runner
-        config = self.stage_runner.config
-        # Fork SamplingParams forbids temperature=0 (assert > 1e-10).
-        # Map greedy (temperature=0 from omni params) to the fork's
-        # argmax path: pass temperature=1e-5 so the assert passes but
-        # Gumbel-max still collapses to the same argmax (highest logit
-        # wins). True temperature=0 greedy would require a separate
-        # sampler path; this is enough for the e2e smoke until we
-        # expose the right fork knob.
-        _fork_temp = max(float(temperature), 1e-5)
-        fork_sp = ForkSamplingParams(
-            temperature=_fork_temp,
-            max_tokens=max_new_tokens,
-            ignore_eos=False,
-        )
-        sequence = Sequence(input_ids[0].tolist(), fork_sp)
-        scheduler = Scheduler(config)
-        scheduler.add(sequence)
-
-        # Prefill step (one shot)
-        seqs, is_prefill = scheduler.schedule()
-        prefill_ids, prefill_positions = runner.prepare_prefill(seqs)
-        temperatures = runner.prepare_sample(seqs)
-        if merged_embeds is not None:
-            logits = runner.run_model(
-                prefill_ids,
-                prefill_positions,
-                is_prefill,
-                inputs_embeds=merged_embeds,
+            # Fork scheduler path — mirrors minimind decode_minimind shape.
+            runner = self.stage_runner.model_runner
+            config = self.stage_runner.config
+            # Fork SamplingParams forbids temperature=0 (assert > 1e-10).
+            # Map greedy (temperature=0 from omni params) to the fork's
+            # argmax path: pass temperature=1e-5 so the assert passes but
+            # Gumbel-max still collapses to the same argmax (highest logit
+            # wins). True temperature=0 greedy would require a separate
+            # sampler path; this is enough for the e2e smoke until we
+            # expose the right fork knob.
+            _fork_temp = max(float(temperature), 1e-5)
+            fork_sp = ForkSamplingParams(
+                temperature=_fork_temp,
+                max_tokens=max_new_tokens,
+                ignore_eos=False,
             )
-        else:
-            logits = runner.run_model(prefill_ids, prefill_positions, is_prefill)
-        token_ids = runner.sampler(logits, temperatures).tolist()
-        scheduler.postprocess(seqs, token_ids, is_prefill)
-        self.stage_runner.reset_context()
-        generated: list[int] = list(token_ids)
+            sequence = Sequence(input_ids[0].tolist(), fork_sp)
+            scheduler = Scheduler(config)
+            scheduler.add(sequence)
 
-        # AR decode loop
-        while not scheduler.is_finished():
+            # Prefill step (one shot)
             seqs, is_prefill = scheduler.schedule()
-            decode_ids, decode_positions = runner.prepare_decode(seqs)
+            prefill_ids, prefill_positions = runner.prepare_prefill(seqs)
             temperatures = runner.prepare_sample(seqs)
-            logits = runner.run_model(decode_ids, decode_positions, is_prefill)
+            if merged_embeds is not None:
+                logits = runner.run_model(
+                    prefill_ids,
+                    prefill_positions,
+                    is_prefill,
+                    inputs_embeds=merged_embeds,
+                )
+            else:
+                logits = runner.run_model(prefill_ids, prefill_positions, is_prefill)
             token_ids = runner.sampler(logits, temperatures).tolist()
             scheduler.postprocess(seqs, token_ids, is_prefill)
             self.stage_runner.reset_context()
-            generated.extend(token_ids)
-            if generated[-1] == self.eos_token_id:
-                break
-            if sequence.num_completion_tokens >= max_new_tokens:
-                break
+            generated: list[int] = list(token_ids)
+
+        with profile_range(":vlm-decode"):
+            # AR decode loop
+            while not scheduler.is_finished():
+                seqs, is_prefill = scheduler.schedule()
+                decode_ids, decode_positions = runner.prepare_decode(seqs)
+                temperatures = runner.prepare_sample(seqs)
+                logits = runner.run_model(decode_ids, decode_positions, is_prefill)
+                token_ids = runner.sampler(logits, temperatures).tolist()
+                scheduler.postprocess(seqs, token_ids, is_prefill)
+                self.stage_runner.reset_context()
+                generated.extend(token_ids)
+                if generated[-1] == self.eos_token_id:
+                    break
+                if sequence.num_completion_tokens >= max_new_tokens:
+                    break
 
         return self.processor.batch_decode([generated], skip_special_tokens=True)[0]
 

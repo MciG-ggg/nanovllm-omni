@@ -28,7 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import torch.cuda.nvtx as nvtx
+from nanovllm_omni.utils.profiling import profile_range
 
 from .env import git_commit, gpu_label
 from .smolvlm_prompts import SMOLVLM_INPUTS, SmolVLMInput
@@ -132,7 +132,7 @@ def _infer_one(pipeline: Any, prompt: str, max_new_tokens: int) -> str:
     Returns the decoded text (informational; not part of the timing).
     """
     sampling = SimpleNamespace(extra={"max_new_tokens": max_new_tokens, "images": []})
-    with nvtx.range(":vlm-decode"):
+    with profile_range(":vlm-decode"):
         return pipeline({"prompt": prompt}, sampling)
 
 

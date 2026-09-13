@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import torch.cuda.nvtx as nvtx
+from nanovllm_omni.utils.profiling import profile_range
 
 from .env import git_commit, gpu_label
 from .sd_turbo_prompts import SD_TURBO_INPUTS, SdTurboInput
@@ -122,14 +122,14 @@ def _infer_one(pipeline: Any, prompt: str) -> Any:
     - :unet        -- UNet noise prediction loop
     - :vae-decode  -- latent -> image
     """
-    with nvtx.range(":tokenize"):
-        state = pipeline.prepare_encode({"prompt": prompt})
+    with profile_range(":tokenize"):
+        state = pipeline.prepare({"prompt": prompt})
     num_steps = state.metadata["num_steps"]
-    with nvtx.range(":unet"):
+    with profile_range(":unet"):
         for step in range(num_steps):
             noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
             pipeline.step_scheduler(state, noise_pred)
-    with nvtx.range(":vae-decode"):
+    with profile_range(":vae-decode"):
         return pipeline.post_decode(state)
 
 
@@ -195,7 +195,7 @@ def _run_cuda_graph(
     import torch
 
     # Build the state once; capture uses these specific tensor addresses.
-    state = pipeline.prepare_encode({"prompt": sd_input.prompt})
+    state = pipeline.prepare({"prompt": sd_input.prompt})
     num_steps = state.metadata["num_steps"]
 
     def _gpu_only() -> Any:

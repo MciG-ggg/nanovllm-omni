@@ -31,7 +31,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import torch.cuda.nvtx as nvtx
+from nanovllm_omni.utils.profiling import profile_range
 
 from .env import git_commit, gpu_label
 from .smolvla_prompts import SMOLVLA_INPUTS, SmolVLAInput
@@ -136,20 +136,20 @@ def _infer_one(
         }
     )
 
-    with nvtx.range(":tokenize"):
+    with profile_range(":tokenize"):
         vlm_out = vlm(sm_input.instruction, sampling)
 
-    with nvtx.range(":vlm-prefill"):
+    with profile_range(":vlm-prefill"):
         action_payload = vlm2action(vlm_out, sm_input.instruction)
 
-    state_obj = action.prepare_encode(action_payload)
+    state_obj = action.prepare(action_payload)
     num_steps = state_obj.metadata["num_steps"]
-    with nvtx.range(":flow-step"):
+    with profile_range(":flow-step"):
         for step in range(num_steps):
             noise_pred = action.denoise_step(state_obj, step=step, num_steps=num_steps)
             action.step_scheduler(state_obj, noise_pred)
 
-    with nvtx.range(":action-decode"):
+    with profile_range(":action-decode"):
         return action.post_decode(state_obj)
 
 

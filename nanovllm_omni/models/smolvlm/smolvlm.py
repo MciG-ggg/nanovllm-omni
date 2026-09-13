@@ -202,7 +202,15 @@ class SmolLM2Model(nn.Module):
 
 
 class SmolLM2ForCausalLM(nn.Module):
-    """Standalone SmolLM2 wrapper used inside ``SmolVLMModel.language_model``.
+    """Standalone SmolLM2 wrapper used inside ``SmolVLMModel.text_model``.
+
+    Submodule layout mirrors HF checkpoint keys for SmolVLM:
+    ``model.text_model.embed_tokens`` / ``model.text_model.layers.*`` /
+    ``model.text_model.norm`` — all attributes live on this class
+    directly, NOT under a nested ``self.model``. This is the opposite
+    of the typical llama-style ``self.model.layers`` shape; SmolVLM
+    flattens it because the text_model is one part of the multimodal
+    shell, not a stand-alone model.
 
     packed_modules_mapping declares the fused-proj name rewrites so the
     fork ``load_model`` can land the per-head ``q_proj`` /
@@ -220,12 +228,24 @@ class SmolLM2ForCausalLM(nn.Module):
 
     def __init__(self, config) -> None:
         super().__init__()
-        from nanovllm.layers.embed_head import ParallelLMHead
+        from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
+        from nanovllm.layers.layernorm import RMSNorm
 
-        self.model = SmolLM2Model(config)
+        # Flattened for HF checkpoint key compatibility: every attribute
+        # sits on self directly, not under self.model.*, so paths like
+        # ``model.text_model.embed_tokens`` resolve in one dot-walk.
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList(
+            [SmolLM2DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if getattr(config, "tie_word_embeddings", False):
-            self.lm_head.weight.data = self.model.embed_tokens.weight.data
+            self.lm_head.weight.data = self.embed_tokens.weight.data
+        # Compatibility alias so existing minimind-style forward() calls
+        # that did ``self.model(input_ids, positions, ...)`` keep
+        # working if the wrapper is ever reused outside SmolVLM.
+        self.model = self
 
     def forward(
         self,
@@ -233,7 +253,14 @@ class SmolLM2ForCausalLM(nn.Module):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, inputs_embeds=inputs_embeds)
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+        hidden_states = inputs_embeds
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(positions, hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.lm_head(hidden_states)

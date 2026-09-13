@@ -14,6 +14,7 @@ from nanovllm_omni.config import (
     resolve_pipeline_config,
 )
 from nanovllm_omni.config.registry import (
+    ModelRegistry,
     StageExecutionType,
     resolve_stage_factory,
 )
@@ -53,6 +54,20 @@ def test_pipeline_registry_resolves_by_hf_handle():
     assert config.name == "minimind_o"
 
 
+def test_minimind_resolver_selects_thinker_only_from_hf_config():
+    config = resolve_pipeline_config("minimind_o", hf_config={"enable_audio_output": False})
+    assert config is not None
+    assert config.name == "minimind_o_thinker_only"
+    assert [stage.name for stage in config.stages] == ["thinker"]
+    assert config.stages[0].final_output_type == "text"
+
+
+def test_model_registry_resolves_lazily():
+    registry = ModelRegistry({"MiniMindThinker": ("minimind_omni", "thinker", "MiniMindThinker")})
+    assert registry.registrations()["MiniMindThinker"][2] == "MiniMindThinker"
+    assert registry.resolve("MiniMindThinker").__name__ == "MiniMindThinker"
+
+
 def test_pipeline_registry_returns_none_for_unknown():
     assert resolve_pipeline_config("nonexistent_model") is None
 
@@ -62,7 +77,7 @@ def test_stage_config_is_frozen():
         stage_id=0,
         name="thinker",
         kind=StageExecutionType.LLM_AR,
-        factory="tests._stage_factories:thinker_simple",
+        stage_factory=("tests._stage_factories", "thinker_simple"),
     )
     try:
         cfg.name = "talker"
@@ -189,7 +204,7 @@ def test_register_pipeline_adds_entry():
                 stage_id=0,
                 name="only",
                 kind=StageExecutionType.LLM_AR,
-                factory="tests._stage_factories:thinker_simple",
+                stage_factory=("tests._stage_factories", "thinker_simple"),
                 is_terminal=True,
             ),
         ),
@@ -218,7 +233,7 @@ def test_pipeline_config_accepts_hf_architectures_and_predicate():
                 stage_id=0,
                 name="only",
                 kind=StageExecutionType.LLM_AR,
-                factory="tests._stage_factories:thinker_simple",
+                stage_factory=("tests._stage_factories", "thinker_simple"),
                 is_terminal=True,
             ),
         ),
@@ -238,7 +253,7 @@ def test_pipeline_config_hf_fields_default_to_empty():
                 stage_id=0,
                 name="only",
                 kind=StageExecutionType.LLM_AR,
-                factory="tests._stage_factories:thinker_simple",
+                stage_factory=("tests._stage_factories", "thinker_simple"),
                 is_terminal=True,
             ),
         ),
@@ -256,8 +271,8 @@ def test_smolvla_pipeline_declares_hf_architectures():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 (TK-016) contract tests: StageExecutionType enum + string-path
-# factory resolution.
+# Registry contract tests: StageExecutionType enum + tuple factory
+# resolution.
 # ---------------------------------------------------------------------------
 
 
@@ -282,60 +297,62 @@ def test_stage_config_kind_rejects_string_literal():
             stage_id=0,
             name="x",
             kind="ar",  # type: ignore[arg-type]
-            factory="tests._stage_factories:thinker_simple",
+            stage_factory=("tests._stage_factories", "thinker_simple"),
         )
 
 
-def test_stage_config_factory_must_be_string_path():
-    with pytest.raises(TypeError, match="dotted-path string"):
+def test_stage_config_factory_must_be_module_class_tuple():
+    with pytest.raises(TypeError, match="tuple"):
         StageConfig(
             stage_id=0,
             name="x",
             kind=StageExecutionType.LLM_AR,
-            factory=fac.thinker_simple,  # type: ignore[arg-type]
+            stage_factory=fac.thinker_simple,  # type: ignore[arg-type]
         )
 
 
 def test_stage_config_bad_factory_form_raises_value_error():
-    with pytest.raises(ValueError, match="package.module:attr"):
+    with pytest.raises(TypeError, match="tuple"):
         StageConfig(
             stage_id=0,
             name="x",
             kind=StageExecutionType.LLM_AR,
-            factory="no_colon_separator",
+            stage_factory=("no_colon_separator",),  # type: ignore[arg-type]
         )
 
 
-def test_stage_config_missing_attribute_raises_at_construction():
+def test_stage_config_missing_attribute_raises_when_resolved():
+    cfg = StageConfig(
+        stage_id=0,
+        name="x",
+        kind=StageExecutionType.LLM_AR,
+        stage_factory=("tests._stage_factories", "does_not_exist"),
+    )
     with pytest.raises(AttributeError, match="has no attribute"):
-        StageConfig(
-            stage_id=0,
-            name="x",
-            kind=StageExecutionType.LLM_AR,
-            factory="tests._stage_factories:does_not_exist",
-        )
+        resolve_stage_factory(cfg.stage_factory)
 
 
-def test_stage_config_unimportable_module_raises_at_construction():
+def test_stage_config_unimportable_module_raises_when_resolved():
+    cfg = StageConfig(
+        stage_id=0,
+        name="x",
+        kind=StageExecutionType.LLM_AR,
+        stage_factory=("definitely_not_a_real_module", "_x"),
+    )
     with pytest.raises(ImportError, match="cannot import module"):
-        StageConfig(
-            stage_id=0,
-            name="x",
-            kind=StageExecutionType.LLM_AR,
-            factory="definitely_not_a_real_module:_x",
-        )
+        resolve_stage_factory(cfg.stage_factory)
 
 
 def test_resolve_stage_factory_returns_callable():
-    fn = resolve_stage_factory("nanovllm_omni.models.minimind_omni.thinker:_thinker_stage")
+    fn = resolve_stage_factory(("nanovllm_omni.models.minimind_omni.thinker", "_thinker_stage"))
     assert callable(fn)
 
 
 def test_resolve_stage_factory_rejects_empty_path():
-    with pytest.raises(ValueError, match="non-empty string"):
-        resolve_stage_factory("")
+    with pytest.raises(ValueError, match="tuple"):
+        resolve_stage_factory(())
 
 
-def test_resolve_stage_factory_rejects_missing_colon():
-    with pytest.raises(ValueError, match="package.module:attr"):
-        resolve_stage_factory("nanovllm_omni.models.minimind_omni.thinker")
+def test_resolve_stage_factory_rejects_missing_attribute():
+    with pytest.raises(ValueError, match="tuple"):
+        resolve_stage_factory(("nanovllm_omni.models.minimind_omni.thinker",))

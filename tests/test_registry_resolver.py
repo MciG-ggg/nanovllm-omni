@@ -36,7 +36,7 @@ def _mini_pipeline(name: str) -> PipelineConfig:
                 stage_id=0,
                 name="stage",
                 kind=StageExecutionType.LLM_AR,
-                factory="nanovllm_omni.models.smolvla.vlm_stage:_vlm_stage",
+                stage_factory=("nanovllm_omni.models.smolvla.vlm_stage", "_vlm_stage"),
                 is_terminal=True,
             ),
         ),
@@ -112,15 +112,8 @@ def test_kwarg_param_name_is_model_type() -> None:
     assert list(params)[0] == "model_type"
 
 
-def test_register_pipeline_keys_by_name_and_clobbers_silently() -> None:
-    """Lock a documented in-scope divergence from vllm-omni.
-
-    The reference keys ``PipelineConfig`` by ``model_type`` and runs
-    validate + warn on duplicate keys; nanovllm-omni keys by ``name``
-    and silently overwrites a same-name registration. AGENTS.md
-    ("Definition of aligned") treats this as in-scope, so this test
-    pins the actual behavior to keep the docs honest.
-    """
+def test_register_pipeline_rejects_duplicate_keys() -> None:
+    """Duplicate keys fail instead of depending on import order."""
     name = f"drift-lock-{uuid.uuid4().hex[:8]}"
     first = _mini_pipeline(name)
     second = replace(first, default_deploy_config_name="other.yaml")
@@ -128,7 +121,8 @@ def test_register_pipeline_keys_by_name_and_clobbers_silently() -> None:
     try:
         register_pipeline(first)
         assert OMNI_PIPELINES[name] is first
-        register_pipeline(second)  # documented: silent overwrite
-        assert OMNI_PIPELINES[name] is second
+        with pytest.raises(ValueError, match="already registered"):
+            register_pipeline(second)
+        assert OMNI_PIPELINES[name] is first
     finally:
         OMNI_PIPELINES.pop(name, None)

@@ -100,13 +100,16 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
         name="multi_modal",
         stages=(
             StageConfig(
-                0, "thinker", StageExecutionType.LLM_AR, "tests._stage_factories:thinker_simple"
+                0,
+                "thinker",
+                StageExecutionType.LLM_AR,
+                ("tests._stage_factories", "thinker_simple"),
             ),
             StageConfig(
                 1,
                 "actions",
                 StageExecutionType.LLM_GENERATION,
-                "tests._stage_factories:thinker_simple",
+                ("tests._stage_factories", "thinker_simple"),
                 is_terminal=True,
                 final_output_type="actions",
             ),
@@ -114,7 +117,7 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
                 2,
                 "audio",
                 StageExecutionType.CODEC,
-                "tests._stage_factories:thinker_simple",
+                ("tests._stage_factories", "thinker_simple"),
                 is_terminal=True,
                 final_output_type="audio",
             ),

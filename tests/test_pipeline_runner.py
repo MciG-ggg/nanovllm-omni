@@ -51,22 +51,22 @@ def test_runner_visits_stages_in_order():
                 0,
                 "thinker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:logged_thinker",
+                ("tests._stage_factories", "logged_thinker"),
             ),
             StageConfig(
                 1,
                 "talker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:logged_talker",
-                process_input="tests._stage_factories:identity_process_input",
+                ("tests._stage_factories", "logged_talker"),
+                process_input=("tests._stage_factories", "identity_process_input"),
                 input_sources=(0,),
             ),
             StageConfig(
                 2,
                 "code2wav",
                 StageExecutionType.CODEC,
-                "tests._stage_factories:logged_code2wav",
-                process_input="tests._stage_factories:identity_process_input",
+                ("tests._stage_factories", "logged_code2wav"),
+                process_input=("tests._stage_factories", "identity_process_input"),
                 input_sources=(1,),
                 is_terminal=True,
                 final_output_type="audio",
@@ -87,14 +87,14 @@ def test_runner_calls_process_input_between_stages():
                 0,
                 "thinker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:thinker_simple",
+                ("tests._stage_factories", "thinker_simple"),
             ),
             StageConfig(
                 1,
                 "talker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:talker_simple",
-                process_input="tests._stage_factories:bridge_process_input",
+                ("tests._stage_factories", "talker_simple"),
+                process_input=("tests._stage_factories", "bridge_process_input"),
                 input_sources=(0,),
                 is_terminal=True,
             ),
@@ -113,7 +113,7 @@ def test_runner_merges_deploy_defaults_with_request_sampling():
                 0,
                 "thinker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:capturing_simple",
+                ("tests._stage_factories", "capturing_simple"),
                 is_terminal=True,
             )
         ]
@@ -135,7 +135,7 @@ def test_runner_uses_deploy_defaults_when_no_request_sampling():
                 0,
                 "thinker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:capturing_simple",
+                ("tests._stage_factories", "capturing_simple"),
                 is_terminal=True,
             )
         ]
@@ -158,7 +158,7 @@ def test_single_stage_pipeline_supported():
                 0,
                 "dit",
                 StageExecutionType.DIFFUSION,
-                "tests._stage_factories:logged_diffusion",
+                ("tests._stage_factories", "logged_diffusion"),
                 is_terminal=True,
                 final_output_type="video",
                 diffusers_class_name="WanPipeline",
@@ -175,6 +175,46 @@ def test_single_stage_pipeline_supported():
     assert log[0][0] == "dit"
 
 
+def test_runner_injects_registered_model_class(monkeypatch):
+    from nanovllm_omni.config.registry import OmniModelRegistry
+
+    monkeypatch.setitem(
+        OmniModelRegistry._registrations,
+        "FakeRegisteredModel",
+        ("minimind_omni", "thinker", "MiniMindThinker"),
+    )
+    pipeline = _make_pipeline(
+        [
+            StageConfig(
+                0,
+                "model",
+                StageExecutionType.LLM_AR,
+                ("tests._stage_factories", "model_aware_factory"),
+                model_architecture="FakeRegisteredModel",
+            )
+        ]
+    )
+    out, _ = PipelineRunner(pipeline, DeployConfig(), _make_args()).run("hello")
+    assert out.__name__ == "MiniMindThinker"
+
+
+def test_runner_adapts_text_terminal_output():
+    pipeline = _make_pipeline(
+        [
+            StageConfig(
+                0,
+                "text",
+                StageExecutionType.LLM_AR,
+                ("tests._stage_factories", "text_terminal_factory"),
+                is_terminal=True,
+                final_output_type="text",
+            )
+        ]
+    )
+    out, _ = PipelineRunner(pipeline, DeployConfig(), _make_args()).run("hello")
+    assert out == "terminal text"
+
+
 def test_runner_passes_mode_and_stage_resources_to_factory():
     fac.reset_factory_observations()
     pipeline = _make_pipeline(
@@ -183,7 +223,7 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
                 0,
                 "thinker",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:observing_factory",
+                ("tests._stage_factories", "observing_factory"),
                 is_terminal=True,
             )
         ],

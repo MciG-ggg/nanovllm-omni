@@ -1,9 +1,8 @@
-"""Module-level test factory functions for ``StageConfig`` string-path tests.
+"""Module-level test factory functions for tuple-based StageConfig tests.
 
-After Phase 2 (TK-016), ``StageConfig.factory`` is a dotted-path string
-(``"package.module:attr"``) instead of a direct callable. Tests that
-construct a ``StageConfig`` therefore need module-level factory functions
-that can be resolved by ``resolve_stage_factory``.
+``StageConfig.stage_factory`` and ``process_input`` use module/attribute
+tuples instead of direct callables. Tests therefore keep module-level
+factory functions that can be resolved by ``resolve_stage_factory``.
 
 Conventions:
   - Generic, stateless factories live alongside this docstring
@@ -14,7 +13,7 @@ Conventions:
     of the test body so the captured state is fresh. Pytest runs tests
     sequentially by default, so the slot pattern is sufficient.
   - The ``identity_process_input`` and ``bridge_process_input`` are
-    reusable dotted-path targets for ``StageConfig.process_input``.
+    reusable tuple-registration targets for ``StageConfig.process_input``.
 """
 
 from __future__ import annotations
@@ -53,6 +52,32 @@ def code2wav_simple(deploy: Any, args: Any) -> Any:
     return forward
 
 
+class FakeRegisteredModel:
+    """Small class used to prove model-registry injection without torch."""
+
+
+class TextTerminal:
+    text = "terminal text"
+
+
+def model_aware_factory(deploy: Any, args: Any, model_class: Any = None) -> Any:
+    """Factory that exposes the class supplied by the model registry."""
+
+    def forward(payload: Any, sampling: Any) -> Any:
+        return model_class
+
+    return forward
+
+
+def text_terminal_factory(deploy: Any, args: Any) -> Any:
+    """Factory returning a wrapper-shaped text terminal output."""
+
+    def forward(payload: Any, sampling: Any) -> Any:
+        return TextTerminal()
+
+    return forward
+
+
 def executor_simple(deploy: Any, args: Any) -> Any:
     """Single-stage async-executor stub: ``f"out({payload})"``."""
 
@@ -63,7 +88,7 @@ def executor_simple(deploy: Any, args: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Generic process_input hooks (dotted-path targets)
+# Generic process_input hooks (tuple-registration targets)
 # ---------------------------------------------------------------------------
 
 

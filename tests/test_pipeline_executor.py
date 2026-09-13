@@ -22,7 +22,7 @@ def _make_executor(max_concurrent: int = 1) -> PipelineExecutor:
                 0,
                 "s",
                 StageExecutionType.LLM_AR,
-                "tests._stage_factories:executor_simple",
+                ("tests._stage_factories", "executor_simple"),
                 is_terminal=True,
             ),
         ),

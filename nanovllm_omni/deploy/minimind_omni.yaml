@@ -1,12 +1,16 @@
 # Three-stage thinker -> talker -> code2wav pipeline (RTX 3050 validated).
 max_batch: 2
 # Stage-0 thinker CUDA Graph (joint text+audio decode).
-use_thinker_cuda_graph: true
+# Disabled: torch 2.11 + capture_cudagraph() errors on RTX 3050 with the
+# current minimind-3o fork Config (cudaErrorStreamCaptureInvalidated).
+# Same root cause as the historical ``fix(smolvlm): force enforce_eager``
+# series; eager is the safe path until graph capture is debugged.
+use_thinker_cuda_graph: false
 # Stage-1 talker CUDA Graph. Engages enable_talker_mtp_cuda_graph; forces
 # ``do_sample=False`` at the talker call site (graph module routes
 # stochastic calls to eager, so the graph only fires on greedy).
 # Set to false to keep eager + sampling.
-use_talker_cuda_graph: true
+use_talker_cuda_graph: false
 post_eos_padding_count: 128
 internal_stop_token_id: 17
 talker_max_steps_after_last_thinker_token: 192

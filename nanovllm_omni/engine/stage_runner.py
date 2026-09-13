@@ -57,7 +57,7 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
     """
     if stage_name not in _stage_configs:
         import torch
-        from nanovllm.engine.config import Config
+        from nanovllm.config import Config
 
         _stage_configs[stage_name] = Config(model_path, **kwargs)
         # Force a CUDA device probe on the cached config so a later

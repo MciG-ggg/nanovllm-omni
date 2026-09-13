@@ -43,9 +43,18 @@ class SmolVLMStage:
 
         from nanovllm_omni.engine.stage_runner import (
             StageRunner,
+            _ensure_dist,
             get_stage_config,
             stage_kwargs_from_args,
         )
+
+        # Fork layers (VocabParallelEmbedding, QKVParallelLinear, etc.)
+        # read ``dist.get_rank()`` at construction time. The fork's
+        # ModelRunner calls _ensure_dist() internally; SmolVLMModel is
+        # built BEFORE ModelRunner so we must do the same init up front
+        # (no-op after ModelRunner init: the monkey-patched init skips
+        # duplicate calls).
+        _ensure_dist()
 
         extra = dict(getattr(args, "extra", None) or {})
         allow_hf = bool(extra.get("allow_hf_download", False))

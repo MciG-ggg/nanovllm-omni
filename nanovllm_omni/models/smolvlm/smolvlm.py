@@ -378,6 +378,12 @@ class SmolVLMForConditionalGeneration(nn.Module):
         super().__init__()
         from nanovllm.layers.embed_head import ParallelLMHead
 
+        # The fork's ModelRunner.allocate_kv_cache reads ``model.config``
+        # to discover head count, head dim, num_layers for the KV
+        # tensor shape. Mirror the relevant text-backbone fields onto
+        # self.config so the runner can introspect without walking
+        # into the multimodal shell structure.
+        self.config = config.text_config
         self.model = SmolVLMModel(config)
         text_config = config.text_config
         self.lm_head = ParallelLMHead(text_config.vocab_size, text_config.hidden_size)

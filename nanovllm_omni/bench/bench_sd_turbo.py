@@ -318,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     gpu = gpu_label()
     commit = git_commit()
     today = date.today().isoformat()
-    out_dir = Path(__file__).resolve().parents[3] / "docs" / "perf"
+    out_dir = Path(__file__).resolve().parents[2] / "docs" / "perf"
     out_path = Path(args.out) if args.out else _csv_path(out_dir, commit)
     trace_path = None if args.no_trace else _trace_path(out_dir, today)
 

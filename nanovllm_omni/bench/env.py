@@ -18,7 +18,7 @@ def git_commit() -> str:
         out = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
             stderr=subprocess.DEVNULL,
-            cwd=str(Path(__file__).resolve().parents[3]),
+            cwd=str(Path(__file__).resolve().parents[2]),
         )
         return out.decode("ascii").strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):

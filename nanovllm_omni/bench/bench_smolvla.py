@@ -6,8 +6,7 @@ plus a per-run Kineto trace to ``docs/perf/smolvla-<date>.trace.json.gz``
 and an env snapshot at ``docs/perf/smolvla-<date>.env.txt``.
 
 NVTX ranges (per ADR 0001):
-- :tokenize      -- preprocessor (image + state normalization)
-- :vlm-prefill   -- VLM forward (SigLIP + SmolVLM2 prefix embed + KV cache)
+- :vlm           -- VLM AR forward + vlm2action conversion
 - :flow-step     -- flow-matching loop (denoise_step + step_scheduler x N)
 - :action-decode -- truncation to original_action_dim
 
@@ -136,10 +135,8 @@ def _infer_one(
         }
     )
 
-    with profile_range(":tokenize"):
+    with profile_range(":vlm"):
         vlm_out = vlm(sm_input.instruction, sampling)
-
-    with profile_range(":vlm-prefill"):
         action_payload = vlm2action(vlm_out, sm_input.instruction)
 
     state_obj = action.prepare(action_payload)

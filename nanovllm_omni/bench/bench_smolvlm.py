@@ -98,7 +98,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None, model: str) -> Any:
+def _load_pipeline(device: str | None, model: str, use_cuda_graph: bool = False) -> Any:
     """Load SmolVLM vlm_forward via the project's factory (not raw transformers).
 
     Going through ``_vlm_stage`` keeps the profile on OUR code path,
@@ -111,7 +111,7 @@ def _load_pipeline(device: str | None, model: str) -> Any:
         model=model,
         device=device,
         dtype="bfloat16",
-        extra={"allow_hf_download": False},
+        extra={"allow_hf_download": False, "use_cuda_graph": use_cuda_graph},
     )
     return _vlm_stage(None, args)
 
@@ -213,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="CSV output path (default: docs/perf/bench_smolvlm_<commit>.csv)",
     )
+    parser.add_argument(
+        "--use-cuda-graph",
+        action="store_true",
+        help="Decode-loop CUDA graph replay (default: eager).",
+    )
     args = parser.parse_args(argv)
 
     gpu = gpu_label()
@@ -232,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    pipeline = _load_pipeline(args.device, args.model)
+    pipeline = _load_pipeline(args.device, args.model, args.use_cuda_graph)
     rows: list[dict[str, Any]] = []
     for sm_input in SMOLVLM_INPUTS:
         walls, peak_vram = _run_baseline(

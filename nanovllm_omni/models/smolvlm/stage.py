@@ -111,7 +111,7 @@ class SmolVLMStage:
             model_dir,
             **stage_kwargs_from_args(args),
         )
-        config.enforce_eager = True
+        config.enforce_eager = not extra.get("use_cuda_graph", False)
         # fork Config is a frozen-ish dataclass; dtype is a process-wide
         # torch default, not a per-stage attribute. Set it for downstream
         # model construction (smolvlm.py weights load as bf16).

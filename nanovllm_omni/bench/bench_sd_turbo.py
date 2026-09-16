@@ -93,7 +93,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None) -> Any:
+def _load_pipeline(device: str | None, model: str) -> Any:
     """Load SdTurboPipeline via the project's factory (not raw diffusers).
 
     Going through ``_sd_turbo_stage`` keeps the profile on OUR code path,
@@ -103,7 +103,7 @@ def _load_pipeline(device: str | None) -> Any:
     from nanovllm_omni.models.sd_turbo.stage import _sd_turbo_stage
 
     args = SimpleNamespace(
-        model="stabilityai/sd-turbo",
+        model=model,
         device=device,
         dtype="float16",
         # allow_hf_download=False so the factory sets variant="fp16" and
@@ -330,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    pipeline = _load_pipeline(args.device)
+    pipeline = _load_pipeline(args.device, args.model)
     rows: list[dict[str, Any]] = []
     for sd_input in SD_TURBO_INPUTS:
         if args.cuda_graph:

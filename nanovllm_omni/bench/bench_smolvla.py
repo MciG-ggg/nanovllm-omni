@@ -100,7 +100,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None) -> tuple[Any, Any]:
+def _load_pipeline(device: str | None, model: str) -> tuple[Any, Any]:
     """Load both SmolVLA stages via the project's factories.
 
     vlm_stage and action_stage share one policy via ``smolvla.policy``, so calling both loads the
@@ -110,7 +110,7 @@ def _load_pipeline(device: str | None) -> tuple[Any, Any]:
     from nanovllm_omni.models.smolvla.vlm_stage import _vlm_stage
 
     args = SimpleNamespace(
-        model="HuggingFaceVLA/smolvla_libero",
+        model=model,
         device=device,
         extra={"allow_hf_download": False},
     )
@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    vlm, action = _load_pipeline(args.device)
+    vlm, action = _load_pipeline(args.device, args.model)
     rows: list[dict[str, Any]] = []
     for sm_input in SMOLVLA_INPUTS:
         walls, peak_vram = _run_baseline(

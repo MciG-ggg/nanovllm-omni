@@ -98,7 +98,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None) -> Any:
+def _load_pipeline(device: str | None, model: str) -> Any:
     """Load SmolVLM vlm_forward via the project's factory (not raw transformers).
 
     Going through ``_vlm_stage`` keeps the profile on OUR code path,
@@ -108,7 +108,7 @@ def _load_pipeline(device: str | None) -> Any:
     from nanovllm_omni.models.smolvlm.stage import _vlm_stage
 
     args = SimpleNamespace(
-        model="HuggingFaceTB/SmolVLM-500M-Instruct",
+        model=model,
         device=device,
         dtype="bfloat16",
         extra={"allow_hf_download": False},
@@ -232,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    pipeline = _load_pipeline(args.device)
+    pipeline = _load_pipeline(args.device, args.model)
     rows: list[dict[str, Any]] = []
     for sm_input in SMOLVLM_INPUTS:
         walls, peak_vram = _run_baseline(

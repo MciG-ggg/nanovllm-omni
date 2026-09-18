@@ -140,7 +140,15 @@ class SdTurboPipeline:
         state.step_index += 1
 
     def post_decode(self, state: Any) -> Any:
-        """VAE decode → PIL Image."""
+        """VAE decode → PIL Image.
+
+        All color/layout conversion runs on the GPU; only the final
+        768 KB uint8 HWC buffer crosses to the host. The previous chain
+        (``cpu().permute().float().numpy()`` then ``*255.round().astype``)
+        did a fp16 D2H sync mid-decode plus ~150 ms of single-threaded
+        numpy on 786k elements — Phase 2 profiling attributed ~200 ms of
+        the 384 ms ``:vae-decode`` wall to it.
+        """
         import torch
         from PIL import Image
 
@@ -150,11 +158,16 @@ class SdTurboPipeline:
             latents = state.latents / self.vae_scaling
             image = self.vae.decode(latents).sample
 
-        # To PIL.
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.cpu().permute(0, 2, 3, 1).float().numpy()
-        image = (image[0] * 255).round().astype("uint8")
-        pil_image = Image.fromarray(image)
+            # GPU-side: denormalize → clamp → fp32 scale+round → uint8 HWC.
+            # Rounding stays in fp32 (matches the old CPU path bit-for-bit;
+            # fp16 *255 can drift ±1 LSB). permute last so the D2H copy is
+            # one packed contiguous transfer.
+            img = (image / 2 + 0.5).clamp(0, 1)
+            img = img[0].float().mul_(255).round_()
+            img = img.permute(1, 2, 0).to(torch.uint8).contiguous()
+
+        arr = img.cpu().numpy()
+        pil_image = Image.fromarray(arr)
         return DiffusionOutput(images=[pil_image], finished=True)
 
 

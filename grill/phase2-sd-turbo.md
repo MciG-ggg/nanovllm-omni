@@ -116,12 +116,40 @@ bench: 500.6 → 497.0 ms p50（**只省 3 ms**）。用 `.scratch/qvae_split.py
 
 **真实归因**：`cudaMemcpyAsync` 的 406 ms（nsys runtime 事件计）不是传输本身，是 "等待前面 VAE kernels 完成 + 0.12ms 真实传输" 的总和。VAE decode wall ≈ GPU busy（CPU gap 仅 0.7ms），Python 转换链只占 ~0.7ms。post_decode 优化只能拿到 3ms。
 
-**sd-turbo 真正的瓶颈是 VAE decode 的 GPU kernels 本身（~344 ms）**——全是 conv（cutlass fprop 44ms + xmma 60ms + nchwToNhwc layout 25ms + 其余 elementwise）。下一步优化方向（按预期收益排序）：
+**sd-turbo 真正的瓶颈是 VAE decode 的 GPU kernels 本身（~344 ms）**——全是 conv（cutlass fprop 44ms + xmma 60ms + nchwToNhwc layout 25ms + 其余 elementwise）。
 
-1. **torch.compile VAE decoder**（conv 融合，~10-30% 收益，低风险）
-2. **换 tiny VAE / TAESD**（~8× 提速，质量下降，需权衡）
-3. **TensorRT 编译 VAE**（最大收益但引入 TRT 依赖）
-4. **降低分辨率**（不适用，输出规格固定）
+## torch.compile / channels_last cells（2026-09-18 后续）
+
+按 ADR-0001 Phase 2 继续打 VAE compute 瓶颈，三个 cell 全部实测：
+
+| cell | VAE decode p50 | vs eager | 备注 |
+|---|---:|---:|---|
+| eager baseline | 345.5 ms | 1.00× | cuDNN sm86 隐式 gemm conv |
+| CG replay（UNet+VAE） | 469.6 ms | 1.01×* | compute-bound，launch 开销本来就小 |
+| `torch.compile(mode="max-autotune-no-cudagraphs")` | 3026.3 ms | **0.12×** | Triton conv kernel 大幅劣于 cuDNN 原生 |
+| `torch.compile`（default） | 3016.8 ms | **0.12×** | 同上，与 autotune 模式无关 |
+| `channels_last`（NHWC 权重+输入） | 520.7 ms | **0.66×** | cuDNN 在此卡上选了更差的 NHWC 路径 |
+
+*CG 对比口径为 UNet+VAE 块（不含 tokenize），与 baseline 500ms 直接比较时无收益。
+
+parity：compile 两个模式 bit-exact（max diff 0.0）；channels_last max diff 0.0095（fp16 conv 路径变化，视觉无损）。
+
+VAE decode GPU 时间分解（torch.profiler，单次 decode）：
+
+| kernel | 时间 | 占比 |
+|---|---:|---:|
+| `sm86_xmma_fprop` ×12 | 101 ms | 29% |
+| `cutlass_5x_cudnn fprop` ×9 | 91 ms | 26% |
+| `nchwToNhwc`/`nhwcToNchw` ×96 | 45 ms | 13% |
+| elementwise（silu/groupnorm/add）×~155 | 69 ms | 20% |
+| `fmha` attention ×1 | 6 ms | 2% |
+| 其它 | ~35 ms | 10% |
+
+**结论：在不引入新依赖的前提下，~345 ms 是 RTX 3050 4GB Laptop 上 sd-turbo VAE decode 的硬件地板。** cuDNN 的 fp16 NCHW 隐式 gemm 已是该卡最优路径；torch.compile 和 channels_last 都实测负收益。剩余大收益选项需要拍板：
+
+1. **TAESD（tiny VAE）**：估 ~40 ms（8×），画质有损；需下载 60MB 权重 + 图像质量对比
+2. **TensorRT 编译 VAE**：估 1.5-2×，引入重依赖
+3. **维持现状**：接受 345 ms 为 Phase 2 终态
 
 ## Phase 2 conclusion + cell proposals
 

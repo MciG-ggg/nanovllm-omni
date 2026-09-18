@@ -198,6 +198,11 @@ def _run_cuda_graph(
     state = pipeline.prepare({"prompt": sd_input.prompt})
     num_steps = state.metadata["num_steps"]
 
+    # ``pipeline`` is a ``DiffusionRunner`` wrapper; the wrapped
+    # SdTurboPipeline lives at ``pipeline.pipeline`` and is what owns
+    # the scheduler.
+    inner = pipeline.pipeline
+
     def _gpu_only() -> Any:
         # Reset before each call. We share one state + one scheduler
         # across warmup + capture + replays, but:
@@ -212,8 +217,8 @@ def _run_cuda_graph(
         # "Cannot copy between CPU and CUDA tensors during CUDA graph
         # capture".
         state.step_index = 0
-        pipeline.scheduler.set_timesteps(num_steps)
-        pipeline.scheduler.timesteps = pipeline.scheduler.timesteps.pin_memory()
+        inner.scheduler.set_timesteps(num_steps)
+        inner.scheduler.timesteps = inner.scheduler.timesteps.pin_memory()
         for step in range(num_steps):
             noise_pred = pipeline.denoise_step(state, step=step, num_steps=num_steps)
             pipeline.step_scheduler(state, noise_pred)

@@ -38,7 +38,7 @@ After Bug 1 was fixed, capture ran but crashed at `v_cts.repeat_interleave(...)`
 
 - Eager CSV: `docs/perf/bench_smolvlm_a633374_eager.csv`
 - CG CSV:    `docs/perf/bench_smolvlm_a633374_cg.csv`
-- Eager trace: `docs/perf/smolvlm-2026-09-18.trace.json.gz` (in-repo path; the bench script's date-only naming means a same-day CG run would overwrite, so the CG run was redirected to `/tmp/bench_smolvlm_cg.log` only — only the eager trace needed for downstream kernel analysis).
+- Eager trace: `docs/perf/smolvlm-2026-09-18.trace.json.gz` (WSL in-repo path; 大文件不进 git).
 - Eager env: `docs/perf/smolvlm-2026-09-18.env.txt`
 
 CG speedup is largest on `medium` (7.7×) where the eager Python-level per-token loop dominates; smallest on `short` (1.7×) where warmup overhead is a larger share of total time. The pattern (per-token launch overhead being the eager bottleneck) matches the Kineto top-kernels from Phase 1: aten::linear, aten::matmul, gemv2T, aten::clone — all called once per token per layer in eager mode.
@@ -59,20 +59,19 @@ Identical decoded string. The static `s_max = max_num_blocks * block_size` upper
 
 ## Task 2 — sd-turbo / smolvla weights
 
-**weights missing, deferred.** `/mnt/d/models/` on WSL still contains only `SmolVLM-500M-Instruct`. User confirmed they'll rsync the other two caches from a local Mac download when ready; pending.
+已解决（后续同一 Phase 2 会话）：权重经 hf-mirror 下载后 rsync 到 `/mnt/d/models/`，两家的 baseline bench 已跑（见 `docs/perf/phase2-sd-turbo.md` 与 `docs/perf/bench_smolvla_a633374.csv`）。
 
-## Files on WSL
+## 产物
 
-- `/tmp/bench_smolvlm_eager.csv` — same as `docs/perf/bench_smolvlm_a633374_eager.csv`
-- `/tmp/bench_smolvlm_cg.csv` — same as `docs/perf/bench_smolvlm_a633374_cg.csv`
-- `/tmp/parity_smolvlm.py` — parity script
-- `/tmp/phase2-done.txt` — one-line result: `eager=219.251 cg=129.491 parity=OK`
+- `docs/perf/bench_smolvlm_a633374_eager.csv` / `bench_smolvlm_a633374_cg.csv`（git 内）
+- `docs/perf/smolvlm-2026-09-18.trace.json.gz` / `.env.txt`（WSL in-repo，大文件不进 git）
+- parity 结果：eager 与 CG 均输出 `' Paris.'`（short prompt，greedy，max_new_tokens=64）
 
 ## Open follow-up
 
 1. **Submodule rebase**: both submodule edits are local changes; rebasing on upstream will require re-applying. Either: (a) commit them on a fork branch and point the submodule there, or (b) patch in `nanovllm_omni/engine/stage_runner.py` instead so the submodule stays pristine. Decision needed before pushing.
 2. **`max_capture_bs` knob**: currently in code with default 8. Should become a `Config` dataclass field once the fork rebase story is settled.
 3. **CG p99 on `medium`**: jump from 676 → 1730 ms; investigate first-replay-vs-rest variance.
-4. **sd-turbo VAE decomposition** and **smolvla flow-step sweep** are still gated on weights arriving in `/mnt/d/models/`.
+4. **smolvla flow-step sweep**（VAE 分解已完成，见 `docs/perf/phase2-sd-turbo.md`）。
 
 Done-file: `eager=219.251 cg=129.491 parity=OK`.

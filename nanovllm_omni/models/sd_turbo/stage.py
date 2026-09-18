@@ -143,11 +143,10 @@ class SdTurboPipeline:
         """VAE decode → PIL Image.
 
         All color/layout conversion runs on the GPU; only the final
-        768 KB uint8 HWC buffer crosses to the host. The previous chain
-        (``cpu().permute().float().numpy()`` then ``*255.round().astype``)
-        did a fp16 D2H sync mid-decode plus ~150 ms of single-threaded
-        numpy on 786k elements — Phase 2 profiling attributed ~200 ms of
-        the 384 ms ``:vae-decode`` wall to it.
+        768 KB uint8 HWC buffer crosses to the host. Phase 2 profiling
+        (docs/perf/phase2-sd-turbo.md) showed
+        the decode wall is ~99.8% GPU kernels, so this trims the last
+        ~3 ms of CPU-side conversion, not more.
         """
         import torch
         from PIL import Image

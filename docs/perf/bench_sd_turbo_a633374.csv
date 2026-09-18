@@ -1,0 +1,2 @@
+gpu,commit,input_id,seed,wall_p50_ms,wall_p99_ms,n_runs,vram_peak_mb
+"NVIDIA GeForce RTX 3050 4GB Laptop GPU (4 GB, driver 591.86)",a633374,sd_turbo_01,42,500.634,505.059,5,3097.578

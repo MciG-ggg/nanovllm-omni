@@ -1,0 +1,4 @@
+gpu,commit,input_id,max_new_tokens,wall_p50_ms,wall_p99_ms,n_runs,vram_peak_mb
+"NVIDIA GeForce RTX 3050 4GB Laptop GPU (4 GB, driver 591.86)",a633374,smolvlm_short,64,219.251,247.143,10,2181.168
+"NVIDIA GeForce RTX 3050 4GB Laptop GPU (4 GB, driver 591.86)",a633374,smolvlm_medium,64,5180.159,5522.421,10,2181.571
+"NVIDIA GeForce RTX 3050 4GB Laptop GPU (4 GB, driver 591.86)",a633374,smolvlm_long,64,5170.739,5670.904,10,2182.693

@@ -20,7 +20,7 @@ NCU `--set basic` returns `ERR_NVGPUCTRPERM` on this WSL2 box, even as root — 
 
 ## nsys NVTX-bucketed decomposition (1 forward, warmup excluded)
 
-NVTX ranges wrap the actual components (`sd_unet_step0`, `sd_scheduler_step`, `sd_vae_decode`) per `.scratch/sd_turbo_ncu.py`.
+NVTX ranges wrap the actual components (`sd_unet_step0`, `sd_scheduler_step`, `sd_vae_decode`) in a single-shot harness that runs one warmup pass plus one annotated forward.
 
 | Range | wall | runtime events | dominant runtime API |
 |---|---:|---:|---|
@@ -78,7 +78,7 @@ Root cause of original CG failure: diffusers UNet's `get_time_embed()` does `tim
 
 **Fix**: move `scheduler.timesteps` and `scheduler.sigmas` to GPU before capture, so `.to(sample.device)` becomes a no-op. Captured only the UNet forward + VAE decode block, leaving `scheduler.step()` (which calls `.item()` on a sigma comparison) and `post_decode` (which calls `.cpu()`) outside the capture region.
 
-Harness: `.scratch/sd_turbo_cg_bench.py`. Results:
+Harness (throwaway, no longer on disk): move `scheduler.timesteps`/`sigmas` to GPU, warmup on a side stream, capture UNet+VAE only, replay 10×. Results:
 
 | mode | wall p50 | wall p99 | peak VRAM |
 |---|---:|---:|---:|
@@ -92,7 +92,7 @@ CG saves ~600 MiB VRAM (graph captures shared memory pool more efficiently than 
 
 ## post_decode 优化（Phase 2 cell 已实现）+ 归因修正
 
-实现了 GPU 侧转换链（`.scratch/sd_turbo_parity.py` 验证 786432 像素 100% bit-exact）：
+实现了 GPU 侧转换链，像素 parity 用临时脚本验证：786432 像素 100% bit-exact：：
 
 ```python
 # 旧: cpu() 后 fp32 + numpy 链
@@ -107,7 +107,7 @@ img = img.permute(1, 2, 0).to(torch.uint8).contiguous()
 arr = img.cpu().numpy()
 ```
 
-bench: 500.6 → 497.0 ms p50（**只省 3 ms**）。用 `.scratch/qvae_split.py` 重新分解 Kineto trace 后发现之前的归因是错的：
+bench: 500.6 → 497.0 ms p50（**只省 3 ms**）。把 Kineto trace 按 ``:vae-decode`` 窗口重新分解（GPU event 求和 vs annotation wall）后发现之前的归因是错的：
 
 | run | wall | GPU busy | CPU gap | D2H memcpy (GPU 时) |
 |---|---:|---:|---:|---:|
@@ -151,28 +151,20 @@ VAE decode GPU 时间分解（torch.profiler，单次 decode）：
 2. **TensorRT 编译 VAE**：估 1.5-2×，引入重依赖
 3. **维持现状**：接受 345 ms 为 Phase 2 终态
 
-## Phase 2 conclusion + cell proposals
+## 结论
 
-Phase 1's "`:vae-decode` 358ms > `:unet` 275ms" finding was real but misread. The VAE **kernels** are fast (~35 ms); the **D2H transfer + Python post-processing** is the 200+ ms cost.
+Phase 1 的 "``:vae-decode`` 358ms > ``:unet`` 275ms" 是真的，但归因经过两次修正：先误归因为 D2H memcpy（nsys runtime 事件计含等待时间），后按 ``:vae-decode`` 窗口分解 Kineto trace 实测确认 wall ≈ GPU busy（CPU gap 仅 0.7ms），**瓶颈是 VAE conv kernels 本身**。低成本 cell 全部实测后，~345 ms 为硬件地板，用户拍板 sd-turbo Phase 2 到此为止。
 
-Next cell candidates, in order of estimated payoff:
+已落地：`post_decode` GPU 侧转换链（全链路 497.0 ms p50，像素 bit-exact）；CG capture 修复路径已验证（timesteps/sigmas 上 GPU + 只 capture UNet+VAE），但无 wall 收益，未合入 bench。
 
-1. **Defer PIL conversion out of the hot path**: keep image on GPU until the consumer needs PIL. `post_decode` returns `DiffusionOutput(images=[<gpu tensor or uint8 cuda>], ...)` and only `.cpu()`s when the caller actually wants PIL. Saves ~200 ms on the inference path if the consumer is another GPU stage (not our case for the bench, but for real VLA pipelines).
-2. **Pinned-memory D2H + async overlap**: `image` is `[1, 3, 512, 512]` fp16 = 1.5 MB. With `cudaHostAlloc`-pinned staging buffer + `cudaMemcpyAsync` on a side stream, the D2H can overlap with the next prompt's tokenize. Marginal here (no next prompt in bench), relevant for serving.
-3. **Reduce Python overhead in `post_decode`**: fuse the `clamp + permute + float + numpy + *255 + round + astype` chain into a single GPU kernel (`torch.clamp_` + `.to(torch.uint8)` on GPU, then D2H only the final uint8 buffer — 768 KB instead of 1.5 MB, and no fp32 staging). Saves ~50 ms of CPU work and shrinks the D2H transfer by 2×.
-4. **CG on a non-diffusers UNet/VAE forward**: would need a fused kernel wrapper or rewrite — large effort, defer.
+## 原始产物（WSL，未进 git）
 
-## Files on WSL
-
-- `/tmp/sd-turbo-ncu.nsys-rep` — nsys trace with NVTX ranges (sd_unet_step0, sd_scheduler_step, sd_vae_decode)
-- `/tmp/sd-turbo-ncu.sqlite` — parsed
-- `/tmp/qnsys_sd.py` — NVTX-bucket parser
-- `/tmp/qkineto.py` — Kineto top-kernel parser
-- `docs/perf/bench_sd_turbo_a633374.csv` — baseline
-- `docs/perf/bench_sd_turbo_cg.csv` — CG-attempted (fell back to one-shot)
-- `docs/perf/sd-turbo-2026-09-18.trace.json.gz` — Kineto trace (in-repo)
+- `/home/mcig/docs/perf/` 下的 nsys/trace 大文件按惯例留在 WSL 本地
+- 本文档自包含所有结论；一次性调试脚本（NCU/NVTX harness、CG bench cell、parity 检查、Kineto 分解）已清理，关键代码片段都在正文里
+- `docs/perf/bench_sd_turbo_a633374.csv` — baseline（git 内）
+- `docs/perf/sd-turbo-2026-09-18.trace.json.gz` — Kineto trace（WSL in-repo，大文件不进 git）
 
 ## Open follow-up
 
-1. Decide if "defer PIL out of hot path" is the Phase 2 cell to implement (proposed cell 1 above).
-2. Colab T4 NCU re-run for SOL metrics — WSL can't do it.
+1. Colab T4 NCU re-run for SOL metrics — WSL can't do it.
+2. 若后续需要 sd-turbo 再提速：TAESD（~8×，画质换）或 TensorRT（~1.5-2×，重依赖）需要用户拍板。

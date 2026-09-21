@@ -21,6 +21,8 @@ from nanovllm_omni.outputs import AudioPayload
 
 
 class FakeMimi:
+    # ponytail: a parallel ``_FakeMimi`` lives in tests/test_optim_bench.py;
+    # merge on third user.
     def __init__(self) -> None:
         self.input_shape: tuple[int, ...] | None = None
 

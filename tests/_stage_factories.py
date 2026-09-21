@@ -104,19 +104,29 @@ def bridge_process_input(payload: Any, prompt: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Capturing slot: shared single state holder for ``capturing_simple``
+# Capture slots: shared state holders for the tuple-registered factories below.
+# Each slot is ``(list, reset, snapshot)`` -- the factories write to the list,
+# tests call reset/snapshot around the operation under test.
 # ---------------------------------------------------------------------------
 
-_captures: list[Any] = []
-_factory_observations: list[tuple[Any, Any]] = []
+
+def _make_slot():
+    """Build one capture slot: a backing list plus paired reset/snapshot closures."""
+    items: list = []
+
+    def reset() -> None:
+        items.clear()
+
+    def snapshot() -> list:
+        return list(items)
+
+    return items, reset, snapshot
 
 
-def reset_factory_observations() -> None:
-    _factory_observations.clear()
-
-
-def get_factory_observations() -> list[tuple[Any, Any]]:
-    return list(_factory_observations)
+_captures, reset_captures, get_captures = _make_slot()
+_factory_observations, reset_factory_observations, get_factory_observations = _make_slot()
+_log, reset_log, get_log = _make_slot()
+_diffusion_log, reset_diffusion_log, get_diffusion_log = _make_slot()
 
 
 def observing_factory(deploy: Any, args: Any) -> Any:
@@ -126,16 +136,6 @@ def observing_factory(deploy: Any, args: Any) -> Any:
         return payload
 
     return forward
-
-
-def reset_captures() -> None:
-    """Reset the capturing slot before a test runs."""
-    _captures.clear()
-
-
-def get_captures() -> list[Any]:
-    """Snapshot the capturing slot after a test runs."""
-    return list(_captures)
 
 
 def capturing_simple(deploy: Any, args: Any) -> Any:
@@ -150,21 +150,6 @@ def capturing_simple(deploy: Any, args: Any) -> Any:
         return payload
 
     return forward
-
-
-# ---------------------------------------------------------------------------
-# Logged slot: shared per-stage order log for the multi-stage runner test
-# ---------------------------------------------------------------------------
-
-_log: list[tuple[str, Any, Any]] = []
-
-
-def reset_log() -> None:
-    _log.clear()
-
-
-def get_log() -> list[tuple[str, Any, Any]]:
-    return list(_log)
 
 
 def logged_thinker(deploy: Any, args: Any) -> Any:
@@ -189,21 +174,6 @@ def logged_code2wav(deploy: Any, args: Any) -> Any:
         return f"{payload}->code2wav"
 
     return forward
-
-
-# ---------------------------------------------------------------------------
-# Diffusion slot: shared state for the single-stage diffusion test
-# ---------------------------------------------------------------------------
-
-_diffusion_log: list[tuple[str, Any, Any]] = []
-
-
-def reset_diffusion_log() -> None:
-    _diffusion_log.clear()
-
-
-def get_diffusion_log() -> list[tuple[str, Any, Any]]:
-    return list(_diffusion_log)
 
 
 class _LoggedDiffusionPipeline:

@@ -10,13 +10,19 @@ Covers the four methods added to mirror vllm-omni's ``OmniRequestOutput``:
 
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 
 import tests.test_smolvla as _smolvla  # noqa: F401  (smolvla stage import guard)
 from nanovllm_omni.outputs import (  # noqa: E402
     AudioPayload,
+    ImageArtifact,
     MultimodalPayload,
     OmniRequestOutput,
+    OutputModality,
+    TextArtifact,
 )
 
 
@@ -30,9 +36,6 @@ def test_to_dict_audio_pipeline() -> None:
     assert d["request_id"] == "r1"
     assert "multimodal_output" in d
     # bytes are serialized to base64 so the dict survives json.dumps.
-    import base64
-    import json
-
     assert base64.b64decode(d["multimodal_output"]["audio"]) == b"RIFF...."
     json.dumps(d)  # must not raise on bytes
 
@@ -78,8 +81,6 @@ def test_num_images_diffusion() -> None:
 
 def test_output_modality_flags() -> None:
     """TK-018: OutputModality mirrors vllm-omni's flag enum + aliases."""
-    from nanovllm_omni.outputs import OutputModality
-
     assert OutputModality.from_string("audio") == OutputModality.AUDIO
     assert OutputModality.from_string("speech") == OutputModality.AUDIO
     assert OutputModality.from_string("pixels") == OutputModality.IMAGE
@@ -87,8 +88,6 @@ def test_output_modality_flags() -> None:
     assert OutputModality.from_string("text,image") == (OutputModality.TEXT | OutputModality.IMAGE)
     assert OutputModality.from_string("") == OutputModality.TEXT
     assert OutputModality.from_string(None) == OutputModality.TEXT
-    import pytest
-
     with pytest.raises(ValueError, match="Unknown modality"):
         OutputModality.from_string("hologram")
 
@@ -124,8 +123,6 @@ def test_from_pipeline_double_tracks_transcript_in_custom_output() -> None:
     d = out.to_dict()
     assert d["custom_output"] == {"transcript": "你好,我是 MiniMind。"}
     # The audio seam stays untouched -- transcript is a side-channel only.
-    import base64
-
     assert base64.b64decode(d["multimodal_output"]["audio"]) == b"RIFF...."
     assert "audio_metadata" in d["multimodal_output"]
 
@@ -179,8 +176,6 @@ def test_from_stage_output_plain_object() -> None:
 def test_text_artifact_roundtrip_with_token_ids() -> None:
     """TextArtifact.text survives to_dict as a plain string;
     ``token_ids`` rides along in the metadata sidecar (TK-015)."""
-    from nanovllm_omni.outputs import TextArtifact
-
     out = OmniRequestOutput(
         multimodal_output=MultimodalPayload.from_dict(
             {"text": TextArtifact(text="hello world", token_ids=[101, 202, 303])}
@@ -189,15 +184,11 @@ def test_text_artifact_roundtrip_with_token_ids() -> None:
     d = out.to_dict()
     assert d["multimodal_output"]["text"] == "hello world"
     assert d["multimodal_output"]["text_metadata"] == {"token_ids": [101, 202, 303]}
-    import json
-
     json.dumps(d)  # must not raise
 
 
 def test_text_artifact_without_token_ids_omits_metadata() -> None:
     """``TextArtifact.token_ids is None`` -> no ``text_metadata`` sidecar."""
-    from nanovllm_omni.outputs import TextArtifact
-
     out = OmniRequestOutput(
         multimodal_output=MultimodalPayload.from_dict({"text": TextArtifact(text="hi")})
     )
@@ -208,15 +199,9 @@ def test_text_artifact_without_token_ids_omits_metadata() -> None:
 
 def test_image_artifact_roundtrip_emits_png_metadata() -> None:
     """ImageArtifact serializes as base64 PNG + width/height metadata."""
-
-    from nanovllm_omni.outputs import ImageArtifact
-
     payload = ImageArtifact(png_bytes=b"\x89PNG\r\n\x1a\nfake-bytes", width=64, height=48)
     out = OmniRequestOutput(multimodal_output=MultimodalPayload.from_dict({"image": payload}))
     d = out.to_dict()
-    import base64
-    import json
-
     decoded = base64.b64decode(d["multimodal_output"]["image"])
     assert decoded == b"\x89PNG\r\n\x1a\nfake-bytes"
     assert d["multimodal_output"]["image_metadata"] == {
@@ -231,8 +216,6 @@ def test_image_artifact_from_pil_roundtrip() -> None:
     """``ImageArtifact.from_pil`` encodes a PIL image and round-trips dims."""
     pytest.importorskip("PIL")
     from PIL import Image  # noqa: F401
-
-    from nanovllm_omni.outputs import ImageArtifact
 
     img = Image.new("RGB", (8, 4), color="red")
     artifact = ImageArtifact.from_pil(img)
@@ -250,8 +233,6 @@ def test_image_artifact_from_pil_roundtrip() -> None:
 
 def test_image_artifact_post_init_validation() -> None:
     """Width/height must be positive; png_bytes must be non-empty."""
-    from nanovllm_omni.outputs import ImageArtifact
-
     with pytest.raises(ValueError, match="positive"):
         ImageArtifact(png_bytes=b"x", width=0, height=1)
     with pytest.raises(ValueError, match="positive"):

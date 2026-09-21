@@ -8,6 +8,8 @@ MiniMind-O weights.
 from __future__ import annotations
 
 import io
+import json
+import tempfile
 import time
 import wave
 from dataclasses import dataclass
@@ -58,6 +60,8 @@ class _FakeAudioOut:
 
 
 class _FakeMimi:
+    # ponytail: a parallel ``FakeMimi`` lives in tests/test_code2wav_stage.py;
+    # merge on third user.
     def decode(self, codes: Any) -> _FakeAudioOut:  # noqa: D401
         return _FakeAudioOut([0.1, -0.2, 0.3, -0.4] * 24)
 
@@ -209,8 +213,6 @@ def test_run_one_full_records_per_stage_breakdown():
     must extract it, map ``thinker`` onto ``generate_ms`` and ``code2wav``
     onto ``decode_ms``, and surface the full breakdown via ``stage_ms``.
     """
-    import json
-
     from nanovllm_omni.bench import run_one_full
     from nanovllm_omni.outputs import AudioPayload, MultimodalPayload
 
@@ -342,9 +344,6 @@ def test_run_result_as_csv_row_has_detail_columns():
 
 def test_parse_kineto_trace_groups_kernels_under_stage_events():
     """parse_kineto_trace returns one StageProfile per record_function stage."""
-    import json
-    import tempfile
-
     from nanovllm_omni.bench.trace import parse_kineto_trace
 
     events = [

@@ -73,8 +73,10 @@ def test_runner_visits_stages_in_order():
             ),
         ]
     )
+
     runner = PipelineRunner(pipeline, _make_deploy(), _make_args())
     out, stage_ms = runner.run("hello")
+
     assert out == "hello->thinker->talker->code2wav"
     assert set(stage_ms) == {"thinker", "talker", "code2wav"}
     assert [entry[0] for entry in fac.get_log()] == ["thinker", "talker", "code2wav"]
@@ -241,8 +243,10 @@ def test_runner_passes_mode_and_stage_resources_to_factory():
             ),
         ),
     )
+
     PipelineRunner(pipeline, deploy, _make_args()).run_payload("hello")
     observed_deploy, observed_args = fac.get_factory_observations()[0]
+
     assert observed_args.max_num_batched_tokens == 512
     assert observed_args.max_num_seqs == 2
     assert observed_args.gpu_memory_utilization == 0.6

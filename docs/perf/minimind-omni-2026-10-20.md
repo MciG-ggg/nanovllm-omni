@@ -97,6 +97,34 @@ The rename list also fires on the real names:
 maps the substring `k_proj` to `qkv_proj`, and `spk_proj` contains it,
 so the rename is what keeps the speaker projection loadable.
 
+## Shapes vs. the repository's model classes (measured 2026-10-21)
+
+The tensor shapes of the checkpoint match the constructors of
+`MiniMindThinker` and `MiniMindTalker` in the repository:
+
+| checkpoint key | shape | repository parameter |
+|---|---|---|
+| `model.embed_tokens.weight` | (6400, 768) | `VocabParallelEmbedding(vocab_size=6400, hidden_size=768)` |
+| `model.layers.N.self_attn.q_proj.weight` | (768, 768) | 8 heads x head_dim 96 |
+| `model.layers.N.self_attn.k_proj.weight` | (384, 768) | 4 kv heads x head_dim 96 |
+| `model.layers.N.self_attn.{q,k}_norm.weight` | (96,) | head_dim 96 |
+| `model.layers.N.mlp.{gate,up}_proj.weight` | (2432, 768) | `intermediate_size=2432` |
+| `model.layers.N.mlp.down_proj.weight` | (768, 2432) | same width |
+| `model.norm.weight` | (768,) | `RMSNorm(hidden_size)` |
+| `lm_head.weight` | (6400, 768) | `ParallelLMHead(vocab_size=6400, hidden_size=768)`, tied to the embedding |
+| `talker.layers.N.*` | same geometry | the talker reuses the thinker MLP width |
+| `talker.lm_head.base.weight` | (2112, 768) | `Linear(talker_hidden=768, audio_vocab=2112)` |
+| `talker.lm_head.adapters.N.{0,2}.weight` | (256, 768), (2112, 256) | `Linear(768, 256)` then `Linear(256, 2112)`, rank 256 |
+| `talker.embed_tokens.base.weight` | (2112, 768) | `Embedding(audio_vocab=2112, talker_hidden=768)` |
+| `talker.embed_tokens.adapters.N.{0,2}.weight` | (2112, 256), (768, 256) | `Embedding(2112, 256)` then `Linear(256, 768)` |
+| `talker.codec_proj.{0,2}.{weight,bias}` | (768, 768), (768,) | `Linear(768, 768)` twice, with bias |
+| `talker.codec_proj.3.weight` | (768,) | the `RMSNorm` at index 3 of the `Sequential` |
+| `talker.embed_proj.{0,2}.{weight,bias}` | (768, 768), (768,) | `Linear(text_hidden, text_hidden)` then `Linear(text_hidden, talker_hidden)` |
+| `talker.spk_proj.weight` | (768, 192) | `Linear(spk_emb=192, talker_hidden=768)`, renamed to `speaker_proj` |
+
+The layer counts also agree: 88 thinker layer tensors are 11 per layer
+x 8 layers, and 44 talker layer tensors are 11 per layer x 4 layers.
+
 Still open: the fork's runtime loader mapping these names onto the
 parameters above. That check needs the fork runtime and a GPU.
 

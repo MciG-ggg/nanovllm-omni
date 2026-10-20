@@ -25,6 +25,13 @@ offline bundle pattern shown in
 `examples/offline_inference/minimind_o/README.md` and verify checksums
 out-of-band.
 
+The MiniMind-O pipeline path loads no hub remote code. The repo
+registers its own `minimind-o` config class
+(`nanovllm_omni/models/minimind_omni/hf_config.py`), and the thinker,
+the talker, and the tokenizer all run without `trust_remote_code`. The
+vendor bundle loader in `models/minimind_omni/bundle.py` still loads the
+hub's model class and still needs `trust_remote_code=True`.
+
 ## Disclosure timeline
 
 We aim to acknowledge new reports within 7 days and to publish a fix

@@ -75,6 +75,7 @@ This is unrelated to performance — it's the fork-multi-runner adaptation.
 | `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes invoked by the factory | MiniMind-O only |
 | `models/minimind_omni/stage_runner.py` | MiniMind-O decode recipe (`decode_minimind`, `recapture_bridge_minimind`) composed on `engine.stage_runner.StageRunner` | MiniMind-O only |
 | `models/minimind_omni/stage_processors.py` | `ThinkerStageOutput` / `TalkerInputPayload` / `Code2WavInputPayload` — frozen dataclasses + pure-function converters | MiniMind-O only |
+| `models/minimind_omni/hf_config.py` | `MiniMindOConfig` — the repo's own config class for `model_type: minimind-o`; registered so the hub's `auto_map` file never runs | MiniMind-O only |
 | `models/smolvlm/{smolvlm.py, stage.py, pipeline.py}` | Complete SmolVLM (`SigLIP` vision tower + fork-style `SmolLM2` text stack + connector), prefill/decode stage, single-stage `LLM_AR` pipeline | SmolVLM only |
 | `models/sd_turbo/{stage.py, pipeline.py}` | SD-Turbo 1-step image generation as a `DIFFUSION`-kind stage implementing the 4-method contract (`prepare_encode` / `denoise_step` / `step_scheduler` / `post_decode`) | SD-Turbo only |
 | `models/smolvla/{vlm_stage.py, action_stage.py, stage_processors.py, pipeline.py, policy.py}` | Two-stage VLA: `vlm` (`LLM_AR`) → bridge payload → `action` (`DIFFUSION`, flow-matching Euler over the action expert) | SmolVLA only |
@@ -163,7 +164,7 @@ time.
 4. `config/registry.py` and `config/params.py`
 5. `models/minimind_omni/pipeline.py`
 6. `models/minimind_omni/bundle.py`, `thinker.py`, `talker.py`, `code2wav.py`,
-   `stage.py`, `stage_runner.py`, `stage_processors.py`
+   `stage.py`, `stage_runner.py`, `stage_processors.py`, `hf_config.py`
 7. `models/sd_turbo/{stage,pipeline}.py` and `diffusion/{interface,runner}.py`
 8. `models/smolvlm/{smolvlm,stage,pipeline}.py`
 9. `models/smolvla/{vlm_stage,action_stage,stage_processors,pipeline,policy}.py`

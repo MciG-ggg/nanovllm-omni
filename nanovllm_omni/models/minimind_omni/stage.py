@@ -43,6 +43,7 @@ from nanovllm_omni.engine.stage_runner import (
     get_stage_config,
     stage_kwargs_from_args,
 )
+from nanovllm_omni.models.minimind_omni.hf_config import register_minimind_config
 from nanovllm_omni.models.minimind_omni.stage_runner import (
     decode_minimind,
     recapture_bridge_minimind,
@@ -253,10 +254,14 @@ def _talker_only_dir(src: str) -> str:
 
 
 def _load_tokenizer(model_path: str) -> Any:
-    """Load a HuggingFace tokenizer from the model directory."""
+    """Load a HuggingFace tokenizer from the model directory.
+
+    The MiniMind snapshot ships a plain ``PreTrainedTokenizerFast``, so
+    no remote code is involved.
+    """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
 
 
 class ThinkerStage:
@@ -282,10 +287,15 @@ class ThinkerStage:
         # bench harness's comparison knob (ADR-0005 keeps it out of
         # DeployConfig).
         extra = dict(getattr(args, "extra", None) or {})
+        # The local config class replaces the hub's ``auto_map`` file, so
+        # no remote code runs and the fork Config can ask for none.
+        register_minimind_config()
+        stage_kwargs = stage_kwargs_from_args(args)
+        stage_kwargs["trust_remote_code"] = False
         self.config = get_stage_config(
             "thinker",
             model_path=_resolve_model_path(args, stage="thinker"),
-            **stage_kwargs_from_args(args),
+            **stage_kwargs,
         )
         self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", False)
         # Ensure NCCL process group exists before ModelRunner tries to init.
@@ -435,10 +445,11 @@ class TalkerStage:
         model_class = self.model_class or MiniMindTalker
         model_path = _resolve_model_path(self.args, stage="talker")
 
-        # Build the fork Config with trust_remote_code so MiniMind's
-        # ``auto_map`` config is loadable; the resulting ``hf_config`` is
-        # what the talker model class consumes.
-        cfg = Config(model=model_path, trust_remote_code=True)
+        # Build the fork Config. The local config class replaces the
+        # hub's ``auto_map`` file, so the fork loads no remote code; the
+        # resulting ``hf_config`` is what the talker model class consumes.
+        register_minimind_config()
+        cfg = Config(model=model_path, trust_remote_code=False)
         hf_cfg = cfg.hf_config
         self._config = hf_cfg
 

@@ -53,6 +53,9 @@ class OmniEngineArgs:
     max_num_batched_tokens: int | None = None
     dtype: str | None = None
     tensor_parallel_size: int = 1
+    # The MiniMind-O pipeline path ignores this flag: the repo registers
+    # its own ``minimind-o`` config class, so the hub's ``auto_map`` file
+    # never runs (see ``models/minimind_omni/hf_config.py``).
     trust_remote_code: bool = True
     # Lazy default: ``_default_device()`` resolves at OmniEngineArgs() time
     # to "cuda" if torch sees a GPU, else "cpu". Keep the annotation as

@@ -111,6 +111,42 @@ def test_generate_sampling_params_list_per_request() -> None:
     assert runner.calls[1][1] is sps[1]
 
 
+def test_generate_positional_list_is_per_request() -> None:
+    """The second positional argument is ``sampling_params_list``.
+
+    Upstream ``vllm-omni`` takes one SamplingParams per prompt in that
+    slot, so a list passed positionally must not be applied to every
+    prompt.
+    """
+    runner = _RunnerStub()
+    omni = _make_omni(runner)
+    sps = [SamplingParams(temperature=0.5), SamplingParams(temperature=0.9)]
+    omni.generate(["a", "b"], sps)
+    assert runner.calls[0][1] is sps[0]
+    assert runner.calls[1][1] is sps[1]
+
+
+def test_generate_sampling_params_list_accepts_one_object() -> None:
+    """``sampling_params_list`` also takes a bare object (upstream shape)."""
+    runner = _RunnerStub()
+    omni = _make_omni(runner)
+    sp = SamplingParams(temperature=0.5)
+    omni.generate(["a", "b"], sampling_params_list=sp)
+    assert runner.calls[0][1] is sp
+    assert runner.calls[1][1] is sp
+
+
+def test_generate_rejects_both_param_arguments() -> None:
+    runner = _RunnerStub()
+    omni = _make_omni(runner)
+    with pytest.raises(ValueError):
+        omni.generate(
+            ["a"],
+            sampling_params=SamplingParams(),
+            sampling_params_list=[SamplingParams()],
+        )
+
+
 def test_async_generate_unchanged_shape() -> None:
     """AsyncOmni still yields an async iterator."""
     from nanovllm_omni.entrypoints.async_omni import AsyncOmni

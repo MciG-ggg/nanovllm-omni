@@ -66,43 +66,51 @@ class Omni(OmniBase):
 
     def _collect_kwargs(
         self,
-        sampling_params_list: Iterable[SamplingParams] | None,
+        sampling_params_list: SamplingParams | Iterable[SamplingParams] | None,
     ) -> list[SamplingParams | None]:
         """Materialize per-prompt sampling overrides.
 
-        Accepts either a sequence (``sampling_params_list``, vllm-omni shape)
-        or a single ``sampling_params``; returns one entry per prompt with
+        Accepts a sequence (``sampling_params_list``, vllm-omni shape), a
+        single ``SamplingParams`` or None; returns one entry per prompt with
         ``None`` meaning "rely on deploy defaults".
         """
         if sampling_params_list is None:
             return [None]
+        if isinstance(sampling_params_list, SamplingParams):
+            return [sampling_params_list]
         return list(sampling_params_list)
 
     def generate(
         self,
         prompts: OmniPromptType | Iterable[OmniPromptType],
-        sampling_params: SamplingParams | None = None,
+        sampling_params_list: SamplingParams | Iterable[SamplingParams] | None = None,
         use_tqdm: bool = True,  # accepted for vllm-omni parity; no-op corpus is small
         *,
-        sampling_params_list: Iterable[SamplingParams] | None = None,
+        sampling_params: SamplingParams | None = None,
         py_generator: bool = False,
     ) -> Any:
         """Generate for one or more prompts.
 
         vllm-omni parity: returns ``list[OmniRequestOutput]`` by default, or
         a lazy ``Generator[OmniRequestOutput]`` with ``py_generator=True``
-        (each execution happens on iteration, in submission order). The single
-        ``sampling_params`` applies to every prompt; ``sampling_params_list``
-        gives per-prompt overrides (must match prompt count when non-empty).
+        (each execution happens on iteration, in submission order). The
+        second positional argument is ``sampling_params_list``: it takes one
+        SamplingParams per prompt, or a single SamplingParams that applies to
+        every prompt. ``sampling_params`` is the local alias for that single
+        object.
         """
+        if sampling_params is not None and sampling_params_list is not None:
+            raise ValueError("pass sampling_params or sampling_params_list, not both")
         prompts_list = _as_list(prompts)
-        params_list = self._collect_kwargs(sampling_params_list or [sampling_params])
+        params_list = self._collect_kwargs(
+            sampling_params_list if sampling_params_list is not None else sampling_params
+        )
         if len(params_list) < len(prompts_list):
             params_list = params_list * len(prompts_list) if len(params_list) == 1 else params_list
 
         def _iter() -> Generator[OmniRequestOutput, None, None]:
             for idx, prompt in enumerate(prompts_list):
-                sp = params_list[idx] if idx < len(params_list) else sampling_params
+                sp = params_list[idx] if idx < len(params_list) else None
                 yield self._one(prompt, sp)
 
         if py_generator:

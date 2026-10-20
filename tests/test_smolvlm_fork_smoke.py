@@ -112,23 +112,35 @@ def test_smolvlm_connector_shape():
     connector = SmolVLMConnector(config)
     # ``modality_projection`` is a wrapper; the actual Linear lives at
     # ``modality_projection.proj`` so the HF loader can land weights
-    # at ``model.connector.modality_projection.proj.{weight,bias}``.
+    # at ``model.connector.modality_projection.proj.weight``.
     assert hasattr(connector, "modality_projection")
     proj = connector.modality_projection.proj
     assert isinstance(proj, torch.nn.Linear)
     assert proj.in_features == config.vision_config.hidden_size * (config.scale_factor**2)
     assert proj.out_features == config.text_config.hidden_size
+    # The HF checkpoint stores no bias, so the Linear must not have one.
+    assert proj.bias is None
 
 
 def test_smolvlm_connector_pure_linear():
-    """Connector holds no fork state (no paged-KV / triton dep)."""
+    """Connector holds no fork state (no paged-KV / triton dep).
+
+    Mirrors HF: the raw SigLIP features go through the pixel shuffle
+    (which merges ``scale_factor**2`` patches per token) and then the
+    projection, so the sequence shrinks by ``scale_factor**2``.
+    """
     config = _mock_smolvlm_config()
     connector = SmolVLMConnector(config)
     # Smoke: forward on random features returns right shape, runs on CPU
     # without pulling triton (fork dependency stays out of vision path).
-    feats = torch.randn(2, 16, config.vision_config.hidden_size * (config.scale_factor**2))
+    seq = 16
+    feats = torch.randn(2, seq, config.vision_config.hidden_size)
     out = connector(feats)
-    assert out.shape == (2, 16, config.text_config.hidden_size)
+    assert out.shape == (
+        2,
+        seq // (config.scale_factor**2),
+        config.text_config.hidden_size,
+    )
 
 
 def test_pipeline_kind_is_llm_ar():

@@ -280,12 +280,11 @@ class SmolLM2ForCausalLM(nn.Module):
 class SmolVLMConnector(nn.Module):
     """Vision dim → text dim projection (one-shot, no fork building blocks).
 
-    SmolVLM-500M uses ``modality_projection = GeLU + Linear`` after a
-    pixel-shuffle step that merges spatial patches; we apply the
-    shuffle on the stage side (see ``stage.py``) and keep this module
-    linear-only. The submodule name ``modality_projection`` (an
-    ``nn.Sequential`` of GeLU + Linear) mirrors HF checkpoint key
-    ``model.connector.modality_projection.0/1.*``.
+    Mirrors HF ``SmolVLMConnector``: a pixel shuffle that merges
+    ``scale_factor**2`` neighbouring patches, then a bias-free Linear
+    at ``modality_projection.proj``. The HF checkpoint stores only
+    ``model.connector.modality_projection.proj.weight``, so the
+    projection has no bias and no activation.
     """
 
     def __init__(self, config) -> None:
@@ -295,14 +294,32 @@ class SmolVLMConnector(nn.Module):
         t_dim = config.text_config.hidden_size
         self.scale_factor = scale_factor
         self.text_dim = t_dim
-        # Single Linear so the loader finds the HF key at
-        # ``modality_projection.proj.{weight,bias}``. The HF GeLU is
-        # folded into the stage's connector call (see stage.py).
-        self.modality_projection = _ProjWrapper(v_dim * (scale_factor**2), t_dim, bias=True)
+        self.modality_projection = _ProjWrapper(v_dim * (scale_factor**2), t_dim, bias=False)
+
+    @staticmethod
+    def pixel_shuffle(x: torch.Tensor, scale_factor: int = 2) -> torch.Tensor:
+        """Merge neighbouring patches; same layout as HF's shuffle.
+
+        ``[B, seq, D]`` -> ``[B, seq / scale_factor**2, D * scale_factor**2]``.
+        """
+        bsz, seq, embed_dim = x.size()
+        height = width = int(seq**0.5)
+        x = x.view(bsz, height, width, embed_dim)
+        x = x.view(bsz, height, int(width / scale_factor), embed_dim * scale_factor)
+        x = x.permute(0, 2, 1, 3)
+        x = x.reshape(
+            bsz,
+            int(width / scale_factor),
+            int(height / scale_factor),
+            embed_dim * (scale_factor**2),
+        )
+        x = x.permute(0, 2, 1, 3)
+        return x.reshape(bsz, int(seq / (scale_factor**2)), embed_dim * (scale_factor**2))
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
-        """image_features: [num_patches_after_shuffle, v_dim * scale_factor**2]"""
-        return self.modality_projection(image_features)
+        """image_features: [B, num_patches, v_dim] (raw SigLIP features)."""
+        shuffled = self.pixel_shuffle(image_features, self.scale_factor)
+        return self.modality_projection(shuffled)
 
 
 class _ProjWrapper(nn.Module):
@@ -311,10 +328,10 @@ class _ProjWrapper(nn.Module):
     SmolVLM's HF connector stores the actual Linear at
     ``modality_projection.proj``. The wrapper above calls this with
     a child Linear so the loader can land weights at
-    ``model.connector.modality_projection.proj.{weight,bias}``.
+    ``model.connector.modality_projection.proj.weight``.
     """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+    def __init__(self, in_features: int, out_features: int, bias: bool = False) -> None:
         super().__init__()
         self.proj = nn.Linear(in_features, out_features, bias=bias)
 

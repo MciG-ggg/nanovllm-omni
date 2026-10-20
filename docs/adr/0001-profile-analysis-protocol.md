@@ -7,7 +7,7 @@ We extend the minimind-omni profile methodology (Kineto + nsys on WSL RTX 3050, 
 
 ## Protocol (4 phases per model)
 
-1. **Phase 1 -- Baseline profile** (eager mode, no CUDA Graph, no fusion patches). Output: per-stage wall + top-kernel list (Kineto) + ncu SOL (T4).
+1. **Phase 1 -- Baseline profile** (eager mode, no CUDA Graph). Output: per-stage wall + top-kernel list (Kineto) + ncu SOL (T4).
 2. **Phase 2 -- Bottleneck identification + cell design** (human review of Phase 1; cells targeting the bottleneck type).
 3. **Phase 3 -- Wall-clock parity** vs `hf.generate` / `diffusers` reference. Always runs after Phase 2.
 4. **Phase 4 -- Numerical parity** (token / pixel / action diff vs reference). On demand -- only when Phase 3 shows suspicious deviation.
@@ -56,7 +56,7 @@ Phase 1 已在 WSL RTX 3050 4GB 上为三个模型完成重跑，并使用 `prof
 
 ## Consequences
 
-- Each model runs Phase 1 first and only -- no optimization work (CUDA Graph capture, fusion patches, etc.) for any of the three models until the profile identifies a bottleneck. Honors the project's "do not write unmeasured optimizations" rule.
+- Each model runs Phase 1 first and only -- no optimization work (CUDA Graph capture, etc.) for any of the three models until the profile identifies a bottleneck. Honors the project's "do not write unmeasured optimizations" rule.
 - Three models can run Phase 1 in parallel (no cross-model data dependency); Phase 2 happens per-model after Phase 1.
 - Lock-in cost is real: any change to the protocol (cell matrix timing, merging phases, dropping the per-model NVTX schema) requires a new ADR.
 

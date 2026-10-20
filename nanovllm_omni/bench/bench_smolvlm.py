@@ -11,8 +11,8 @@ Three prompt lengths (short / medium / long) isolate prefill vs decode
 cost split.
 
 See ADR 0001 for the 4-phase protocol. Phase 1 only: no CUDA Graph, no
-fusion patches, no per-stage NVTX markers yet -- Phase 2 cell design
-follows the bottleneck finding from this profile.
+per-stage NVTX markers yet -- Phase 2 cell design follows the bottleneck
+finding from this profile.
 """
 
 from __future__ import annotations

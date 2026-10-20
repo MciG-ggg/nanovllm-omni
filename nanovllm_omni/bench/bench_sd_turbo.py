@@ -6,8 +6,8 @@ plus a per-run Kineto trace to ``docs/perf/sd-turbo-<date>.trace.json.gz``
 and an env snapshot at ``docs/perf/sd-turbo-<date>.env.txt``.
 
 See ADR 0001 for the 4-phase protocol. This file implements Phase 1
-only: no CUDA Graph, no fusion patches, no per-stage NVTX markers yet --
-Phase 2 cell design follows the bottleneck finding from this profile.
+only: no CUDA Graph, no per-stage NVTX markers yet -- Phase 2 cell
+design follows the bottleneck finding from this profile.
 """
 
 from __future__ import annotations

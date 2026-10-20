@@ -249,6 +249,39 @@ tensor references with zero serialization and zero IPC.
 For request-level parallelism on the same GPU, use the in-process
 batched runner (`examples/offline_inference/minimind_o/batched.py`,
 verified by `tests/test_batched_generation.py` — Q10a).
+
+### Fork architecture: `third_party/nano-vllm`
+
+The AR-shaped stages (MiniMind-O thinker + talker, SmolVLM, the vlm
+half of SmolVLA) run on top of a vendored fork of
+[`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm),
+installed as an editable dependency under `third_party/nano-vllm/` (see
+`pyproject.toml` `[tool.uv.sources]`). The fork provides the
+vLLM-style paged-KV decoder and CUDA-Graph capture path —
+`nanovllm.engine.model_runner.ModelRunner`,
+`nanovllm.layers.attention.Attention` (with the `store_kvcache`
+Triton kernel), `nanovllm.layers.linear.QKVParallelLinear` /
+`MergedColumnParallelLinear` / `RowParallelLinear`,
+`nanovllm.layers.layernorm.RMSNorm`, `nanovllm.layers.rotary_embedding.get_rope`,
+`nanovllm.layers.activation.SiluAndMul`,
+`nanovllm.layers.embed_head.{ParallelLMHead, VocabParallelEmbedding}`,
+`nanovllm.layers.sampler.Sampler`, plus the module-level
+`nanovllm.utils.context.Context` the fork `Attention` reads at every
+forward. The fork's text-only `Qwen3ForCausalLM`, `LLMEngine`,
+`Scheduler`, and `SamplingParams` are **not** used — `OmniBase`,
+`PipelineRunner`, and our own dataclasses replace them.
+
+The performance stack (fused QKV / fused gate-up, fused RMSNorm,
+fused RoPE, paged-KV attention, CUDA-Graph capture) lives in
+`nanovllm.layers.*` as proper `nn.Module` subclasses at construction
+time, not as runtime monkey-patches on HF model classes. The
+only runtime monkey-patch in the codebase is
+`engine/stage_runner.py::_ensure_dist`, which adapts
+`dist.init_process_group` so two `ModelRunner` instances can share
+one Python process; it is unrelated to performance. Diffusion
+stages (SD-Turbo, the action half of SmolVLA) bypass the fork
+entirely and use a local 4-method contract driven by
+`nanovllm_omni/diffusion/runner.py::DiffusionRunner`.
 Multi-card, per-stage subprocess isolation, tensor-parallel, and
 pipeline-parallel schedulers are intentionally out of scope; if
 any are added later, the change must start by reworking

@@ -11,36 +11,45 @@ registered `PipelineConfig`, loads deploy defaults, and owns one
 `PipelineExecutor`. `PipelineExecutor` wraps a synchronous `PipelineRunner`
 with an asyncio semaphore and a thread pool.
 
-The vendored `third_party/nano-vllm` submodule is a separate, text-only
-educational engine. It is **not** the engine behind `Omni.generate`.
-`nanovllm-omni` uses only these fork pieces:
+`third_party/nano-vllm` is a vendored fork of
+[`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm),
+installed as an editable dependency via `pyproject.toml`'s
+`[tool.uv.sources] nano-vllm = { path = "third_party/nano-vllm", editable = true }`.
+**It is the AR engine behind `Omni.generate`** for the LLM-shaped stages
+(MiniMind-O thinker + talker, SmolVLM, SmolVLA's vlm stage). We do not
+fork it lightly — the vLLM-style paged-KV decoder and CUDA-Graph capture
+path live there, and re-implementing them locally would be a multi-month
+side quest. What we do **not** take from the fork is its
+text-only Qwen3 model class, its `LLMEngine`/`Scheduler`, its
+`SamplingParams`, and the asyncio server shell — those are replaced by
+`PipelineRunner` and our own dataclasses. The fork's `register_model`
+registry is preserved so non-fork model classes (e.g. `MiniMindThinker`,
+`MiniMindTalker`, `SmolVLMForConditionalGeneration`) can plug in via
+`ModelRunner(model_class=...)`.
 
-- `BlockManager` for paged KV block allocation.
-- The fork's `Sequence` for paged KV block-table bookkeeping.
+### Fork pieces we use
 
-The current attention adapter, K/V writes, and decode loop remain local.
-When the separate `flash_attn` wheel is installed, the adapter calls its
-paged kernel directly; otherwise it uses the torch SDPA fallback.
+| Fork module | What it gives us |
+|---|---|
+| `nanovllm.engine.model_runner.ModelRunner` | Per-stage AR runner: weight loader, KV allocate, optional CUDA-Graph capture, NCCL init, decode-graph reuse. One `ModelRunner` per stage. |
+| `nanovllm.config.Config` | Stage configuration (`enforce_eager`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `trust_remote_code`). Each stage builds one. |
+| `nanovllm.layers.attention.Attention` | Paged-KV attention with the `store_kvcache` Triton kernel. Used by every AR submodule (thinker blocks, talker blocks, SmolVLM/SmolVLA text stack). |
+| `nanovllm.layers.linear.{QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear}` | Fused QKV / fused gate-up / row-parallel projection. These are what makes the merged QKV a "real" layer, not a runtime monkey-patch. |
+| `nanovllm.layers.layernorm.RMSNorm` | Fused RMSNorm. |
+| `nanovllm.layers.rotary_embedding.get_rope` | RoPE. |
+| `nanovllm.layers.activation.SiluAndMul` | Fused SwiGLU activation. |
+| `nanovllm.layers.embed_head.{ParallelLMHead, VocabParallelEmbedding}` | Tied / untied lm head and embedding. |
+| `nanovllm.layers.sampler.Sampler` | Top-k / Gumbel-max sampling used by the per-stage decode loop. |
+| `nanovllm.utils.context.{set_context, reset_context}` | Module-level `Context` object that the fork `Attention` layer reads at every forward to learn whether the call is prefill vs decode. The `StageRunner` adapter installs/clears it. |
 
-The fork's `LLMEngine`, `ModelRunner`, `Scheduler`, `Config`, and
-`SamplingParams` are not part of the Omni generation path. In particular,
-MiniMind-O's Thinker -> Talker -> Code2Wav generation is not a Qwen3
-`LLMEngine` workload, so making `OmniBase` inherit `LLMEngine` would only add a
-nominal parent class while violating the model and scheduler contracts.
+### The one piece of fork-runtime monkey-patching
 
-Model declaration has three separate responsibilities. `OMNI_MODELS` maps
-stable stage architecture names to lazy `(folder, module, class)` entries;
-`OMNI_PIPELINES` maps model handles to pipeline topology or a config resolver;
-and each `StageConfig` names both its model architecture and its stage wrapper
-constructor. The generic runner resolves those declarations without branching
-on a model name.
-
-The fork package initializer is lazy. Importing `nanovllm.engine.block_manager`
-does not import or construct `LLM`; constructing the fork's `LLM` remains an
-explicit operation with its own CUDA and distributed-runtime requirements.
-The paged adapter adds the submodule to `sys.path` only when paged KV is first
-used and fails clearly if another package has already claimed the `nanovllm`
-module name.
+`engine/stage_runner.py::_ensure_dist` patches
+`torch.distributed.init_process_group` so two `ModelRunner` instances
+(thinker + talker) can co-exist in one Python process. The fork assumes
+one runner per process and unconditionally calls `nccl`-init; the patch
+makes the second call a no-op when a process group is already initialised.
+This is unrelated to performance — it's the fork-multi-runner adaptation.
 
 ## Module map
 
@@ -54,19 +63,29 @@ module name.
 | `entrypoints/async_omni.py` | Async submission and streaming wrapper | Local async entry point |
 | `engine/runner.py` | Sequential stage execution and deploy merge | Single-replica in-process runner |
 | `engine/executor.py` | Thread-pool and semaphore wrapper | Async transport around the runner |
-| `models/minimind_omni/runtime_scheduler.py` | Per-stage continuous-batching state | MiniMind-O model-family helper |
-| `models/minimind_omni/attention.py` | Fixed contiguous KV buffer adapter | MiniMind-O graph optimization |
-| `models/minimind_omni/paged_attention.py` | Paged KV pool and fork allocator bridge | MiniMind-O paged KV adapter |
-| `models/minimind_omni/cuda_graph.py` | Per-position Thinker CUDA Graph decoder | MiniMind-O-specific optimization |
-| `models/minimind_omni/paged_cuda_graph.py` | One-window, replay-many decoder | MiniMind-O-specific paged optimization |
-| `models/minimind_omni/talker_cuda_graph.py` | Fixed-shape Talker MTP graph cache | MiniMind-O-specific optimization |
-| `models/minimind_omni/` | Stages, schedulers, KV helpers, graph decoders, and bundle | Model-family implementation |
+| `engine/stage_runner.py` | Fork-AR adapter (`StageRunner`, `get_stage_config`, `_ensure_dist`) — composes fork `ModelRunner` + `Sampler` and exposes the fork-attention lifecycle as discrete methods | New — fork has no local equivalent |
+| `models/minimind_omni/bundle.py` | Bundle loader: HF model + Mimi codec + tokenizer into one `MinimindBundle` | MiniMind-O only |
+| `models/minimind_omni/thinker.py` | `MiniMindThinker`: 12-layer AR stack on fork layers; bridge hidden state capture into a registered buffer | MiniMind-O only |
+| `models/minimind_omni/talker.py` | `MiniMindTalker`: 4-layer AR stack on fork layers; 8 codebook heads for audio frame generation | MiniMind-O only |
+| `models/minimind_omni/code2wav.py` | Mimi codec decode + WAV envelope | MiniMind-O only |
+| `models/minimind_omni/pipeline.py` | Three-stage `PipelineConfig` declaration | MiniMind-O only |
+| `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes invoked by the factory | MiniMind-O only |
+| `models/minimind_omni/stage_runner.py` | MiniMind-O decode recipe (`decode_minimind`, `recapture_bridge_minimind`) composed on `engine.stage_runner.StageRunner` | MiniMind-O only |
+| `models/minimind_omni/stage_processors.py` | `ThinkerStageOutput` / `TalkerInputPayload` / `Code2WavInputPayload` — frozen dataclasses + pure-function converters | MiniMind-O only |
+| `models/smolvlm/{smolvlm.py, stage.py, pipeline.py}` | Complete SmolVLM (`SigLIP` vision tower + fork-style `SmolLM2` text stack + connector), prefill/decode stage, single-stage `LLM_AR` pipeline | SmolVLM only |
+| `models/sd_turbo/{stage.py, pipeline.py}` | SD-Turbo 1-step image generation as a `DIFFUSION`-kind stage implementing the 4-method contract (`prepare_encode` / `denoise_step` / `step_scheduler` / `post_decode`) | SD-Turbo only |
+| `models/smolvla/{vlm_stage.py, action_stage.py, stage_processors.py, pipeline.py, policy.py}` | Two-stage VLA: `vlm` (`LLM_AR`) → bridge payload → `action` (`DIFFUSION`, flow-matching Euler over the action expert) | SmolVLA only |
+| `diffusion/interface.py` | `DiffusionPipeline` Protocol / `StepState` / `DiffusionOutput` — 4-method contract for DIFFUSION-kind stages | New — fork has no equivalent |
+| `diffusion/runner.py` | `DiffusionRunner` — drives the 4-method loop (`run_sync` + `step_streaming`); stdlib `deque` scheduler inline | New |
+| `utils/profiling.py` | `profile_range(name)` context manager (`torch.profiler.record_function` + `nvtx.range`) | New |
 | `serving/openai_adapter.py` | Stdlib OpenAI-shaped HTTP adapter | Small serving seam, not FastAPI |
 
-There is no `engine/runtime.py`, `engine/load_balancer.py`, or top-level
-`optim/` package in the current tree. The generic `engine/` package only owns
-pipeline execution; MiniMind-O CUDA, KV, scheduler, and sequence helpers live
-under `models/minimind_omni/`.
+There is no top-level `optim/` package in the current tree. The
+fusion-style optimisations (merged QKV / gate-up, fused RMSNorm, fused
+RoPE, paged-KV attention, CUDA-Graph capture) live in `nanovllm.layers.*`
+as proper `nn.Module` subclasses, not as runtime monkey-patches on HF
+model classes. Performance evolution history is recorded in
+`docs/perf/tk005-rtx3050.md`.
 
 ## Request flow
 
@@ -93,31 +112,29 @@ prompt
   -> OmniRequestOutput
 ```
 
-The Thinker stage may select eager decoding, the contiguous fixed-KV CUDA
-Graph decoder, or the paged single-graph decoder. These are implementation
-choices inside the stage; none of them calls fork `LLMEngine.generate`,
-`add_request`, or `step`. Model-specific fused projections, bridge capture,
-and unusual attention semantics stay in the model family; the engine exposes
-only shared primitives and execution kinds.
+For SmolVLA the stage order is:
 
-## Paged KV bridge
+```text
+prompt + rgb_obs
+  -> vlm (LLM_AR): prefill-only observation encode, no incremental decode
+  -> action (DIFFUSION): Euler-integrated flow matching for the action chunk
+  -> OmniRequestOutput
+```
 
-`models.minimind_omni.paged_attention.enable_paged_kv_cache(...)` discovers attention-like
-modules by their projection interface, allocates one shared
-`[2, layers, blocks, block_size, kv_heads, head_dim]` tensor, and binds each
-layer's K/V views to it. A `PagedKVContext` owns fixed-address metadata
-(`slot_mapping`, `context_lens`, and `block_tables`) for graph replay.
+Inside each AR stage the loop is:
 
-The fork `BlockManager` allocates block IDs. The local adapter owns the
-per-layer pool wiring, context scratch buffers, attention-forward replacement,
-and MiniMind-O request lifecycle. The torch-native SDPA path is used when
-flash-attn is unavailable; flash-attn remains optional for the macOS test
-path and is expected on the WSL CUDA box for its optimized kernel.
+```text
+fork ModelRunner.run_model (input_ids, positions, is_prefill)
+  -> fork Attention with module-level Context (slot_mapping, block_tables, ...)
+  -> Sampler (top-k / Gumbel-max with optional repetition_penalty)
+  -> record_token, advance positions, repeat
+```
 
-The local `OmniSequence` in `models/minimind_omni/sequence.py` is deliberately named
-separately from the fork's `nanovllm.engine.sequence.Sequence`. The former is
-scheduler state for the local pipeline; the latter is paged-KV block-table
-state. They are not interchangeable.
+The `engine.stage_runner.StageRunner` adapter wraps the fork
+`ModelRunner` + `Sampler` and exposes the fork-attention lifecycle as
+discrete methods (`set_context` / `forward` / `sample` /
+`reset_context`) so model families stay side-effect free at import
+time.
 
 ## Deliberate divergences
 
@@ -127,22 +144,27 @@ state. They are not interchangeable.
 - Small consumer-facing `SamplingParams` subset; it is not a re-export of the
   fork's class.
 - Stdlib `http.server` instead of FastAPI/uvicorn.
-- MiniMind-O uses its Hugging Face model implementation and local stage
-  contracts rather than the fork's Qwen3-only model runner.
-- CUDA Graph source adaptation is limited to the MiniMind-O forward contract;
-  graph optimization is opt-in through deploy configuration and falls back to
-  eager execution when unsupported.
+- Diffusion stages are driven by a local `DiffusionRunner`, not the fork —
+  the fork has no diffusion path.
+- `SmolVLA`'s vlm stage deliberately does not run the fork `ModelRunner`
+  decode loop (one-shot prefill only); the action expert is reached
+  through lerobot's internal `policy.model.vlm_with_expert.forward`. See
+  `docs/dev/nanovllm-omni-smolvla-arflow-migration.md` §3 ADR-029 for
+  the rationale.
 
 ## Reading order
 
 1. `entrypoints/omni.py` and `entrypoints/base.py`
 2. `engine/executor.py` and `engine/runner.py`
-3. `config/registry.py` and `config/params.py`
-4. `models/minimind_omni/pipeline.py`
-5. `models/minimind_omni/bundle.py`, `thinker.py`, `talker.py`, and `code2wav.py`
-6. `models/minimind_omni/paged_attention.py` and
-   `models/minimind_omni/paged_cuda_graph.py`
-7. `outputs.py` and `serving/openai_adapter.py`
+3. `engine/stage_runner.py` — the fork-AR adapter
+4. `config/registry.py` and `config/params.py`
+5. `models/minimind_omni/pipeline.py`
+6. `models/minimind_omni/bundle.py`, `thinker.py`, `talker.py`, `code2wav.py`,
+   `stage.py`, `stage_runner.py`, `stage_processors.py`
+7. `models/sd_turbo/{stage,pipeline}.py` and `diffusion/{interface,runner}.py`
+8. `models/smolvlm/{smolvlm,stage,pipeline}.py`
+9. `models/smolvla/{vlm_stage,action_stage,stage_processors,pipeline,policy}.py`
+10. `outputs.py` and `serving/openai_adapter.py`
 
 ## Out of scope
 

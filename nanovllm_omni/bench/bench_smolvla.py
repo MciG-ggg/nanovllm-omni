@@ -14,7 +14,7 @@ Synthetic observation (256x256 RGB + 7-dim zero state); real LIBERO
 data is Phase 2 follow-up.
 
 See ADR 0001 for the 4-phase protocol. Phase 1 only: no CUDA Graph, no
-fusion patches.
+per-stage NVTX markers.
 """
 
 from __future__ import annotations

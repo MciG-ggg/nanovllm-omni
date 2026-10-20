@@ -213,6 +213,12 @@ docs/           # 项目笔记与性能归档
 
 四个支持的模型族共用同一个单进程 pipeline runner。per-stage 持续批处理(TK-004)目前只用于 MiniMind-O,通过 `models/minimind_omni/runtime_scheduler.py` in-process 实现。per-stage replica + RoundRobin LB 层(TK-007)已删除(测得 `num_replicas=1 == num_replicas=2`,见 `tests/test_batched_runner_contract.py`)。
 
+### Fork 架构:`third_party/nano-vllm`
+
+AR 形态的 stage(MiniMind-O thinker + talker、SmolVLM、SmolVLA 的 vlm 半边)跑在 [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) 的 vendor fork 之上,以 editable 依赖方式装在 `third_party/nano-vllm/`(见 `pyproject.toml` 的 `[tool.uv.sources]`)。fork 提供 vLLM 风格的 paged-KV decoder 和 CUDA-Graph 路径 —— `nanovllm.engine.model_runner.ModelRunner`、`nanovllm.layers.attention.Attention`(带 `store_kvcache` Triton kernel)、`nanovllm.layers.linear.QKVParallelLinear` / `MergedColumnParallelLinear` / `RowParallelLinear`、`nanovllm.layers.layernorm.RMSNorm`、`nanovllm.layers.rotary_embedding.get_rope`、`nanovllm.layers.activation.SiluAndMul`、`nanovllm.layers.embed_head.{ParallelLMHead, VocabParallelEmbedding}`、`nanovllm.layers.sampler.Sampler`,以及 fork `Attention` 在每次 forward 都会读的 module-level `nanovllm.utils.context.Context`。fork 的纯文本 `Qwen3ForCausalLM`、`LLMEngine`、`Scheduler` 和 `SamplingParams` **不**使用 —— 由 `OmniBase`、`PipelineRunner` 和我们自己的 dataclass 替代。
+
+性能栈(融合 QKV / 融合 gate-up、融合 RMSNorm、融合 RoPE、paged-KV attention、CUDA-Graph 捕获)以正经的 `nn.Module` 子类形式落在 `nanovllm.layers.*` 里,在构造期生效,不是 HF 模型类上的 runtime monkey-patch。仓里唯一一处 runtime monkey-patch 是 `engine/stage_runner.py::_ensure_dist`,用来让两个 `ModelRunner` 实例共享一个 Python 进程(把 `dist.init_process_group` 改成 no-op),跟性能无关。Diffusion stage(SD-Turbo、SmolVLA 的 action 半边)完全绕开 fork,走本地 4 方法契约,由 `nanovllm_omni/diffusion/runner.py::DiffusionRunner` 驱动。
+
 ## 致谢
 
 - [`vllm-omni`](https://github.com/vllm-project/vllm-omni) — 我们对其 omni 模态服务架构与消费侧 API 契约进行教学式解读并与之对齐。本仓库不导入它的代码,具体偏离见 README「Scope / 范围」一节。

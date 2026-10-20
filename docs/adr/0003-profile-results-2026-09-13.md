@@ -134,6 +134,20 @@ sd-turbo 的 1.27x 来自响应路径：PNG 用最低压缩级别写出（146.3 
 - minimind-o：hub 的 `trust_remote_code` 建模文件让本会话的沙箱拒绝了运行。项目侧的解法已经落地：仓库注册自己的 `minimind-o` config class（`nanovllm_omni/models/minimind_omni/hf_config.py`），`AutoConfig` 因此不再加载 hub 的 `auto_map` 文件，thinker、talker、tokenizer 都不再执行远端代码。权重的两段切分也已按真实 checkpoint 核对（2026-10-21）：195 个 tensor，thinker 拿 91 个、talker 拿 92 个，两个集合不重叠，被丢掉的 12 个是本项目用自己的 bridge 取代的 `audio_proj.*` / `vision_proj.*`。剩下的缺口是一块 GPU。
 - smolvla：`lerobot` 0.6.1（`transformers` 5.5.4，`torch` 2.11.0+cpu）已在 Colab 的 CPU session 上装好，`HuggingFaceVLA/smolvla_libero` 的权重也用仓库自己的调用加载成功（489 个 weight tensor，`chunk_size` 50、`max_action_dim` 32、`num_steps` 10、action 7 维）。安装过程暴露一个项目侧缺口：`lerobot.policies` 的导入链会走到 `lerobot.datasets`，它需要 PyAV，因此 `pyproject.toml` 的 `smolvla` extra 现在显式声明 `av`。剩下的缺口是一块 GPU。
 
+两个模型可以共用一个环境（2026-10-21 核实）：`lerobot[smolvla]` 把 transformers 限制在 `>=5.4.0,<5.6.0`，而 5.5.4 的 wheel 里带 `transformers/models/mimi/modeling_mimi.py`，MiniMind-O 的 Mimi codec 在这个版本上可用。因此四个模型族不需要分开的 session。session 准备是一条命令（`tools/colab_setup.py`）：克隆仓库与 fork、修复镜像自带的 transformers 与 pip 降级造成的混合目录、装依赖（用 constraint 固定镜像自带的 torch 栈，保住 CUDA 版本）、卸载会让 diffusers 导入失败的 torchao、装 nsys 和 ncu 的 wheel、预下载五个 checkpoint，最后打印版本与导入检查。计时由 `tools/measure_benches.py` 跑：MiniMind-O 的 eager / thinker-graph 两个 cell（各自独立进程）、SmolVLA 的两段路径、SmolVLA 的 flow loop。
+
+nsys 和 ncu 由 `tools/profile_session.py` 驱动，target 和工具由环境变量给出：
+
+```
+colab exec -s omni-t4 --timeout 3600 \
+    --env PROFILE_TOOL=nsys --env PROFILE_TARGET=minimind_o \
+    -f tools/profile_session.py
+
+colab exec -s omni-t4 --timeout 3600 \
+    --env PROFILE_TOOL=ncu --env PROFILE_TARGET=smolvla_flow \
+    --env NCU_LAUNCH_COUNT=120 -f tools/profile_session.py
+```
+
 原始 nsys / ncu 报告是本地产物，本节只保留结论。
 
 ## 已知限制

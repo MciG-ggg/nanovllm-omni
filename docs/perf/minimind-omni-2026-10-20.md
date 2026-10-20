@@ -128,6 +128,30 @@ x 8 layers, and 44 talker layer tensors are 11 per layer x 4 layers.
 Still open: the fork's runtime loader mapping these names onto the
 parameters above. That check needs the fork runtime and a GPU.
 
+## One environment for all four families (verified 2026-10-21)
+
+The SmolVLA run needs the transformers range that `lerobot[smolvla]`
+pins (`>=5.4.0,<5.6.0`), and the MiniMind-O run needs the Mimi codec
+from transformers. Both agree on transformers 5.5.4: the 5.5.4 wheel
+ships `transformers/models/mimi/modeling_mimi.py` and
+`configuration_mimi.py`, so `from transformers import MimiModel` works
+on the version that the lerobot extra requires. One environment
+therefore serves MiniMind-O, SmolVLM, SD-Turbo and SmolVLA.
+
+The session setup is one command (`tools/colab_setup.py`):
+
+1. clone the repository and the fork
+2. remove the image transformers before the pinned install, because pip
+   uninstalls the old version first and the old `RECORD` then deletes
+   files that the new version already wrote
+3. install the packages with a constraint file that pins the torch
+   stack the image ships, so the CUDA build stays intact
+4. uninstall the preinstalled torchao, whose missing `FqnToConfig` name
+   breaks the diffusers import
+5. install the nsys and ncu wheels
+6. pre-download the five checkpoints
+7. print the versions, the GPU name, and the import checks
+
 ## What is still missing
 
 1. A GPU to run the measurement on. Every `colab new --gpu T4` in this

@@ -52,10 +52,6 @@ def code2wav_simple(deploy: Any, args: Any) -> Any:
     return forward
 
 
-class FakeRegisteredModel:
-    """Small class used to prove model-registry injection without torch."""
-
-
 class TextTerminal:
     text = "terminal text"
 

@@ -37,6 +37,14 @@ smolvla = [
     "torch>=2.3.1",
     "transformers>=4.40",
     "lerobot>=0.3",
+    # PyAV is required, not optional: importing `lerobot.policies` pulls
+    # the policy factory, which pulls the groot processors, which pull
+    # `lerobot.datasets`, which requires PyAV. Without it every
+    # `from lerobot.policies...` import fails with "'av' is required
+    # but not installed". The `dataset` extra of lerobot provides it
+    # on Python 3.12 and newer; this pin also covers Python 3.11, where
+    # the resolver picks lerobot 0.3.3 and that extra does not exist.
+    "av>=12",
     "Pillow>=10.0",
     "huggingface_hub>=0.20",
     "numpy>=1.24",

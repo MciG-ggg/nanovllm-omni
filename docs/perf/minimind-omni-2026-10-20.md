@@ -55,6 +55,51 @@ audio_vocab: 2112 talker_hidden: 768 bridge: 3 spk: 192
 hub module imported: False
 ```
 
+## Checkpoint layout vs. the two-stage split (measured 2026-10-21)
+
+The split that the thinker and the talker stages apply to the checkpoint
+was checked against the real checkpoint, without a GPU.
+
+`jingyaogong/minimind-3o` ships `pytorch_model.bin` and no safetensors
+file, so the `.bin` fallback branch of `_filter_only_dir`
+(`nanovllm_omni/models/minimind_omni/stage.py`) is the branch that
+runs. The 195 tensor names were dumped on the Colab VM, then the
+repository's own `_thinker_only_dir` / `_talker_only_dir` were run on a
+fake `pytorch_model.bin` built from those names.
+
+```
+checkpoint keys: 195
+thinker kept: 91   talker kept: 92   (the two sets do not overlap)
+```
+
+| Group in the checkpoint | Tensors | Where the split puts it |
+|---|---|---|
+| `model.*` (embed_tokens, 8 layers, norm) | 90 | thinker |
+| `lm_head.weight` (bare, tied text head) | 1 | thinker |
+| `talker.*` (layers, norm, embed_tokens, lm_head, codec_proj, embed_proj, scales, spk_proj) | 92 | talker, `talker.` prefix stripped |
+| `audio_proj.*` | 6 | dropped |
+| `vision_proj.*` | 6 | dropped |
+
+Every kept name matches a parameter of the repository's own model
+classes: the thinker's `model.embed_tokens` / `model.layers` /
+`model.norm` / `lm_head`, and the talker's `layers` / `norm` /
+`lm_head.base` + `lm_head.adapters.N.{0,2}` / `embed_tokens.base` +
+`embed_tokens.adapters.N.{0,2}` / `codec_proj.{0,2,3}` /
+`embed_proj.{0,2,3}` / `text_scale` / `audio_scale` / `speaker_proj`.
+`codec_proj.0` / `.2` are the two `Linear` layers and `.3` is the
+`RMSNorm` weight, which is why the checkpoint carries no `.1` key.
+
+The 12 dropped tensors are the vendor's omni projectors. This project
+replaces them with its own bridge, so nothing is lost.
+
+The rename list also fires on the real names:
+`talker.spk_proj.weight` becomes `speaker_proj.weight`. The fork loader
+maps the substring `k_proj` to `qkv_proj`, and `spk_proj` contains it,
+so the rename is what keeps the speaker projection loadable.
+
+Still open: the fork's runtime loader mapping these names onto the
+parameters above. That check needs the fork runtime and a GPU.
+
 ## What is still missing
 
 1. A GPU to run the measurement on. Every `colab new --gpu T4` in this

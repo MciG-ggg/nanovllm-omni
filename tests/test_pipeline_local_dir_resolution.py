@@ -19,6 +19,7 @@ from nanovllm_omni.models.minimind_omni.pipeline import (
     MINIMIND_OMNI_PIPELINE,
     MINIMIND_OMNI_THINKER_ONLY_PIPELINE,
 )
+from nanovllm_omni.models.smolvlm.pipeline import SMOLVLM_PIPELINE
 
 
 def _write_config(model_dir, enable_audio_output: bool) -> None:
@@ -42,6 +43,29 @@ def test_local_dir_with_audio_output_resolves_full(tmp_path) -> None:
     pipeline = _pipeline_from_local_dir(tmp_path)
 
     assert pipeline is MINIMIND_OMNI_PIPELINE
+
+
+def test_local_dir_with_idefics3_architecture_resolves_smolvlm(tmp_path) -> None:
+    """A local SmolVLM snapshot routes to the SmolVLM pipeline.
+
+    The checkpoint's ``config.json`` names ``Idefics3ForConditional-
+    Generation`` and its ``model_type`` (``idefics3``) is not a
+    registered pipeline name, so the architecture list is the only
+    disambiguator.
+    """
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "idefics3",
+                "architectures": ["Idefics3ForConditionalGeneration"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pipeline = _pipeline_from_local_dir(tmp_path)
+
+    assert pipeline is SMOLVLM_PIPELINE
 
 
 if __name__ == "__main__":

@@ -34,7 +34,12 @@ def test_pipeline_registry_resolves_hf_handle():
 
 def test_hf_architectures_disambiguates_smolvlm():
     config = resolve_pipeline_config("smolvlm")
-    assert config.hf_architectures == ("SmolVLMForConditionalGeneration",)
+    # The 500M checkpoint names the Idefics3 class; newer exports name
+    # the SmolVLM one.
+    assert config.hf_architectures == (
+        "SmolVLMForConditionalGeneration",
+        "Idefics3ForConditionalGeneration",
+    )
 
 
 def test_deploy_yaml_schema_locked():

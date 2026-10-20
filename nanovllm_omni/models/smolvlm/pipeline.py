@@ -42,12 +42,15 @@ SMOLVLM_PIPELINE = PipelineConfig(
         "HuggingFaceTB/SmolVLM-500M-Instruct",
     ),
     # ``hf_architectures`` is the layer-6 disambiguator in
-    # ``OmniBase.try_infer_model_type``. transformers resolves the
-    # ``AutoModelForVision2Seq`` class to ``SmolVLMForConditionalGeneration``
-    # when ``config.json.architectures`` is that name; matching here lets a
-    # local snapshot route back to ``smolvlm`` even when the basename is
-    # not the HF repo id.
-    hf_architectures=("SmolVLMForConditionalGeneration",),
+    # ``OmniBase.try_infer_model_type``. The SmolVLM-500M-Instruct
+    # checkpoint names ``Idefics3ForConditionalGeneration`` in its
+    # ``config.json``; newer exports use ``SmolVLMForConditionalGeneration``.
+    # Both route a local snapshot back to ``smolvlm`` even when the
+    # basename is not the HF repo id.
+    hf_architectures=(
+        "SmolVLMForConditionalGeneration",
+        "Idefics3ForConditionalGeneration",
+    ),
 )
 
 register_pipeline(SMOLVLM_PIPELINE)

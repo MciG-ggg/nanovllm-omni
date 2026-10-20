@@ -84,6 +84,7 @@ def try_infer_model_type(
     matches.
     """
     model_dir = Path(model) if Path(model).is_dir() else None
+    data = _read_json(model_dir / "config.json") if model_dir is not None else None
 
     # L1: transformers PretrainedConfig (skipped if not installed).
     # Only short-circuit when the discovered model_type is itself a
@@ -100,16 +101,14 @@ def try_infer_model_type(
     # so the base HF ``idefics3`` / ``llama`` / etc. tags fall through to
     # L5 / L6), plus ``type`` / ``architecture`` (singular) for VoxCPM2-style
     # raw tags -- kept as-is for callers that know how to handle them.
-    if model_dir is not None:
-        data = _read_json(model_dir / "config.json")
-        if data is not None:
-            mt = data.get("model_type")
-            if isinstance(mt, str) and mt and resolve_pipeline_config(mt, data) is not None:
-                return mt
-            for key in ("type", "architecture"):
-                raw = data.get(key)
-                if isinstance(raw, str) and raw:
-                    return raw
+    if data is not None:
+        mt = data.get("model_type")
+        if isinstance(mt, str) and mt and resolve_pipeline_config(mt, data) is not None:
+            return mt
+        for key in ("type", "architecture"):
+            raw = data.get(key)
+            if isinstance(raw, str) and raw:
+                return raw
 
     # L5: path basename substring match (longest registry key wins)
     candidate = _name_match_candidate(model)
@@ -123,19 +122,21 @@ def try_infer_model_type(
     if best is not None:
         return best
 
-    # L6: hf_architectures match (needs transformers)
-    if config is not None:
-        archs = set(getattr(config, "architectures", []) or [])
-        if archs:
-            for _key, registered in OMNI_PIPELINES.items():
-                if isinstance(registered, PipelineConfig):
-                    if not registered.hf_architectures:
+    # L6: hf_architectures match. The architecture list comes from the
+    # HF config when transformers is installed, else from config.json.
+    archs = set(getattr(config, "architectures", []) or []) if config is not None else set()
+    if not archs and data is not None:
+        archs = set(data.get("architectures") or [])
+    if archs:
+        for _key, registered in OMNI_PIPELINES.items():
+            if isinstance(registered, PipelineConfig):
+                if not registered.hf_architectures:
+                    continue
+                if archs.intersection(registered.hf_architectures):
+                    predicate = registered.hf_config_predicate
+                    if predicate is not None and not predicate(config):
                         continue
-                    if archs.intersection(registered.hf_architectures):
-                        predicate = registered.hf_config_predicate
-                        if predicate is not None and not predicate(config):
-                            continue
-                        return registered.name
+                    return registered.name
 
     return None
 

@@ -129,7 +129,8 @@ The decision above stands: stages own the graph-vs-eager choice, and
    (`Config.graph_max_seq_len`, fork commit `f80d644`) and the captured
    batch size (`Config.max_capture_bs`, fork commit `4990060`). A stage
    can default to the graph without knowing whether the device captures
-   it.
+   it. The eager fallback compares the request against the window the
+   graph actually captured (fork commit `719c066`).
 2. **smolvlm now defaults to the graph.** Commit `951aaf0` turned
    `cfg.enforce_eager = True` into
    `cfg.enforce_eager = not extra.get("use_cuda_graph", True)`. The

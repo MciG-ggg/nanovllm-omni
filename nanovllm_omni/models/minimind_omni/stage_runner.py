@@ -17,6 +17,7 @@ that take a ``StageRunner`` and the per-call inputs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 
@@ -31,6 +32,8 @@ def decode_minimind(
     eos_id: int | None = None,
     enter_token: int = 0,
     pad_token: int = 0,
+    seed: int | None = None,
+    stop_hit: Callable[[list[int]], bool] | None = None,
 ) -> tuple[list[int], Any, Any]:
     """Run the vendor decode dance on a ``StageRunner``.
 
@@ -50,6 +53,10 @@ def decode_minimind(
         enter_token: Token emitted on the first post-EOS step (talker
             tail needs a stable anchor).
         pad_token: Token emitted on subsequent post-EOS steps.
+        seed: Seeds the sampler so the same seed reproduces the run.
+        stop_hit: Predicate over the generated token ids; decoding stops
+            when it returns True. The caller owns the stop strings and
+            the tokenizer, so this module stays tokenizer-free.
     """
     import torch
     from nanovllm.engine.scheduler import Scheduler
@@ -103,6 +110,11 @@ def decode_minimind(
     first_finished = True
     if eos_id is None:
         eos_id = config.eos
+    # Seed the sampler so the same seed reproduces the same tokens.
+    # ``torch.multinomial`` in the wrap sampler draws from the global
+    # CUDA generator.
+    if seed is not None:
+        torch.manual_seed(int(seed))
 
     try:
         while not scheduler.is_finished():
@@ -143,6 +155,8 @@ def decode_minimind(
                 text_finished = True
 
             if sequence.num_completion_tokens >= max_tokens:
+                break
+            if stop_hit is not None and stop_hit(generated):
                 break
     finally:
         # Restore so a second call doesn't wrap an already-wrapped

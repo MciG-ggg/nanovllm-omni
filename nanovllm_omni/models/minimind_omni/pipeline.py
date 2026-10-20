@@ -102,3 +102,7 @@ register_pipeline(
     model_type="minimind_o",
     registration_handles=("jingyaogong/minimind-3o",),
 )
+
+# The thinker-only topology is also reachable by name, so a caller can
+# ask for it explicitly with ``extra={"pipeline": "minimind_o_thinker_only"}``.
+register_pipeline(MINIMIND_OMNI_THINKER_ONLY_PIPELINE)

@@ -116,21 +116,31 @@ def _filter_only_dir(
     dst_prefix: str,
     keep_prefix: tuple[str, ...],
     stage_prefix: str,
+    strip_prefix: bool = True,
 ) -> str:
     """Shared implementation for thinker / talker only-dir builds.
 
-    Strips ``stage_prefix`` (e.g. ``model.`` or ``talker.``) from each
-    key, drops anything whose stripped name does not start with one
-    of ``keep_prefix``, and writes a single ``model.safetensors``
-    into a hash-keyed sibling directory under ``/tmp``.  Reuses the
-    cache if it already exists.
+    Keeps the keys that belong to one stage and writes a single
+    ``model.safetensors`` into a hash-keyed sibling directory under
+    ``/tmp``. Reuses the cache if it already exists.
 
-    ``stage_prefix`` is also used as a *filter*: a key is only kept
-    if it starts with ``stage_prefix``, or already matches
-    ``keep_prefix`` with no prefix (HF MiniMind stores the thinker's
-    tied ``lm_head.weight`` at the top level).  This prevents thinker
-    layers (``model.layers.4-7.*``) from leaking into the talker build,
-    since the talker's layer prefix is ``talker.layers.``.
+    ``stage_prefix`` (e.g. ``model.`` or ``talker.``) plays two roles:
+
+    * **filter** — a key is kept only when it starts with
+      ``stage_prefix``, or already matches ``keep_prefix`` with no
+      prefix (HF MiniMind stores the thinker's tied ``lm_head.weight``
+      at the top level). This keeps thinker layers
+      (``model.layers.4-7.*``) out of the talker build, since the
+      talker's layer prefix is ``talker.layers.``.
+    * **rename** — with ``strip_prefix=True`` the prefix is removed from
+      the written key (``talker.layers.0.*`` becomes ``layers.0.*``,
+      matching the flat ``MiniMindTalker`` layout). With
+      ``strip_prefix=False`` the prefix stays
+      (``model.layers.0.*`` stays ``model.layers.0.*``, matching the
+      nested ``MiniThinker.model`` backbone).
+
+    ``keep_prefix`` is always matched against the *stripped* name, so
+    both modes accept the same key set.
     """
     import glob
     import hashlib
@@ -158,7 +168,8 @@ def _filter_only_dir(
 
     def _name(k: str) -> str | None:
         if k.startswith(stage_prefix):
-            name = k[len(stage_prefix) :]
+            stripped = k[len(stage_prefix) :]
+            name = stripped if strip_prefix else stage_prefix + stripped
             return _TALKER_RENAME.get(name, name)
         # Top-level keys that already match keep_prefix, e.g.
         # ``lm_head.weight`` in the HF MiniMind checkpoint.
@@ -167,7 +178,8 @@ def _filter_only_dir(
         return None
 
     def _accept(name: str) -> bool:
-        return name.startswith(keep_prefix)
+        stripped = name[len(stage_prefix) :] if name.startswith(stage_prefix) else name
+        return stripped.startswith(keep_prefix)
 
     tensors: dict = {}
     seen: set = set()
@@ -210,8 +222,21 @@ def _filter_only_dir(
 
 
 def _thinker_only_dir(src: str) -> str:
-    """Build a sibling directory with only thinker-shaped weights."""
-    return _filter_only_dir(src, "minimind-thinker-only", _THINKER_KEEP_PREFIX, "model.")
+    """Build a sibling directory with only thinker-shaped weights.
+
+    Keeps the ``model.`` prefix on the backbone keys: ``MiniMindThinker``
+    holds its backbone at ``self.model`` (the upstream ``MiniMindForCausalLM``
+    shape), so the fork loader looks up ``model.embed_tokens.weight`` /
+    ``model.layers.*`` / ``model.norm.weight``. The bare ``lm_head.weight``
+    stays bare because the thinker's head lives at ``self.lm_head``.
+    """
+    return _filter_only_dir(
+        src,
+        "minimind-thinker-only",
+        _THINKER_KEEP_PREFIX,
+        "model.",
+        strip_prefix=False,
+    )
 
 
 def _talker_only_dir(src: str) -> str:
@@ -308,6 +333,16 @@ class ThinkerStage:
         if eos_id is None:
             eos_id = self.config.eos
 
+        # Stop strings: stop as soon as one of them appears in the text
+        # generated so far.
+        stop_strings = list(getattr(sampling, "stop", None) or [])
+
+        def _stop_hit(ids: list[int]) -> bool:
+            if not stop_strings:
+                return False
+            text = tokenizer.decode(ids, skip_special_tokens=True)
+            return any(s in text for s in stop_strings)
+
         generated, bridge_hidden, text_state = decode_minimind(
             self.stage_runner,
             token_ids,
@@ -318,6 +353,8 @@ class ThinkerStage:
             eos_id=eos_id,
             enter_token=_THINKER_ENTER_TOKEN,
             pad_token=_THINKER_PAD_TOKEN,
+            seed=getattr(sampling, "seed", None),
+            stop_hit=_stop_hit if stop_strings else None,
         )
 
         # Re-capture the bridge with one full-sequence prefill pass so the

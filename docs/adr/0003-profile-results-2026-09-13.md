@@ -105,16 +105,42 @@ CSV：`docs/perf/bench_smolvla_wsl_stages.csv`。
 
 原始报告为本地产物：`docs/perf/ncu-2026-09-13-{sd-vae,sd-unet,smolvlm-gemv,smolvla-flow}.ncu-rep`。下一次 smolvla NCU 应先改为可被 NCU range filter 识别的 marker，或用独立 flow-step harness，再测 flow kernel；不要用当前 VLM GEMM 代替它。
 
+## Colab T4 优化结果（2026-10-20）
+
+环境：Colab Tesla T4（16 GB），torch 2.9.0+cu128；代码版本为 `perf/colab-2x` 分支，主仓 `e86a153`，fork submodule `7cd0d4a`。口径：1 次 warmup + 5 次计时，wall 取中位；峰值显存取 `torch.cuda.max_memory_allocated`。
+
+| 模型 | baseline wall p50 | 优化后 wall p50 | 加速 | 峰值显存 | 依据 |
+|---|---:|---:|---:|---:|---|
+| smolvlm | 586.0 ms | 185.7 ms | 3.16x | 3951.7 → 3959.9 MB | `docs/perf/smolvlm-2026-10-20.md` |
+| sd-turbo | 377.9 ms | 298.4 ms | 1.27x | 3101.0 → 3109.1 MB | `docs/perf/sd-turbo-2026-10-20.md` |
+| minimind-o | 未测 | 未测 | — | — | `docs/perf/minimind-omni-2026-10-20.md` |
+| smolvla | 未测 | 未测 | — | — | 见下 |
+
+smolvlm 的加速来自两项改动，两项都有 nsys profile 支撑：
+
+1. decode 模型按请求 dtype 构建。之前 decode 跑 fp32，峰值显存 9976 MB → 7163 MB，wall 不变。
+2. decode 循环走 CUDA graph。eager 684.0 ms → graph 177.3 ms。profile 显示 GPU 只有 24% 时间在忙，瓶颈是 kernel launch。fork 现在给捕获的 KV 窗口封顶（`Config.graph_max_seq_len`），上下文超窗或捕获失败都回落到 eager。
+
+sd-turbo 的 1.27x 来自响应路径：PNG 用最低压缩级别写出（146.3 ms → 34.8 ms），像素不变。2x 对这个模型在 T4 上不可达：一次 512x512 请求的 GPU 成本是 VAE decode 174.3 ms + UNet 72.9 ms = 247 ms，而 2x 需要的预算是 149 ms，VAE decode 一项就超了。
+
+两个模型未测，原因不同：
+
+- minimind-o：hub 的 `trust_remote_code` 建模文件让本会话的沙箱拒绝了运行。项目侧的解法已经落地：仓库注册自己的 `minimind-o` config class（`nanovllm_omni/models/minimind_omni/hf_config.py`），`AutoConfig` 因此不再加载 hub 的 `auto_map` 文件，thinker、talker、tokenizer 都不再执行远端代码。剩下的缺口是一块 GPU。
+- smolvla：需要 `lerobot` 包和 `HuggingFaceVLA/smolvla_libero` 权重，本机两者都没有。
+
+原始 nsys / ncu 报告是本地产物，本节只保留结论。
+
 ## 已知限制
 
 1. `bench/env.py` 的仓库根目录推断仍导致 CSV 的 commit 为 `unknown`；这不影响本次计时，但削弱了结果溯源。
 2. smolvlm 的 `torch.profiler` cycle 清理导致内部 annotation 不完整；需要完整分阶段数据时，应调整 profiler schedule 或单独按输入运行。
 3. smolvla 使用 synthetic observation，不能替代真实 LIBERO episode。
 4. 本轮只完成 Phase 1 profile，没有 CUDA Graph、fusion、static KV cache 或 batch 优化结果。
+5. 2026-10-20 的 T4 数字和本文的 3050 数字来自不同硬件，不能直接相减当作回归结论；两组数字只在各自硬件内比较。
 
 ## Phase 状态
 
 - Phase 1 baseline：三模型已完成。
-- Phase 2 bottleneck/cell：未完成；smolvlm decode CG 是首个候选。
+- Phase 2 bottleneck/cell：smolvlm 的 decode CUDA graph cell 已完成（3.16x，2026-10-20），sd-turbo 的 cell 已完成（1.27x，2026-10-20）；minimind-o 与 smolvla 未完成。
 - Phase 3 reference parity：未完成。
 - Phase 4 numerical parity：按 ADR 0001 的条件触发。

@@ -9,7 +9,7 @@
 
 - 🎯 **MiniMind-O 流水线** — 最小的 Thinker → Talker → Code2Wav 全链路运行时,加载真实的 `jingyaogong/minimind-3o` 权重
 - ⚡ **full 三阶段 E2E 在 RTX 3050 (4 GB) 上 total 中位约 0.65–1.04 s** — 一条 prompt → thinker → talker → MTP → Mimi → WAV,真 `jingyaogong/minimind-3o` + `kyutai/mimi` 权重,torch 2.14.0+cu130,2026-09 在仅 full 分支上重测。六道 bench 题各 20 次:**total 中位 628–1038 ms**(short ~0.63 s、medium ~0.75 s、system ~1.04 s),p95 ≤ 1.11 s,显存峰值 ~1881 MiB。数据与原始 CSV 见 `docs/perf/tk005-rtx3050.md` / `docs/perf/full-e2e-rtx3050.csv`。
-- 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码:同一硬件上 `--use-thinker-cuda-graph` 约 177 ms、eager 约 483 ms total 中位。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
+- 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码。约 177 ms(`--use-thinker-cuda-graph`)与约 483 ms(eager)中位来自 fork 之前的 bench 栈(2026-09 在 `8f6d522` 上测得);当前代码走 fork 的 CUDA graph,当前代码上没有复现这两个数字的运行,所以它们是出处记录,不是当前测量值。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
 一个小型、本地的参考实现,在单卡上跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。

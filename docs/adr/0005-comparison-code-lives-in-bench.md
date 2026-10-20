@@ -27,10 +27,11 @@ runtime:
 - **talker** (`minimind_omni/stage.py:TalkerStage`): bypasses
   `ModelRunner` and uses fork `Context` directly — `enforce_eager`
   does not apply (see ADR-006).
-- **smolvlm** (`smolvlm/stage.py:SmolVLMStage`): graph capture
-  fails on this shell. Stage hardcodes `cfg.enforce_eager = True`
-  unless `extra["use_cuda_graph"]` is set, which the bench harness
-  uses for the eager-vs-graph comparison cell.
+- **smolvlm** (`smolvlm/stage.py:SmolVLMStage`): the stage owns the
+  choice. It sets `cfg.enforce_eager = not extra["use_cuda_graph"]`,
+  so the graph is the default and `extra["use_cuda_graph"] = False`
+  turns it off (measured 2026-10-20 on a Colab T4: 3.16x end to end,
+  see ADR-0003).
 
 `DeployConfig` carried a comparison knob that only the bench
 harness ever flipped (`nanovllm_omni/bench/__main__.py`). Production
@@ -116,6 +117,33 @@ path, so the flag could only ever be a no-op.
   stage's decision is static, not user-tunable.
 - If a future contributor proposes "let's add `use_*_cuda_graph`
   back to `DeployConfig`", they should re-read this ADR first.
+
+## Amendment (2026-10-20)
+
+The decision above stands: stages own the graph-vs-eager choice, and
+`DeployConfig` keeps no comparison knob. Two facts changed.
+
+1. **The fork no longer dies on a failed capture.** `third_party/nano-vllm`
+   catches the capture failure, prints a warning, and runs eager (fork
+   commit `7cd0d4a`). It also bounds the captured KV window
+   (`Config.graph_max_seq_len`, fork commit `f80d644`) and the captured
+   batch size (`Config.max_capture_bs`, fork commit `4990060`). A stage
+   can default to the graph without knowing whether the device captures
+   it.
+2. **smolvlm now defaults to the graph.** Commit `951aaf0` turned
+   `cfg.enforce_eager = True` into
+   `cfg.enforce_eager = not extra.get("use_cuda_graph", True)`. The
+   nsys profile on a Colab T4 showed the decode loop was launch-bound
+   (GPU busy 24 % of the span), and the graph cut the end-to-end wall
+   time from 586.0 ms to 185.7 ms (3.16x, ADR-0003).
+
+The thinker keeps its eager default. The RTX 3050 capture failure was
+measured on the pre-fork bench stack, and the current fork path has no
+measurement on that card, so the default stays until a measurement
+exists.
+
+The ADR-006 reference below points at the decision written up in
+`docs/dev/nanovllm-omni-paged-engine.md` (its own ADR-006 section).
 
 ## References
 

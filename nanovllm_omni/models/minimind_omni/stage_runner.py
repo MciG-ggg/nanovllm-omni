@@ -206,7 +206,10 @@ def recapture_bridge_minimind(
             _ = model(_in, _pos)
         _full_bridge = model.get_bridge_hidden()
         if _full_bridge is not None:
-            bridge_hidden = _full_bridge.detach().to(dev).clone()
+            # The buffer holds ``max_position`` rows; only the first
+            # ``n_total`` carry this sequence. The talker embeds every
+            # row it gets, so the trailing zero rows must not travel.
+            bridge_hidden = _full_bridge[:n_total].detach().to(dev).clone()
     finally:
         stage_runner.reset_context()
     return bridge_hidden

@@ -129,5 +129,40 @@ def test_decode_minimind_slices_buffer_per_step() -> None:
     assert "bh[:1]" in src, "decode_minimind should slice _bridge_buffer as bh[:1] per decode step"
 
 
+def test_recapture_bridge_returns_only_the_sequence_rows() -> None:
+    """The re-captured bridge holds one row per token, not the whole buffer.
+
+    The bridge buffer has ``max_position`` rows; the talker embeds every
+    row it receives, so the trailing zero rows must not travel.
+    """
+    import torch
+
+    from nanovllm_omni.models.minimind_omni.stage_runner import recapture_bridge_minimind
+
+    max_position, hidden, n_total = 8, 3, 4
+    buffer = torch.arange(max_position * hidden, dtype=torch.float32).reshape(max_position, hidden)
+
+    class _Model:
+        def __call__(self, tokens, positions):
+            return tokens
+
+        def get_bridge_hidden(self):
+            return buffer
+
+    class _StageRunner:
+        model_runner = type("_Runner", (), {"model": _Model()})()
+
+        def set_context(self, **kwargs):
+            self.context = kwargs
+
+        def reset_context(self):
+            self.context = None
+
+    out = recapture_bridge_minimind(_StageRunner(), list(range(n_total)), torch.empty(0))
+
+    assert out.shape == (n_total, hidden)
+    assert torch.equal(out, buffer[:n_total])
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

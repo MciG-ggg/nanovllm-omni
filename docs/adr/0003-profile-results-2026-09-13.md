@@ -125,8 +125,8 @@ sd-turbo 的 1.27x 来自响应路径：PNG 用最低压缩级别写出（146.3 
 
 两个模型未测，原因不同：
 
-- minimind-o：hub 的 `trust_remote_code` 建模文件让本会话的沙箱拒绝了运行。项目侧的解法已经落地：仓库注册自己的 `minimind-o` config class（`nanovllm_omni/models/minimind_omni/hf_config.py`），`AutoConfig` 因此不再加载 hub 的 `auto_map` 文件，thinker、talker、tokenizer 都不再执行远端代码。剩下的缺口是一块 GPU。
-- smolvla：需要 `lerobot` 包和 `HuggingFaceVLA/smolvla_libero` 权重，本机两者都没有。
+- minimind-o：hub 的 `trust_remote_code` 建模文件让本会话的沙箱拒绝了运行。项目侧的解法已经落地：仓库注册自己的 `minimind-o` config class（`nanovllm_omni/models/minimind_omni/hf_config.py`），`AutoConfig` 因此不再加载 hub 的 `auto_map` 文件，thinker、talker、tokenizer 都不再执行远端代码。权重的两段切分也已按真实 checkpoint 核对（2026-10-21）：195 个 tensor，thinker 拿 91 个、talker 拿 92 个，两个集合不重叠，被丢掉的 12 个是本项目用自己的 bridge 取代的 `audio_proj.*` / `vision_proj.*`。剩下的缺口是一块 GPU。
+- smolvla：`lerobot` 0.6.1（`transformers` 5.5.4，`torch` 2.11.0+cpu）已在 Colab 的 CPU session 上装好，`HuggingFaceVLA/smolvla_libero` 的权重也用仓库自己的调用加载成功（489 个 weight tensor，`chunk_size` 50、`max_action_dim` 32、`num_steps` 10、action 7 维）。安装过程暴露一个项目侧缺口：`lerobot.policies` 的导入链会走到 `lerobot.datasets`，它需要 PyAV，因此 `pyproject.toml` 的 `smolvla` extra 现在显式声明 `av`。剩下的缺口是一块 GPU。
 
 原始 nsys / ncu 报告是本地产物，本节只保留结论。
 

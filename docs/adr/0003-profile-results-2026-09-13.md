@@ -105,6 +105,12 @@ CSV：`docs/perf/bench_smolvla_wsl_stages.csv`。
 
 原始报告为本地产物：`docs/perf/ncu-2026-09-13-{sd-vae,sd-unet,smolvlm-gemv,smolvla-flow}.ncu-rep`。下一次 smolvla NCU 应先改为可被 NCU range filter 识别的 marker，或用独立 flow-step harness，再测 flow kernel；不要用当前 VLM GEMM 代替它。
 
+该 flow-step harness 已加入仓库：`nanovllm_omni/bench/bench_smolvla_flow.py`。它只建一次 prefix，然后重复跑 flow loop，NCU 的 launch-count 窗口因此落在 flow kernel 上。命令：
+
+```
+python -m nanovllm_omni.bench.bench_smolvla_flow --repeats 20 --steps 10
+```
+
 ## Colab T4 优化结果（2026-10-20）
 
 环境：Colab Tesla T4（16 GB），torch 2.9.0+cu128；代码版本为 `perf/colab-2x` 分支，主仓 `e86a153`，fork submodule `7cd0d4a`。口径：1 次 warmup + 5 次计时，wall 取中位；峰值显存取 `torch.cuda.max_memory_allocated`。

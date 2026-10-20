@@ -119,6 +119,17 @@ def _load_pipeline(device: str | None, model: str) -> tuple[Any, Any]:
     return vlm, action
 
 
+def _sampling(sm_input: SmolVLAInput) -> Any:
+    """Sampling extras for one input: image, state, step count."""
+    return SimpleNamespace(
+        extra={
+            "image": sm_input.image,
+            "state": list(sm_input.state),
+            "num_inference_steps": sm_input.num_inference_steps,
+        }
+    )
+
+
 def _infer_one(
     vlm: Any,
     action: Any,
@@ -127,13 +138,7 @@ def _infer_one(
     """Full smolvla forward: vlm AR prefill + action flow matching."""
     from nanovllm_omni.models.smolvla.stage_processors import vlm2action
 
-    sampling = SimpleNamespace(
-        extra={
-            "image": sm_input.image,
-            "state": list(sm_input.state),
-            "num_inference_steps": sm_input.num_inference_steps,
-        }
-    )
+    sampling = _sampling(sm_input)
 
     with profile_range(":vlm"):
         vlm_out = vlm(sm_input.instruction, sampling)

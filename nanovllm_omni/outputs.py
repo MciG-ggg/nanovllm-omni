@@ -547,12 +547,18 @@ class ImageArtifact:
     def from_pil(cls, image: Any) -> "ImageArtifact":
         """Wrap a PIL.Image (or duck-typed equivalent with ``.size`` /
         ``.save`` / ``save`` kwargs) into the artifact. Imports Pillow
-        lazily so the rest of the outputs module stays Pillow-free."""
+        lazily so the rest of the outputs module stays Pillow-free.
+
+        The PNG is written with the lowest compression level that still
+        packs the pixels. The default level spends more CPU time than
+        the whole SD-Turbo request costs on a slow host, and the image
+        bytes stay the same.
+        """
         import io
 
         width, height = int(image.size[0]), int(image.size[1])
         buf = io.BytesIO()
-        image.save(buf, format="PNG")
+        image.save(buf, format="PNG", compress_level=1)
         return cls(png_bytes=buf.getvalue(), width=width, height=height)
 
     def __post_init__(self) -> None:

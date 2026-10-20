@@ -141,16 +141,21 @@ def try_infer_model_type(
 
 
 def _pipeline_from_local_dir(model_dir: Path) -> PipelineConfig | None:
-    """Local-dir fallback: ask ``try_infer_model_type`` and MiniMind-O default."""
+    """Local-dir fallback: ask ``try_infer_model_type`` and MiniMind-O default.
+
+    The config is passed to the default lookup too: the MiniMind-O
+    resolver picks the thinker-only topology when the config says
+    ``enable_audio_output: false``.
+    """
+    config = _load_pretrained_config(str(model_dir), trust_remote_code=True) or _read_json(
+        model_dir / "config.json"
+    )
     model_type = try_infer_model_type(str(model_dir))
     if model_type:
-        config = _load_pretrained_config(str(model_dir), trust_remote_code=True) or _read_json(
-            model_dir / "config.json"
-        )
         found = resolve_pipeline_config(model_type, config)
         if found is not None:
             return found
-    return resolve_pipeline_config("minimind_o")
+    return resolve_pipeline_config("minimind_o", config)
 
 
 class OmniBase:

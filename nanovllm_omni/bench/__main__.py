@@ -56,18 +56,16 @@ def _kwargs(args: argparse.Namespace) -> dict[str, object]:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "open_thinking": args.open_thinking,
-        "use_thinker_cuda_graph": bool(args.use_thinker_cuda_graph),
         "seed": args.seed,
     }
 
 
 def _graph_overrides(args: argparse.Namespace) -> dict[str, bool]:
+    # Only the thinker has a graph path (ADR-0005 / ADR-006): the talker
+    # bypasses the fork ModelRunner, so it has no ``enforce_eager``.
     return {
         name: value
-        for name, value in (
-            ("use_thinker_cuda_graph", args.use_thinker_cuda_graph),
-            ("use_talker_cuda_graph", args.use_talker_cuda_graph),
-        )
+        for name, value in (("use_thinker_cuda_graph", args.use_thinker_cuda_graph),)
         if value is not None
     }
 
@@ -97,7 +95,6 @@ def cmd_time(args: argparse.Namespace) -> int:
 
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         kwargs = _kwargs(args)
-        kwargs.pop("use_thinker_cuda_graph", None)
         kwargs.pop("open_thinking", None)  # Omni.generate has no open-thinking switch
         omni = Omni(
             model=args.model,
@@ -131,13 +128,11 @@ def cmd_sweep_graphs(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_cells = (
-        ("none", False, False),
-        ("thinker", True, False),
-        ("talker", False, True),
-        ("both", True, True),
+        ("none", False),
+        ("thinker", True),
     )
     failed: list[str] = []
-    for graph, thinker_graph, talker_graph in graph_cells:
+    for graph, thinker_graph in graph_cells:
         out = out_dir / f"graph-{graph}.csv"
         command = [
             sys.executable,
@@ -163,7 +158,6 @@ def cmd_sweep_graphs(args: argparse.Namespace) -> int:
             "--out",
             str(out),
             "--use-thinker-cuda-graph" if thinker_graph else "--no-use-thinker-cuda-graph",
-            "--use-talker-cuda-graph" if talker_graph else "--no-use-talker-cuda-graph",
         ]
         if args.device:
             command.extend(("--device", args.device))
@@ -184,7 +178,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     """Length matrix: prompts x {--lengths} budget sweep (defect B verification).
 
     Each cell runs ``run_n(bundle, prompt, n=args.runs, warmup=args.warmup,
-    max_tokens=L, use_thinker_cuda_graph=args.use_thinker_cuda_graph)`` and reports the
+    max_tokens=L)`` and reports the
     median frames + generate_ms. Emits a markdown table; defect B fix is
     visible here as ``frames < L`` once content terminates naturally.
     """
@@ -385,13 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-thinker-cuda-graph",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override the deploy setting for thinker CUDA Graph (default: use deploy YAML).",
-    )
-    common.add_argument(
-        "--use-talker-cuda-graph",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override the deploy setting for talker CUDA Graph (default: use deploy YAML).",
+        help="Thinker CUDA Graph on/off. Applies to --pipeline full only; "
+        "the thinker-bundle path has no graph to toggle.",
     )
     common.add_argument(
         "--pipeline",

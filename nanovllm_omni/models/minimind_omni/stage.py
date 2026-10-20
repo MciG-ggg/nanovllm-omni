@@ -277,12 +277,17 @@ class ThinkerStage:
         # fork Config (cudaErrorStreamCaptureInvalidated); eager is the
         # safe path. See ADR-0005. Bridge-buffer wiring lives in thinker.py
         # and is exercised by test_thinker_bridge_buffer.py.
+        #
+        # ``extra["use_thinker_cuda_graph"]`` opts back in; that is the
+        # bench harness's comparison knob (ADR-0005 keeps it out of
+        # DeployConfig).
+        extra = dict(getattr(args, "extra", None) or {})
         self.config = get_stage_config(
             "thinker",
             model_path=_resolve_model_path(args, stage="thinker"),
             **stage_kwargs_from_args(args),
         )
-        self.config.enforce_eager = True
+        self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", False)
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
         self.stage_runner = StageRunner(

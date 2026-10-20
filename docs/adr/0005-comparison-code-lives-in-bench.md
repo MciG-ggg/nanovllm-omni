@@ -21,7 +21,9 @@ runtime:
   capture fails on RTX 3050 with the current minimind-3o fork
   Config (`cudaErrorStreamCaptureInvalidated`). Same root cause as
   the historical `fix(smolvlm): force enforce_eager` series.
-  Stage hardcodes `cfg.enforce_eager = True`.
+  Stage sets `cfg.enforce_eager = not extra["use_thinker_cuda_graph"]`,
+  so eager is the default and the bench harness can still measure
+  the graph cell.
 - **talker** (`minimind_omni/stage.py:TalkerStage`): bypasses
   `ModelRunner` and uses fork `Context` directly — `enforce_eager`
   does not apply (see ADR-006).
@@ -79,6 +81,11 @@ The cleanup landed in two commits:
 and continues to flow it as kwargs to `Omni(...)` /
 `run_n_full(...)`. Removing the field from `DeployConfig` does
 not affect bench.
+
+The flag reaches the stage as `OmniEngineArgs.extra`
+(`use_thinker_cuda_graph`), because unknown kwargs land in `extra`.
+`--use-talker-cuda-graph` was removed: the talker has no graph
+path, so the flag could only ever be a no-op.
 
 ## Considered alternatives
 

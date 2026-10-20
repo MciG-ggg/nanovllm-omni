@@ -35,24 +35,6 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 `generate([prompt], sampling_params)` with sampling defaults from
 `deploy/minimind_omni.yaml`, and writes a WAV file.
 
-### Batched continuous-batching
-
-```bash
-cd examples/offline_inference/minimind_o
-HF_HUB_OFFLINE=1 bash run_batched.sh \
-    --mimi pretrained/mimi --out batched_smoke
-```
-
-`batched.py` exercises `models/minimind_omni/kv_pool.py + models/minimind_omni/batched_runner.py`
-on two prompts and asserts:
-
-- **Q10a determinism** — `solo_a.wav` is byte-identical to
-  `batched_a.wav`, regardless of whether request A ran alone or
-  alongside request B.
-- **Real B>1 decode** — at least one decode step has `B=2` in the
-  recorded forward shapes.
-- All outputs decode as valid WAV.
-
 ## Notes
 
 - `Omni(...)` resolves the pipeline topology from

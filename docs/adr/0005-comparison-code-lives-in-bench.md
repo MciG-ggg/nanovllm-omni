@@ -26,13 +26,13 @@ runtime:
   `ModelRunner` and uses fork `Context` directly — `enforce_eager`
   does not apply (see ADR-006).
 - **smolvlm** (`smolvlm/stage.py:SmolVLMStage`): graph capture
-  fails on this shell. Stage hardcodes `cfg.enforce_eager = True`.
+  fails on this shell. Stage hardcodes `cfg.enforce_eager = True`
+  unless `extra["use_cuda_graph"]` is set, which the bench harness
+  uses for the eager-vs-graph comparison cell.
 
 `DeployConfig` carried a comparison knob that only the bench
-harness ever flipped (`tools/profile_talker_graph_e2e.py`,
-`tools/bench_paged_single_graph.py`, `nanovllm_omni/bench/__main__.py`).
-Production never had a reason to toggle it; the public surface
-was a leak.
+harness ever flipped (`nanovllm_omni/bench/__main__.py`). Production
+never had a reason to toggle it; the public surface was a leak.
 
 The relay that wired the deploy flag through `stage_runner.py`
 into fork `Config.enforce_eager` was dead infrastructure with a

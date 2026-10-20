@@ -4,9 +4,9 @@
 Minimal prefill-once / decode-N-times measurement on the loaded bundle.
 Records per-step decode latency and VRAM peak.
 
-This is intentionally simpler than ``bench_paged_single_graph.py``: one
-decode path, one cell, no graph capture. Use ``verify_phase4_wire.py``
-when you want shape checks, bit-equal, and the E2E WAV.
+One decode path, one cell, no graph capture. Use
+``verify_phase4_wire.py`` when you want shape checks, bit-equal, and the
+E2E WAV.
 
 Usage:
     python tools/bench_decode_loop.py \\

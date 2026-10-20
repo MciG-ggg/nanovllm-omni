@@ -16,7 +16,7 @@ with an asyncio semaphore and a thread pool.
 installed as an editable dependency via `pyproject.toml`'s
 `[tool.uv.sources] nano-vllm = { path = "third_party/nano-vllm", editable = true }`.
 **It is the AR engine behind `Omni.generate`** for the LLM-shaped stages
-(MiniMind-O thinker + talker, SmolVLM, SmolVLA's vlm stage). We do not
+(MiniMind-O thinker + talker, SmolVLM). We do not
 fork it lightly — the vLLM-style paged-KV decoder and CUDA-Graph capture
 path live there, and re-implementing them locally would be a multi-month
 side quest. What we do **not** take from the fork is its
@@ -27,13 +27,16 @@ registry is preserved so non-fork model classes (e.g. `MiniMindThinker`,
 `MiniMindTalker`, `SmolVLMForConditionalGeneration`) can plug in via
 `ModelRunner(model_class=...)`.
 
+SmolVLA's `vlm` stage is **not** on the fork: it calls the lerobot
+`SmolVLAPolicy` stack directly (see the SmolVLA section below).
+
 ### Fork pieces we use
 
 | Fork module | What it gives us |
 |---|---|
 | `nanovllm.engine.model_runner.ModelRunner` | Per-stage AR runner: weight loader, KV allocate, optional CUDA-Graph capture, NCCL init, decode-graph reuse. One `ModelRunner` per stage. |
 | `nanovllm.config.Config` | Stage configuration (`enforce_eager`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `trust_remote_code`). Each stage builds one. |
-| `nanovllm.layers.attention.Attention` | Paged-KV attention with the `store_kvcache` Triton kernel. Used by every AR submodule (thinker blocks, talker blocks, SmolVLM/SmolVLA text stack). |
+| `nanovllm.layers.attention.Attention` | Paged-KV attention with the `store_kvcache` Triton kernel. Used by the fork-AR submodules (thinker blocks, talker blocks, SmolVLM text stack). |
 | `nanovllm.layers.linear.{QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear}` | Fused QKV / fused gate-up / row-parallel projection. These are what makes the merged QKV a "real" layer, not a runtime monkey-patch. |
 | `nanovllm.layers.layernorm.RMSNorm` | Fused RMSNorm. |
 | `nanovllm.layers.rotary_embedding.get_rope` | RoPE. |
@@ -76,7 +79,7 @@ This is unrelated to performance — it's the fork-multi-runner adaptation.
 | `models/sd_turbo/{stage.py, pipeline.py}` | SD-Turbo 1-step image generation as a `DIFFUSION`-kind stage implementing the 4-method contract (`prepare_encode` / `denoise_step` / `step_scheduler` / `post_decode`) | SD-Turbo only |
 | `models/smolvla/{vlm_stage.py, action_stage.py, stage_processors.py, pipeline.py, policy.py}` | Two-stage VLA: `vlm` (`LLM_AR`) → bridge payload → `action` (`DIFFUSION`, flow-matching Euler over the action expert) | SmolVLA only |
 | `diffusion/interface.py` | `DiffusionPipeline` Protocol / `StepState` / `DiffusionOutput` — 4-method contract for DIFFUSION-kind stages | New — fork has no equivalent |
-| `diffusion/runner.py` | `DiffusionRunner` — drives the 4-method loop (`run_sync` + `step_streaming`); stdlib `deque` scheduler inline | New |
+| `diffusion/runner.py` | `DiffusionRunner` — drives the 4-method loop (`prepare` / `denoise_step` / `step_scheduler` / `post_decode`, exposed via `run_sync`); stdlib `deque` scheduler inline | New |
 | `utils/profiling.py` | `profile_range(name)` context manager (`torch.profiler.record_function` + `nvtx.range`) | New |
 | `serving/openai_adapter.py` | Stdlib OpenAI-shaped HTTP adapter | Small serving seam, not FastAPI |
 

@@ -31,11 +31,8 @@ First public pre-release.
   `OmniRequestOutput`, `PipelineConfig`, `DeployConfig`,
   `register_pipeline`, `resolve_pipeline_config`, `load_deploy_config`,
   `merge_pipeline_deploy`.
-- StagePool pattern: per-stage continuous batching (TK-004) implemented
-  in-process via `nanovllm_omni/models/minimind_omni/runtime_scheduler.py`, single
-  replica only. Multi-replica + RoundRobin load balancing (TK-007) was
-  removed after measuring `num_replicas=1 == num_replicas=2`
-  (`tests/test_batched_runner_contract.py`).
+- Single-process runtime with a per-stage pipeline executor; no
+  per-stage replica pool and no RoundRobin load balancing.
 - Fused QKV / gate-up projections, fused RMSNorm, fused RoPE,
   pre-allocated KV buffer, SDPA decode with `is_causal=True` for
   MiniMind-O on the 4 GB card.

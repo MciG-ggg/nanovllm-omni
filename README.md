@@ -10,7 +10,6 @@
 - 🎯 **MiniMind-O pipeline** — smallest full Thinker → Talker → Code2Wav runtime that loads real `jingyaogong/minimind-3o` weights
 - ⚡ **Full three-stage E2E ~0.65–1.04 s total median on RTX 3050 (4 GB)** — one prompt → thinker → talker → MTP → Mimi → WAV, real `jingyaogong/minimind-3o` + `kyutai/mimi` weights, torch 2.14.0+cu130, re-measured 2026-09 on the full-only tree. All six bench prompts, 20 runs each: **628–1038 ms total median** (short ~0.63 s, medium ~0.75 s, system ~1.04 s), p95 ≤ 1.11 s, VRAM peak ~1881 MiB. Numbers + raw CSV in `docs/perf/tk005-rtx3050.md` / `docs/perf/full-e2e-rtx3050.csv`.
 - 🔧 **Thinker-decode bench primitive (for regression, not the production path)** — `bench time` (default) measures the single-thinker decode stage only: ~177 ms total median with `--use-thinker-cuda-graph`, ~483 ms eager, on the same box. That number does **not** include the talker/MTP/Mimi stages and must not be quoted as end-to-end latency.
-- 🔁 **StagePool pattern (single-replica in-process)** — per-stage continuous batching via `RuntimeScheduler`; multi-replica + RoundRobin LB removed after measuring `num_replicas=1 == num_replicas=2` (`tests/test_batched_runner_contract.py`)
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
 A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
@@ -195,9 +194,7 @@ The thinker-only primitive (`bench time` without `--pipeline full`) is kept
 for stage regression, not as an E2E number.
 
 Full-E2E numbers + validation: `docs/perf/tk005-rtx3050.md` and raw CSV
-`docs/perf/full-e2e-rtx3050.csv`. Thinker CUDA-Graph kernel breakdown
-(historical): `docs/perf/minimind-omni-under-500ms.md`. Eager-path
-baseline (pre-`d2ebe56`): `docs/perf/session-1.md`.
+`docs/perf/full-e2e-rtx3050.csv`.
 
 ## Configuration
 
@@ -210,7 +207,7 @@ nanovllm_omni/  # package implementation (config layer in nanovllm_omni/config/)
     deploy/     # per-family sampling/resource defaults (shipped in the wheel)
 examples/
     offline_inference/
-        minimind_o/   # Python-seam audio smoke (single + batched)
+        minimind_o/   # Python-seam audio smoke
         sd_turbo/     # SD-Turbo image generation
         smolvla/      # SmolVLA policy (synthetic L1 + LIBERO eval)
         smolvlm/      # SmolVLM text/VLM
@@ -246,14 +243,14 @@ the 4 GB GPU we target and wasteful on anything bigger.
 traffic (thinker hidden states → talker → code2wav) is Python
 tensor references with zero serialization and zero IPC.
 
-For request-level parallelism on the same GPU, use the in-process
-batched runner (`examples/offline_inference/minimind_o/batched.py`,
-verified by `tests/test_batched_generation.py` — Q10a).
+Request-level parallelism on the same GPU is out of scope: the four
+model families share one single-process pipeline runner, and each
+request gets its own pipeline execution.
 
 ### Fork architecture: `third_party/nano-vllm`
 
-The AR-shaped stages (MiniMind-O thinker + talker, SmolVLM, the vlm
-half of SmolVLA) run on top of a vendored fork of
+The AR-shaped stages (MiniMind-O thinker + talker, SmolVLM) run on top
+of a vendored fork of
 [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm),
 installed as an editable dependency under `third_party/nano-vllm/` (see
 `pyproject.toml` `[tool.uv.sources]`). The fork provides the
@@ -289,13 +286,6 @@ any are added later, the change must start by reworking
 `engine/runner.py` / `engine/executor.py` (per-replica inference path),
 not by retrofitting vllm-omni's
 `StageRuntime` into a runtime that has no use for it today.
-
-The four supported model families share the same single-process pipeline
-runner. Per-stage continuous batching (TK-004) is currently a MiniMind-O
-feature, wired in-process via `models/minimind_omni/runtime_scheduler.py`.
-The per-stage replica + RoundRobin LB layer (TK-007) was removed after
-measuring `num_replicas=1 == num_replicas=2`
-(`tests/test_batched_runner_contract.py`).
 
 ## Acknowledgements
 

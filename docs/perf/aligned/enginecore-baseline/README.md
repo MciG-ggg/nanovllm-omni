@@ -6,6 +6,10 @@ Captured 2026-09-08 on `ssh mcigs-wsl` (`DESKTOP-Q29JAU0`).
 - Torch: 2.14.0+cu130
 - WSL repo: `/home/mcig/nanovllm-omni` @ `174d620` (`fix: zero KV buffer on every prefill entry`)
 - This is **pre-EngineCore** code. Local macOS still has uncommitted Phase 1–3 work; it was **not** pushed, so this baseline is the old paged path.
+- **Historical command.** `tools/bench_paged_single_graph.py` was removed when the
+  local paged-KV / paged-CUDA-Graph stack was replaced by the
+  `third_party/nano-vllm` fork. The numbers below are the record of that run;
+  the command is kept for provenance and no longer runs against the current tree.
 - Command:
 
 ```bash

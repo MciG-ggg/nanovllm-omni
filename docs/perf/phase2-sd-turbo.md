@@ -1,6 +1,6 @@
 # Phase 2 — sd-turbo VAE + UNet decomposition
 
-**Status: Phase 2 cell complete. Real bottleneck is `image.cpu()` D2H transfer, not VAE kernels. CUDA graph capture blocked by diffusers CPU→GPU traffic.**
+**Status: Phase 2 cell complete. Real bottleneck is the VAE conv kernels themselves (~345 ms on RTX 3050) — not the D2H transfer and not the Python conversion chain. CUDA graph capture works but gives no wall-time benefit (the captured region is already compute-bound).**
 
 Date: 2026-09-18
 Repo: `a633374` (+ sd_turbo bench CG fix at `93af9f6`)

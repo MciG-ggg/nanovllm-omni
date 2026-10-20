@@ -1,5 +1,12 @@
 # MiniMind-O generate 阶段 ncu kernel 分析（2026-09-01）
 
+> **历史文档。** 本文分析的是 **fork 之前**的代码路径：文中提到的
+> `nanovllm_omni/models/minimind_omni/attention.py`、
+> `nanovllm_omni/optim/cuda_graph.py`、`nanovllm_omni/optim/bench/__main__.py`
+> 以及工具 `tools/bench_omni_cross_prompt.py` 都已被
+> `third_party/nano-vllm` fork 取代或删除。结论（launch overhead 主导，而非
+> 单 kernel 慢）仍然成立；当前基线见 `docs/perf/tk005-rtx3050.md`。
+
 > 任务：用 Nsight Compute（`ncu`）逐 kernel 看 generate 阶段硬件行为，决定
 > 是否需要手写 kernel / 该写哪种。**结论：不需要。瓶颈是 launch overhead，
 > 不是单个 kernel 慢。** 见 [§ 6 结论](#6-结论)。
@@ -35,7 +42,7 @@ WSL 恢复后会重跑一遍上 3050 的数据更新这张表。
 
 ## 2. 跨平台稳定的发现（Kineto 在 WSL 3050 + Colab T4 都确认）
 
-`docs/perf/session-1.md` 在 WSL 3050 上记的 generate 阶段 top kernels，本会话
+`docs/perf/session-1.csv` 在 WSL 3050 上记的 generate 阶段 top kernels，本会话
 在 Colab T4 上重跑 `python -m nanovllm_omni.bench profile-detail` 后**完
 全一致**：
 

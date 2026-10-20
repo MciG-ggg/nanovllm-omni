@@ -59,7 +59,15 @@ def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
         import torch
         from nanovllm.config import Config
 
+        # The fork has no ``dtype`` field: it builds its model in
+        # ``hf_config.dtype`` and sizes the KV cache with it. The
+        # checkpoint dtype wins unless the caller asks for another one.
+        # Without this the decode model runs in fp32 while the stage's
+        # own copy of the weights runs in the requested dtype.
+        dtype = kwargs.pop("dtype", None)
         _stage_configs[stage_name] = Config(model_path, **kwargs)
+        if dtype is not None:
+            _stage_configs[stage_name].hf_config.dtype = getattr(torch, dtype)
         # Force a CUDA device probe on the cached config so a later
         # ``ModelRunner(config)`` sees a consistent device. The fork's
         # default is "cuda"; an explicit ``device`` kwarg wins.
@@ -126,6 +134,7 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
     max_num_batched_tokens = getattr(args, "max_num_batched_tokens", None)
     max_num_seqs = getattr(args, "max_num_seqs", None)
     tensor_parallel_size = getattr(args, "tensor_parallel_size", 1)
+    dtype = getattr(args, "dtype", None)
     # MiniMind-3o ships trust_remote_code modeling files; without this
     # AutoConfig.from_pretrained raises before fork Config is built.
     # Default True (matches minimind_omni/stage.py hardcoded path);
@@ -141,6 +150,7 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
         "max_num_seqs": max_num_seqs if max_num_seqs is not None else 512,
         "tensor_parallel_size": tensor_parallel_size,
         "trust_remote_code": trust_remote_code,
+        "dtype": dtype,
     }
 
 

@@ -95,9 +95,11 @@ class SmolVLMStage:
         self.model.eval()
 
         # 3) Build fork StageRunner wrapping the language_model-only forward
-        # CUDA graph capture fails on this shell (pending debugging;
-        # talker also skips graph per ADR-006). Force eager for now;
-        # the paged-KV path still works, just without graph replay.
+        # The decode loop runs under a CUDA graph: on a T4 the eager
+        # path spends most of the wall time in kernel launches, not in
+        # the GPU. The fork falls back to eager when the capture fails
+        # on the device, so the graph is on by default and
+        # ``extra["use_cuda_graph"] = False`` turns it off.
         # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
         # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
         from huggingface_hub import snapshot_download
@@ -111,7 +113,7 @@ class SmolVLMStage:
             model_dir,
             **stage_kwargs_from_args(args),
         )
-        config.enforce_eager = not extra.get("use_cuda_graph", False)
+        config.enforce_eager = not extra.get("use_cuda_graph", True)
         # fork Config is a frozen-ish dataclass; dtype is a process-wide
         # torch default, not a per-stage attribute. Set it for downstream
         # model construction (smolvlm.py weights load as bf16).

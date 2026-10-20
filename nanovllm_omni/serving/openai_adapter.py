@@ -127,7 +127,10 @@ def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str | N
     defaults = next(
         (stage.default_sampling_params for stage in deploy.stages if stage.name == "thinker"), {}
     )
-    allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed", "n"}
+    # Only fields the stages actually honour. ``n`` (n>1 completions) is
+    # not implemented by any stage, so accepting it from the deploy YAML
+    # would silently drop it.
+    allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed"}
     sampling = SamplingParams(**{key: value for key, value in defaults.items() if key in allowed})
     return (
         Omni(model_id, device=device, mimi_model_id=mimi_id, extra={"deploy_config": deploy}),

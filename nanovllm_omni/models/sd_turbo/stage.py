@@ -76,6 +76,11 @@ class SdTurboPipeline:
         extra = dict(getattr(sampling, "extra", None) or {})
 
         prompt = getattr(request, "prompt", None)
+        if prompt is None and isinstance(request, dict):
+            # A dict payload (the OmniPromptType shape) carries the text
+            # under "prompt"; without this the CLIP encoder would get
+            # the dict's repr.
+            prompt = request.get("prompt")
         if prompt is None:
             prompt = extra.get("prompt", str(request))
 

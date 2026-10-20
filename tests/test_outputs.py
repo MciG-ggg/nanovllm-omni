@@ -74,7 +74,7 @@ def test_num_images_default_zero() -> None:
 
 
 def test_num_images_diffusion() -> None:
-    out = OmniRequestOutput.from_diffusion([object(), object()], request_id="r")
+    out = OmniRequestOutput.from_diffusion("r", [object(), object()])
     assert out.num_images == 2
     assert len(out.images) == 2
 
@@ -142,7 +142,7 @@ def test_from_pipeline_without_transcript_omits_custom_output() -> None:
 def test_from_diffusion_racks_images() -> None:
     """TK-018: images field mirrors vllm-omni's diffusion list slot."""
     imgs = [object(), object(), object()]
-    out = OmniRequestOutput.from_diffusion(imgs, request_id="r")
+    out = OmniRequestOutput.from_diffusion("r", imgs)
     assert out.images == imgs
     assert out.num_images == 3
     assert out.is_diffusion_output is True

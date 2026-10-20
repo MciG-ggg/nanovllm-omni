@@ -88,6 +88,44 @@ def _is_tensor(value: Any) -> bool:
     return isinstance(value, torch.Tensor)
 
 
+def _as_artifact(value: Any) -> Any:
+    """Wrap a raw stage payload in the artifact type ``to_dict`` can serialize.
+
+    Diffusion stages return a ``DiffusionOutput`` holding a PIL image, and
+    VLA stages return one holding an ``ActionArtifact``; neither survives
+    ``json.dumps`` on its own. A PIL image becomes an ``ImageArtifact``
+    (PNG bytes + dimensions); an ``ActionArtifact`` already carries a
+    plain array, so it only needs the numeric conversion in ``to_dict``.
+    """
+
+    def _is_pil(obj: Any) -> bool:
+        return (
+            hasattr(obj, "save")
+            and hasattr(obj, "size")
+            and not isinstance(obj, (bytes, bytearray))
+        )
+
+    # Diffusion stages wrap their payload in a container with ``images``.
+    container_images = getattr(value, "images", None)
+    if isinstance(container_images, (list, tuple)):
+        value = list(container_images)
+
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
+
+    wrapped: list[Any] = []
+    changed = False
+    for item in items:
+        if _is_pil(item):
+            wrapped.append(ImageArtifact.from_pil(item))
+            changed = True
+        else:
+            wrapped.append(item)
+
+    if not changed:
+        return value
+    return wrapped[0] if not isinstance(value, (list, tuple)) else wrapped
+
+
 @dataclass(eq=False)
 class MultimodalPayload(Mapping[str, Any]):
     """Mapping-compatible container for tensor outputs and metadata.
@@ -244,7 +282,7 @@ class OmniRequestOutput:
     @classmethod
     def from_pipeline(cls, output: Any, request_id: str = "", final_output_type: str = "audio"):
         value = output.audio if hasattr(output, "audio") else output
-        payload = MultimodalPayload.from_dict({final_output_type: value})
+        payload = MultimodalPayload.from_dict({final_output_type: _as_artifact(value)})
         # Double-track ASR (Q2): a `transcript` attribute set by the thinker
         # surfaces as `custom_output["transcript"]` without touching the
         # ``multimodal_output["audio"]`` seam.
@@ -261,23 +299,33 @@ class OmniRequestOutput:
         )
 
     @classmethod
-    def from_diffusion(cls, output: Any, request_id: str = ""):
-        images = (
-            list(output)
-            if isinstance(output, (list, tuple))
-            else ([output] if output is not None else [])
+    def from_diffusion(cls, request_id: str, images: Any):
+        """Build an image output.
+
+        Argument order matches the reference: ``request_id`` first, then
+        the images.
+        """
+        image_list = (
+            list(images)
+            if isinstance(images, (list, tuple))
+            else ([images] if images is not None else [])
         )
         return cls(
             request_id=request_id,
-            outputs=output,
-            multimodal_output=MultimodalPayload.from_dict({"image": output}),
+            outputs=images,
+            multimodal_output=MultimodalPayload.from_dict({"image": images}),
             final_output_type="image",
-            images=images,
+            images=image_list,
         )
 
     @classmethod
-    def from_error(cls, error: str, request_id: str = ""):
-        return cls(request_id=request_id, error=error)
+    def from_error(cls, request_id: str, error_message: str):
+        """Build a terminal error output.
+
+        Argument order matches the reference: ``request_id`` first, then
+        the error message.
+        """
+        return cls(request_id=request_id, error=error_message)
 
     @classmethod
     def from_stage_output(
@@ -375,10 +423,34 @@ class OmniRequestOutput:
                         result["multimodal_output"][f"{key}_metadata"] = {
                             "token_ids": list(value.token_ids),
                         }
+                elif isinstance(value, ActionArtifact):
+                    result["multimodal_output"][key] = [
+                        [float(x) for x in row] for row in value.array
+                    ]
+                    result["multimodal_output"][f"{key}_metadata"] = {
+                        "action_dim": value.action_dim,
+                        "chunk_size": value.chunk_size,
+                        "dtype": value.dtype,
+                    }
                 elif isinstance(value, (bytes, bytearray)):
                     result["multimodal_output"][key] = base64.b64encode(bytes(value)).decode(
                         "ascii"
                     )
+                elif isinstance(value, list) and any(
+                    isinstance(item, (ImageArtifact, ActionArtifact)) for item in value
+                ):
+                    # A diffusion stage returns a list of artifacts (one per
+                    # image / action chunk). Serialize each one under the
+                    # original key.
+                    serialized = []
+                    for item in value:
+                        if isinstance(item, ImageArtifact):
+                            serialized.append(
+                                base64.b64encode(bytes(item.png_bytes)).decode("ascii")
+                            )
+                        else:
+                            serialized.append([[float(x) for x in row] for row in item.array])
+                    result["multimodal_output"][key] = serialized
                 else:
                     result["multimodal_output"][key] = value
         if self._custom_output:

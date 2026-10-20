@@ -22,12 +22,12 @@ def test_pipeline_output_contract():
     assert not output.is_diffusion_output
     assert output.unwrap() == {"audio": audio}
 
-    error = OmniRequestOutput.from_error("failed")
+    error = OmniRequestOutput.from_error("r", "failed")
     try:
         error.unwrap()
     except RuntimeError as exc:
         assert str(exc) == "failed"
     else:
         raise AssertionError("error output must raise")
-    diffusion = OmniRequestOutput.from_diffusion({"image": b"x"})
+    diffusion = OmniRequestOutput.from_diffusion("r", {"image": b"x"})
     assert diffusion.is_diffusion_output

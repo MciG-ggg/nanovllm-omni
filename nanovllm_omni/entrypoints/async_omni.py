@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 from ..config.params import SamplingParams
 from ..outputs import OmniRequestOutput
-from .omni import Omni
+from .omni import Omni, _split_prompt
 
 
 class AsyncOmni(Omni):
@@ -26,7 +26,21 @@ class AsyncOmni(Omni):
             prompts = [prompts]
         executor = self._ensure_executor()
         for prompt in prompts:
-            payload = await executor.submit(prompt, sampling_params)
+            # Same split as the sync path: a dict prompt carries modal
+            # payload (image, ...) that rides along in sampling.extra.
+            text, modal = _split_prompt(prompt)
+            params = sampling_params
+            if modal:
+                import dataclasses
+
+                extra = dict(getattr(sampling_params, "extra", None) or {})
+                extra.update(modal)
+                params = (
+                    dataclasses.replace(sampling_params, extra=extra)
+                    if sampling_params is not None
+                    else SamplingParams(extra=extra)
+                )
+            payload = await executor.submit(text, params)
             yield OmniRequestOutput.from_pipeline(
                 payload,
                 final_output_type=self._final_output_type(),

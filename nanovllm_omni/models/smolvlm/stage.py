@@ -188,8 +188,27 @@ class SmolVLMStage:
             else {}
         )
         images = list(extras.get("images") or [])
-        max_new_tokens = int(extras.get("max_new_tokens", 512))
+        # ``SamplingParams.max_tokens`` is the public knob; the deploy
+        # YAML and the bench harness use ``extra["max_new_tokens"]``.
+        # Read the public field first, fall back to the extra key.
+        max_new_tokens = getattr(sampling, "max_tokens", None)
+        if max_new_tokens is None:
+            max_new_tokens = extras.get("max_new_tokens", 512)
+        max_new_tokens = int(max_new_tokens)
         temperature = float(getattr(sampling, "temperature", 0.0) or 0.0)
+        # Seed the sampler so the same seed reproduces the same tokens.
+        seed = getattr(sampling, "seed", None)
+        if seed is not None:
+            import torch
+
+            torch.manual_seed(int(seed))
+        # Stop strings: stop as soon as one of them appears in the text
+        # generated so far.
+        stop_strings = list(getattr(sampling, "stop", None) or [])
+
+        def _stop_hit(ids: list[int]) -> bool:
+            text = self.processor.batch_decode([ids], skip_special_tokens=True)[0]
+            return any(s in text for s in stop_strings)
 
         with profile_range(":tokenize"):
             # Build chat-template input; processor expands <image> placeholders
@@ -266,6 +285,8 @@ class SmolVLMStage:
                 if generated[-1] == self.eos_token_id:
                     break
                 if sequence.num_completion_tokens >= max_new_tokens:
+                    break
+                if stop_strings and _stop_hit(generated):
                     break
 
         return self.processor.batch_decode([generated], skip_special_tokens=True)[0]

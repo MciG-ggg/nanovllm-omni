@@ -135,10 +135,9 @@ def stage_kwargs_from_args(args: Any) -> dict[str, Any]:
     max_num_seqs = getattr(args, "max_num_seqs", None)
     tensor_parallel_size = getattr(args, "tensor_parallel_size", 1)
     dtype = getattr(args, "dtype", None)
-    # MiniMind-3o ships trust_remote_code modeling files; without this
-    # AutoConfig.from_pretrained raises before fork Config is built.
-    # Default True (matches minimind_omni/stage.py hardcoded path);
-    # caller can override by passing trust_remote_code=False explicitly.
+    # The MiniMind-O stages ignore this flag: they register their own
+    # config class, so the fork Config loads no remote code. Other
+    # families pass it through to the fork Config.
     trust_remote_code = getattr(args, "trust_remote_code", True)
     return {
         "gpu_memory_utilization": (

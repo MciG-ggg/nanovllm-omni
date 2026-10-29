@@ -71,31 +71,19 @@ class SmolVLAVlmStage:
         )
 
         # Build observation batch (single image + state, preprocessor normalizes).
-        images_list = []
         img = extras.get("image")
         if img is None:
-            img = extras.get("observation.images.image")
-        if img is not None:
-            images_list.append(img)
-        wrist = extras.get("wrist_image") or extras.get("observation.images.image2")
-        if wrist is not None:
-            images_list.append(wrist)
-
-        robot_state = extras.get("state")
-        if robot_state is None:
-            robot_state = extras.get("observation.state")
+            raise ValueError("SmolVLA vlm_stage requires an image in extras['image']")
 
         # Convert to lerobot batch format.
         import numpy as np
 
-        if img is not None:
-            arr = np.array(img)
-            img_tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float()
-            img_tensor = img_tensor.to(self.device)
-        else:
-            raise ValueError("SmolVLA vlm_stage requires an image in extras['image']")
+        arr = np.array(img)
+        img_tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float()
+        img_tensor = img_tensor.to(self.device)
 
         batch = {"observation.images.image": img_tensor, "task": [instruction]}
+        robot_state = extras.get("state")
         if robot_state is not None:
             batch["observation.state"] = torch.tensor(
                 np.asarray(robot_state, dtype=np.float32).reshape(1, -1),
@@ -134,7 +122,6 @@ class SmolVLAVlmStage:
         )
 
         return VlmStageOutput(
-            prefix_states=prefix_pad_masks,  # used for shape only; KV cache is in metadata
             robot_state=state.squeeze(0),
             attention_mask=prefix_att_masks,
             request_id=extras.get("request_id"),

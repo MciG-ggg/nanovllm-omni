@@ -48,16 +48,13 @@ def test_vlm2action_accepts_vlm_stage_output():
         vlm2action,
     )
 
-    hidden = torch.randn(8, 576)
     state = torch.randn(7)
     out = VlmStageOutput(
-        prefix_states=hidden,
         robot_state=state,
         request_id="t1",
         metadata={"chunk_len": 10, "action_dim": 7},
     )
     payload = vlm2action(out, prompt="pick up the red block")
-    assert payload.prefix_states is hidden
     assert payload.robot_state is state
     assert payload.chunk_len == 10
     assert payload.action_dim == 7
@@ -70,7 +67,7 @@ def test_vlm2action_rejects_non_vlm_output():
     from nanovllm_omni.models.smolvla.stage_processors import vlm2action
 
     with pytest.raises(TypeError, match="VlmStageOutput"):
-        vlm2action({"prefix_states": None, "robot_state": None}, prompt="x")
+        vlm2action({"robot_state": None}, prompt="x")
     with pytest.raises(TypeError, match="VlmStageOutput"):
         vlm2action("raw string", prompt="x")
     with pytest.raises(TypeError, match="VlmStageOutput"):
@@ -235,7 +232,6 @@ def test_policy_identity_fixed_at_construction():
     with __import__("pytest").raises(ValueError, match="no policy"):
         pipe.prepare_encode(
             ActionInputPayload(
-                prefix_states=torch.ones(1, 4),
                 robot_state=torch.zeros(7),
                 chunk_len=10,
                 action_dim=7,

@@ -93,13 +93,13 @@ def test_stage_rejects_untyped_mapping_instead_of_guessing() -> None:
         stage({"codes": {"audio": torch.zeros(1, 8)}})
 
 
-def test_factory_uses_injected_mimi_without_loading_full_model(monkeypatch) -> None:
+def test_factory_uses_injected_mimi_without_loading_full_model() -> None:
     import nanovllm_omni.models.minimind_omni.code2wav as code2wav
 
-    def fail_full_loader(*args, **kwargs):
-        raise AssertionError("Code2Wav must not load the full MiniMind bundle")
+    # Structural lock: code2wav imports only the Mimi constants from the
+    # bundle, so it cannot load the full MiniMind checkpoint.
+    assert not hasattr(code2wav, "load_minimind_omni_bundle")
 
-    monkeypatch.setattr(code2wav, "load_minimind_omni_bundle", fail_full_loader, raising=False)
     mimi = FakeMimi()
     args = OmniEngineArgs(
         model="ignored",

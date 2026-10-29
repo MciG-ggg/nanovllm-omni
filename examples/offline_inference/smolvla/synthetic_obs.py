@@ -65,10 +65,9 @@ def main() -> int:
 
     rng = np.random.default_rng(args.seed)
     image = rng.integers(0, 256, size=(256, 256, 3), dtype=np.uint8)
-    wrist = rng.integers(0, 256, size=(256, 256, 3), dtype=np.uint8)
     state = np.zeros(8, dtype=np.float32)
     sampling = SamplingParams(
-        extra={"image": image, "wrist_image": wrist, "state": state},
+        extra={"image": image, "state": state},
     )
     out = omni.generate([args.instruction], sampling)[0]
     if out.error:

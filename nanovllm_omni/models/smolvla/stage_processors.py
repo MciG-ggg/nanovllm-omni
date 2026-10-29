@@ -15,9 +15,13 @@ from typing import Any
 
 @dataclass(frozen=True)
 class VlmStageOutput:
-    """Output of the vlm (AR) stage: backbone hidden states + robot state."""
+    """Output of the vlm (AR) stage: robot state + the KV cache in metadata.
 
-    prefix_states: Any  # torch.Tensor [T, H] backbone hidden states
+    The prefix KV cache and pad masks travel in ``metadata`` because the
+    action stage consumes them as one dict; they are not per-request
+    tensor fields on this payload.
+    """
+
     robot_state: Any  # torch.Tensor [state_dim] normalized proprio
     attention_mask: Any | None = None
     request_id: str | None = None
@@ -28,7 +32,6 @@ class VlmStageOutput:
 class ActionInputPayload:
     """Input to the action (flow matching) stage."""
 
-    prefix_states: Any
     robot_state: Any
     chunk_len: int
     action_dim: int
@@ -48,7 +51,6 @@ def vlm2action(payload: Any, prompt: str = "") -> ActionInputPayload:
     metadata = dict(payload.metadata)
     metadata["instruction"] = prompt
     return ActionInputPayload(
-        prefix_states=payload.prefix_states,
         robot_state=payload.robot_state,
         chunk_len=metadata.get("chunk_len", 10),
         action_dim=metadata.get("action_dim", 7),

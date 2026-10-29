@@ -37,6 +37,32 @@ def _split_prompt(prompt: OmniPromptType) -> tuple[str, dict[str, Any] | None]:
     return str(text), (modal or None)
 
 
+def _merge_modal(
+    sampling_params: SamplingParams | None,
+    prompt: OmniPromptType,
+) -> tuple[str, SamplingParams | None]:
+    """Split one prompt and fold its modal payload into ``sampling.extra``."""
+    text, modal = _split_prompt(prompt)
+    if not modal:
+        return text, sampling_params
+    extra = dict(getattr(sampling_params, "extra", None) or {})
+    extra.update(modal)
+    if sampling_params is None:
+        return text, SamplingParams(extra=extra)
+    return text, dataclasses.replace(sampling_params, extra=extra)
+
+
+def _make_output(
+    payload: Any,
+    stage_ms: dict[str, float],
+    final_output_type: str,
+) -> OmniRequestOutput:
+    """Build the entrypoint-facing output; both Omni and AsyncOmni use it."""
+    output = OmniRequestOutput.from_pipeline(payload, final_output_type=final_output_type)
+    output.custom_output = {**output.custom_output, "stage_ms": stage_ms}
+    return output
+
+
 class Omni(OmniBase):
     def _one(
         self,
@@ -44,25 +70,9 @@ class Omni(OmniBase):
         sampling_params: SamplingParams | None = None,
     ) -> OmniRequestOutput:
         executor = self._ensure_executor()
-        text, modal = _split_prompt(prompt)
-        if modal:
-            extra = dict(getattr(sampling_params, "extra", None) or {})
-            extra.update(modal)
-            sampling_params = (
-                dataclasses.replace(
-                    sampling_params,
-                    extra=extra,
-                )
-                if sampling_params is not None
-                else SamplingParams(extra=extra)
-            )
-        payload, stage_ms = executor._runner.run(text, sampling_params)
-        output = OmniRequestOutput.from_pipeline(
-            payload,
-            final_output_type=self._final_output_type(),
-        )
-        output.custom_output = {**output.custom_output, "stage_ms": stage_ms}
-        return output
+        text, sampling_params = _merge_modal(sampling_params, prompt)
+        payload, stage_ms = executor.run(text, sampling_params)
+        return _make_output(payload, stage_ms, self._final_output_type())
 
     def _collect_kwargs(
         self,

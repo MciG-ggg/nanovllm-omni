@@ -4,9 +4,11 @@ Dispatches synchronous ``PipelineRunner.run_payload`` calls to a thread
 pool executor so that multiple HTTP requests or ``AsyncOmni`` consumers
 can share a single GPU. ``max_concurrent=1`` by default (single GPU).
 
-Only ``submit`` exists: one request in, one payload out. There is no
-streaming entry — ``AsyncOmni.generate`` already yields per prompt by
-awaiting ``submit`` in a loop, and no caller needs a second shape.
+Only two shapes exist: synchronous ``run`` for ``Omni`` and awaited
+``submit`` for ``AsyncOmni``. Both return ``(payload, stage_ms)`` so the
+two entrypoints build the same output object. There is no streaming
+entry — ``AsyncOmni.generate`` already yields per prompt by awaiting
+``submit`` in a loop, and no caller needs a third shape.
 
 Design basis: 10-round grill session Q3 = (i). Sanity layer for HTTP and
 AsyncOmni; the underlying model loading is synchronous.
@@ -46,17 +48,25 @@ class PipelineExecutor:
     def close(self) -> None:
         self._executor.shutdown(wait=False)
 
+    def run(
+        self,
+        prompt: str,
+        sampling: SamplingParams | None = None,
+    ) -> tuple[Any, dict[str, float]]:
+        """Run one request on the calling thread (``Omni`` path)."""
+        return self._runner.run(prompt, sampling)
+
     async def submit(
         self,
         prompt: str,
         sampling: SamplingParams | None = None,
-    ) -> Any:
-        """Submit one request and await the result (payload only)."""
+    ) -> tuple[Any, dict[str, float]]:
+        """Submit one request and await ``(payload, stage_ms)``."""
         async with self._semaphore:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 self._executor,
-                self._runner.run_payload,
+                self._runner.run,
                 prompt,
                 sampling,
             )

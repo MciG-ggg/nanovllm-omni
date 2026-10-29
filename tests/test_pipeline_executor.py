@@ -38,7 +38,8 @@ def test_executor_submit_is_async():
     async def go() -> str:
         executor = _make_executor()
         try:
-            return await executor.submit("hello")
+            payload, _ = await executor.submit("hello")
+            return payload
         finally:
             executor.close()
 
@@ -49,11 +50,22 @@ def test_executor_submit_sequential():
     async def go() -> list[str]:
         executor = _make_executor()
         try:
-            return [await executor.submit(f"p{i}") for i in range(3)]
+            return [(await executor.submit(f"p{i}"))[0] for i in range(3)]
         finally:
             executor.close()
 
     assert asyncio.run(go()) == ["out(p0)", "out(p1)", "out(p2)"]
+
+
+def test_executor_run_is_sync_and_returns_stage_ms():
+    executor = _make_executor()
+    try:
+        payload, stage_ms = executor.run("hello")
+    finally:
+        executor.close()
+
+    assert payload == "out(hello)"
+    assert list(stage_ms) == ["s"]
 
 
 def test_executor_max_concurrent_must_be_positive():

@@ -32,16 +32,12 @@ class _RunnerStub:
         self.calls.append((prompt, sampling))
         return SimpleNamespace(audio=b"RIFF....", sample_rate=24000), {"s": 1.0}
 
-    def run_payload(self, prompt: str, sampling: SamplingParams | None) -> SimpleNamespace:
-        payload, _ = self.run(prompt, sampling)
-        return payload
-
 
 def _make_omni(runner: _RunnerStub) -> object:
     from nanovllm_omni.entrypoints.omni import Omni
 
     omni = Omni("minimind_o")
-    omni._executor = SimpleNamespace(_runner=runner)  # type: ignore[attr-defined]
+    omni._executor = SimpleNamespace(run=runner.run)  # type: ignore[attr-defined]
     return omni
 
 
@@ -52,9 +48,18 @@ class _AsyncSubmitStub:
         self._runner = runner
         self.submit_calls: list[tuple[str, object | None]] = []
 
-    async def submit(self, prompt: str, sampling: SamplingParams | None) -> SimpleNamespace:
+    async def submit(self, prompt: str, sampling: SamplingParams | None) -> tuple:
         self.submit_calls.append((prompt, sampling))
-        return self._runner.run_payload(prompt, sampling)
+        return self._runner.run(prompt, sampling)
+
+
+def _make_async_omni(runner: _RunnerStub) -> tuple[object, _AsyncSubmitStub]:
+    from nanovllm_omni.entrypoints.async_omni import AsyncOmni
+
+    executor = _AsyncSubmitStub(runner)
+    omni = AsyncOmni("minimind_o")
+    omni._executor = executor  # type: ignore[attr-defined]
+    return omni, executor
 
 
 def _make_omni_output(out: SimpleNamespace) -> OmniRequestOutput:
@@ -149,21 +154,60 @@ def test_generate_rejects_both_param_arguments() -> None:
 
 def test_async_generate_unchanged_shape() -> None:
     """AsyncOmni still yields an async iterator."""
-    from nanovllm_omni.entrypoints.async_omni import AsyncOmni
-
-    runner = _RunnerStub()
-    executor = _AsyncSubmitStub(runner)
-    omni = AsyncOmni("minimind_o")
-    omni._executor = executor  # type: ignore[attr-defined]
+    omni, _ = _make_async_omni(_RunnerStub())
 
     async def collect() -> object:
-        items = [o async for o in omni.generate(["a", "b"])]  # type: ignore[call-overload]
+        items = [o async for o in omni.generate(["a", "b"])]  # type: ignore[union-attr]
         return [type(o) for o in items]  # type: ignore[return-value]
 
     import asyncio
 
     result = asyncio.run(collect())
     assert result == [OmniRequestOutput, OmniRequestOutput]
+
+
+def test_async_omni_is_a_sibling_not_a_subclass() -> None:
+    """The reference keeps Omni and AsyncOmni as siblings.
+
+    Their ``generate`` signatures differ, so inheriting one from the other
+    would claim a substitutability that does not hold.
+    """
+    from nanovllm_omni.entrypoints.async_omni import AsyncOmni
+    from nanovllm_omni.entrypoints.base import OmniBase
+    from nanovllm_omni.entrypoints.omni import Omni
+
+    assert issubclass(AsyncOmni, OmniBase)
+    assert not issubclass(AsyncOmni, Omni)
+
+
+def test_async_generate_dict_prompt_is_one_request() -> None:
+    """A dict prompt must not be iterated into its keys."""
+    import asyncio
+
+    omni, executor = _make_async_omni(_RunnerStub())
+
+    async def collect() -> None:
+        async for _ in omni.generate({"prompt": "hi", "image": b"x"}):  # type: ignore[arg-type,union-attr]
+            pass
+
+    asyncio.run(collect())
+    assert len(executor.submit_calls) == 1
+    text, sampling = executor.submit_calls[0]
+    assert text == "hi"
+    assert sampling is not None and sampling.extra["image"] == b"x"
+
+
+def test_async_output_carries_stage_ms() -> None:
+    """Both entrypoints expose the same per-stage timings."""
+    import asyncio
+
+    omni, _ = _make_async_omni(_RunnerStub())
+
+    async def collect() -> list[OmniRequestOutput]:
+        return [o async for o in omni.generate(["a"])]  # type: ignore[union-attr]
+
+    outputs = asyncio.run(collect())
+    assert outputs[0].custom_output["stage_ms"] == {"s": 1.0}
 
 
 def test_generate_accepts_dict_prompt_with_image() -> None:

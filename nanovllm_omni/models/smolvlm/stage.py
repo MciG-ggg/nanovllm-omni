@@ -109,7 +109,6 @@ class SmolVLMStage:
         except Exception:  # pragma: no cover - rely on load_model to fail loud
             model_dir = model_id
         config = get_stage_config(
-            "smolvlm_vlm",
             model_dir,
             **stage_kwargs_from_args(args),
         )

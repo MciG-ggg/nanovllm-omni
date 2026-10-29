@@ -9,8 +9,9 @@ on top — see ``models/minimind_omni/stage_runner.py``.
 Contents:
 - ``_ensure_dist`` — monkey-patches ``dist.init_process_group`` so
   two ``ModelRunner`` instances can co-exist in one process.
-- ``_stage_configs`` / ``get_stage_config`` — per-stage fork
-  ``Config`` cache so repeat factory invocations don't rebuild it.
+- ``get_stage_config`` — builds a fresh per-stage fork ``Config``. It
+  is not cached: callers set ``enforce_eager`` on the returned object,
+  so a shared instance would leak one stage's graph choice into another.
 - ``stage_kwargs_from_args`` — maps ``OmniEngineArgs`` fields onto
   fork ``Config`` kwargs.
 - ``StageRunner`` — the per-stage AR runner. ``__init__`` builds
@@ -35,52 +36,39 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Per-stage Config cache.
+# Per-stage Config construction.
 # ---------------------------------------------------------------------------
-#
-# Fork ``Config`` is a dataclass whose ``__post_init__`` reads
-# ``hf_config`` via ``AutoConfig.from_pretrained`` and asserts the
-# model path is a real directory. Each stage needs its own ``Config``
-# because ``gpu_memory_utilization`` is per-stage (thinker 0.6, talker
-# 0.2 in the deploy YAML). Caching by stage name so repeat factory
-# invocations reuse the same ``Config`` object.
-
-_stage_configs: dict[str, Any] = {}
 
 
-def get_stage_config(stage_name: str, model_path: str, **kwargs: Any) -> Any:
-    """Return the fork ``Config`` for one stage (lazy, cached).
+def get_stage_config(model_path: str, **kwargs: Any) -> Any:
+    """Build the fork ``Config`` for one stage.
 
     Fork ``Config.__post_init__`` accepts ``trust_remote_code`` as a
     field, so we pass it as a kwarg instead of monkey-patching
     ``AutoConfig.from_pretrained``.
-    """
-    if stage_name not in _stage_configs:
-        import torch
-        from nanovllm.config import Config
 
-        # The fork has no ``dtype`` field: it builds its model in
-        # ``hf_config.dtype`` and sizes the KV cache with it. The
-        # checkpoint dtype wins unless the caller asks for another one.
-        # Without this the decode model runs in fp32 while the stage's
-        # own copy of the weights runs in the requested dtype.
-        dtype = kwargs.pop("dtype", None)
-        _stage_configs[stage_name] = Config(model_path, **kwargs)
-        if dtype is not None:
-            _stage_configs[stage_name].hf_config.dtype = getattr(torch, dtype)
-        # Force a CUDA device probe on the cached config so a later
-        # ``ModelRunner(config)`` sees a consistent device. The fork's
-        # default is "cuda"; an explicit ``device`` kwarg wins.
-        if "device" in kwargs:
-            _stage_configs[stage_name].device = kwargs["device"]
-        # Per-stage graph-vs-eager defaults live in the stage code
-        # itself (see ADR-0005). Stage decides whether to set
-        # ``cfg.enforce_eager`` after ``get_stage_config`` returns.
-        # Reference torch so an unused-import lint doesn't kick in on
-        # environments where the import is needed for the side-effect
-        # of the cached Config later.
-        _ = torch
-    return _stage_configs[stage_name]
+    Every call returns a fresh object: both callers set ``enforce_eager``
+    on it, so caching by stage name would let one instance's graph choice
+    leak into another.
+    """
+    import torch
+    from nanovllm.config import Config
+
+    # The fork has no ``dtype`` field: it builds its model in
+    # ``hf_config.dtype`` and sizes the KV cache with it. The
+    # checkpoint dtype wins unless the caller asks for another one.
+    # Without this the decode model runs in fp32 while the stage's
+    # own copy of the weights runs in the requested dtype.
+    dtype = kwargs.pop("dtype", None)
+    config = Config(model_path, **kwargs)
+    if dtype is not None:
+        config.hf_config.dtype = getattr(torch, dtype)
+    # Force a CUDA device probe on the config so a later
+    # ``ModelRunner(config)`` sees a consistent device. The fork's
+    # default is "cuda"; an explicit ``device`` kwarg wins.
+    if "device" in kwargs:
+        config.device = kwargs["device"]
+    return config
 
 
 # ---------------------------------------------------------------------------

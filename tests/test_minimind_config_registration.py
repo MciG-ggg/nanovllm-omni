@@ -58,7 +58,7 @@ def test_fork_config_reads_the_local_config_class(tmp_path) -> None:
     _write_checkpoint(tmp_path)
     register_minimind_config()
 
-    config = get_stage_config("minimind-config-test", str(tmp_path), trust_remote_code=False)
+    config = get_stage_config(str(tmp_path), trust_remote_code=False)
 
     assert isinstance(config.hf_config, MiniMindOConfig)
     assert config.hf_config.tie_word_embeddings is True

@@ -293,7 +293,6 @@ class ThinkerStage:
         stage_kwargs = stage_kwargs_from_args(args)
         stage_kwargs["trust_remote_code"] = False
         self.config = get_stage_config(
-            "thinker",
             model_path=_resolve_model_path(args, stage="thinker"),
             **stage_kwargs,
         )

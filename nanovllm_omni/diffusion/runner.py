@@ -4,10 +4,9 @@ Entry points:
 - ``run_sync(payload, sampling)`` — full loop, returns [DiffusionOutput]
 - ``run(payload, sampling)`` — run_sync + first image/artifact, for PipelineRunner
 
-``num_steps`` is resolved in one place (``_resolve_num_steps``):
-state.metadata wins (the pipeline already folded payload/sampling
-into it during prepare_encode), then payload attribute, then
-sampling extras. One definition, no second loop elsewhere.
+``num_steps`` has one source: ``state.metadata["num_steps"]``, written by
+``prepare_encode``. There is no payload / sampling fallback — a pipeline
+that forgets it fails loudly instead of silently running one step.
 
 See ``docs/dev/nanovllm-omni-diffusion-mirror.md`` §2.3.
 """
@@ -19,23 +18,9 @@ from typing import Any
 from .interface import DiffusionOutput, DiffusionPipeline, StepState
 
 
-def _resolve_num_steps(payload: Any, sampling: Any, state: StepState) -> int:
-    """Single definition of the num_steps priority.
-
-    state.metadata wins: the pipeline's prepare_encode already folded
-    payload + sampling into it. Payload attribute and sampling extras
-    are fallbacks for pipelines that don't.
-    """
-    metadata = getattr(state, "metadata", None) or {}
-    if "num_steps" in metadata:
-        return int(metadata["num_steps"])
-    if hasattr(payload, "num_inference_steps"):
-        return int(payload.num_inference_steps)
-    if sampling is not None and getattr(sampling, "extra", None):
-        extra_steps = int(sampling.extra.get("num_inference_steps", 0))
-        if extra_steps > 0:
-            return extra_steps
-    return 1
+def _resolve_num_steps(state: StepState) -> int:
+    """The one place the denoise loop length is read."""
+    return int(state.metadata["num_steps"])
 
 
 class DiffusionRunner:
@@ -52,10 +37,7 @@ class DiffusionRunner:
         Sampling is forwarded so pipelines can read deploy defaults
         (num_inference_steps/height/width) from ``sampling.extra``.
         """
-        try:
-            return self.pipeline.prepare_encode(payload, sampling)
-        except TypeError:
-            return self.pipeline.prepare_encode(payload)
+        return self.pipeline.prepare_encode(payload, sampling)
 
     def denoise_step(
         self,
@@ -98,7 +80,7 @@ class DiffusionRunner:
     def run_sync(self, payload: Any, sampling: Any = None) -> list[DiffusionOutput]:
         """Run the full denoise loop synchronously. Returns [DiffusionOutput]."""
         state = self.prepare(payload, sampling)
-        num_steps = _resolve_num_steps(payload, sampling, state)
+        num_steps = _resolve_num_steps(state)
         for step in range(num_steps):
             noise_pred = self.denoise_step(state, step=step, num_steps=num_steps)
             self.step_scheduler(state, noise_pred)

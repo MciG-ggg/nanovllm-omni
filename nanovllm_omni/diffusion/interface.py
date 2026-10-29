@@ -54,8 +54,15 @@ class DiffusionPipeline(Protocol):
 
     supports_step_execution: ClassVar[bool]
 
-    def prepare_encode(self, request: Any) -> StepState:
-        """Text / condition encoding → initial ``StepState`` with latents."""
+    def prepare_encode(self, request: Any, sampling: Any = None) -> StepState:
+        """Text / condition encoding → initial ``StepState`` with latents.
+
+        ``sampling`` carries the per-request / deploy defaults (number of
+        steps, height, width). Implementations that need none of it may
+        ignore the argument, but every implementation must write
+        ``state.metadata["num_steps"]`` so the runner has one source for
+        the denoise loop length.
+        """
         ...
 
     def denoise_step(self, state: StepState, *, step: int, num_steps: int) -> Any:

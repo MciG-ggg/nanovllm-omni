@@ -4,7 +4,7 @@ Verifies:
 - Protocol structural shape (4 methods + supports_step_execution)
 - Runner: IdentityPipeline runs N steps correctly via run_sync
 - Runner: run() returns the first image/artifact for PipelineRunner
-- Runner: num_steps priority is state.metadata > payload > sampling.extra
+- Runner: num_steps comes from ``state.metadata``
 
 See ``docs/dev/nanovllm-omni-sdturbo-diffusion-migration.md`` §5.1.
 """
@@ -26,7 +26,7 @@ class _IdentityPipeline:
     def __init__(self, num_steps: int = 3) -> None:
         self.num_steps = num_steps
 
-    def prepare_encode(self, request: object) -> object:
+    def prepare_encode(self, request: object, sampling: object = None) -> object:
         from nanovllm_omni.diffusion.interface import StepState
 
         num_steps = getattr(request, "num_inference_steps", self.num_steps)
@@ -104,19 +104,20 @@ def test_runner_single_step():
     assert outputs[0].images[0] == pytest.approx(0.1)
 
 
-def test_runner_state_metadata_wins():
-    """prepare_encode writes num_steps into metadata; runner honors it."""
+def test_runner_reads_num_steps_from_state_metadata():
+    """prepare_encode writes num_steps; the runner does not re-derive it."""
 
-    class _BarePipeline(_IdentityPipeline):
-        def prepare_encode(self, request):
+    class _MetadataPipeline(_IdentityPipeline):
+        def prepare_encode(self, request, sampling=None):
             from nanovllm_omni.diffusion.interface import StepState
 
-            return StepState(request_id="t", latents=0.0)
+            return StepState(request_id="t", latents=0.0, metadata={"num_steps": 2})
 
     from nanovllm_omni.diffusion.runner import DiffusionRunner
 
-    runner = DiffusionRunner(_BarePipeline())
-    sampling = _FakeSampling(extra={"num_inference_steps": 2})
+    runner = DiffusionRunner(_MetadataPipeline())
+    # sampling.extra says 99; metadata must win.
+    sampling = _FakeSampling(extra={"num_inference_steps": 99})
     assert runner.run("a cat", sampling) == pytest.approx(0.2)  # 2 × 0.1
 
 

@@ -180,13 +180,14 @@ class _LoggedDiffusionPipeline:
     def __init__(self, log_target: list) -> None:
         self._log = log_target
 
-    def prepare_encode(self, request: Any) -> Any:
+    def prepare_encode(self, request: Any, sampling: Any = None) -> Any:
         from nanovllm_omni.diffusion.interface import StepState
 
         return StepState(
             request_id="test",
             latents=0.0,
             encoder_hidden_states=None,
+            metadata={"num_steps": 1},
         )
 
     def denoise_step(self, state: Any, *, step: int, num_steps: int) -> Any:

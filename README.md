@@ -223,12 +223,13 @@ This repository intentionally excludes video generation, multi-model pipelines b
 
 ### Single-card, single-process runtime
 
-One `Omni(...)` constructs one `MinimindBundle`
-(`nanovllm_omni/models/minimind_omni/bundle.py`) holding the full
-MiniMind-O checkpoint, the Mimi codec, and the tokenizer in one
-Python process. There is no per-stage subprocess pool, no
-`StageRuntime`, no multi-GPU dispatch, and no tensor-parallel
-worker — by design.
+One `Omni(...)` resolves a `PipelineConfig` and builds one
+`PipelineRunner` whose stages live in the same Python process. For
+MiniMind-O the two AR stages share one checkpoint through
+`nanovllm_omni/models/minimind_omni/bundle.py` (used by bench and
+tools); the engine itself only sees stage instances. There is no
+per-stage subprocess pool, no `StageRuntime`, no multi-GPU dispatch,
+and no tensor-parallel worker — by design.
 
 This is a deliberate divergence from vllm-omni, where each stage
 runs in its own `StageEngineCoreProc` subprocess and stages can

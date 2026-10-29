@@ -35,7 +35,8 @@ The model-family-owned transformation that converts one stage's output payload i
 _Avoid_: Engine adapter, model registry
 
 **Execution Type**:
-The closed semantic category that selects a stage's generic runtime path, such as autoregressive language modeling, diffusion, or codec decoding.
+The closed semantic taxonomy a stage declares, such as autoregressive language modeling, diffusion, or codec decoding.
+The runner does **not** dispatch on it: it calls the stage's `stage_factory` as `instance(payload, sampling)`. The type documents intent and mirrors the reference's `StageExecutionType`.
 _Avoid_: Model name, architecture name
 
 **Terminal Output**:

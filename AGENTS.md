@@ -62,7 +62,7 @@
 
 ### 本仓库的测试 DSL（tuple-registered factories）
 
-`StageConfig.stage_factory` 用 `(module, attr)` 元组引用，让 `PipelineConfig` 完全可序列化（`test_bundle_resolve_snapshot.py` 依赖这点）。所有工厂写在 `tests/_stage_factories.py`，按用途分四类：
+`StageConfig.stage_factory` 用 `(module, attr)` 元组引用，让 `import nanovllm_omni.config` 保持无 torch：`models/*/pipeline.py` 只存字符串，不会 import `thinker.py` / `talker.py`（这两个模块顶部就 `import torch`），所以 CPU-only 机器也能检查拓扑。代价是测试不能传闭包，只能模块级工厂 + 捕获槽。所有工厂写在 `tests/_stage_factories.py`，按用途分四类：
 
 | 词 | 形态 | 用途 |
 |---|---|---|

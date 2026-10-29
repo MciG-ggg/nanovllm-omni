@@ -134,9 +134,6 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
     )
     deploy = load_deploy_config(path)
     assert isinstance(deploy, DeployConfig)
-    assert deploy.post_eos_padding_count == 128
-    assert deploy.internal_stop_token_id == 17
-    assert deploy.talker_max_steps_after_last_thinker_token == 192
     assert {s.name for s in deploy.stages} == {"thinker", "talker", "code2wav"}
 
     pipeline = resolve_pipeline_config("minimind_o")
@@ -155,40 +152,32 @@ def test_deploy_config_merges_stage_defaults(tmp_path: Path):
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("post_eos_padding_count", -1),
-        ("post_eos_padding_count", "many"),
-        ("internal_stop_token_id", "stop"),
-        ("talker_max_steps_after_last_thinker_token", 1.5),
+        ("max_num_batched_tokens", 0),
+        ("max_num_seqs", -1),
+        ("gpu_memory_utilization", 1.5),
     ],
 )
-def test_deploy_config_rejects_invalid_phase_2_values(tmp_path: Path, key: str, value: object):
+def test_deploy_stage_config_rejects_invalid_runtime_values(
+    tmp_path: Path, key: str, value: object
+):
     path = tmp_path / "invalid-deploy.yaml"
-    path.write_text(f"{key}: {value!r}\n", encoding="utf-8")
+    path.write_text(f"stages:\n  - name: thinker\n    {key}: {value!r}\n", encoding="utf-8")
     with pytest.raises(ValueError, match=key):
         load_deploy_config(path)
 
 
-def test_deploy_config_accepts_disabled_talker_watchdog(tmp_path: Path):
-    path = tmp_path / "disabled-watchdog.yaml"
+def test_deploy_config_ignores_keys_no_stage_reads(tmp_path: Path):
+    """Only ``stages`` survives; a knob the engine never reads is not parsed."""
+    path = tmp_path / "legacy.yaml"
     path.write_text(
-        "post_eos_padding_count: 0\n"
+        "max_batch: 2\n"
+        "post_eos_padding_count: 128\n"
         "internal_stop_token_id: 17\n"
-        "talker_max_steps_after_last_thinker_token: -1\n",
+        "talker_max_steps_after_last_thinker_token: 192\n"
+        "stages: []\n",
         encoding="utf-8",
     )
-    deploy = load_deploy_config(path)
-    assert deploy.post_eos_padding_count == 0
-    assert deploy.internal_stop_token_id == 17
-    assert deploy.talker_max_steps_after_last_thinker_token == -1
-
-
-def test_deploy_config_dataclass_validates_phase_2_values():
-    with pytest.raises(ValueError, match="post_eos_padding_count"):
-        DeployConfig(post_eos_padding_count=-1)
-    with pytest.raises(ValueError, match="internal_stop_token_id"):
-        DeployConfig(internal_stop_token_id="stop")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="talker_max_steps"):
-        DeployConfig(talker_max_steps_after_last_thinker_token=1.5)  # type: ignore[arg-type]
+    assert load_deploy_config(path).stages == ()
 
 
 def test_register_pipeline_adds_entry():

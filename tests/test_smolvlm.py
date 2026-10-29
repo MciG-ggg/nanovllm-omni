@@ -46,7 +46,6 @@ def test_deploy_yaml_schema_locked():
     import yaml
 
     cfg = yaml.safe_load(DEPLOY.read_text())
-    assert cfg["max_batch"] >= 1
     stages = cfg["stages"]
     assert len(stages) == 1
     assert stages[0]["name"] == "vlm"

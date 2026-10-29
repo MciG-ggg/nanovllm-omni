@@ -1,10 +1,6 @@
 # Three-stage thinker -> talker -> code2wav pipeline (RTX 3050 validated).
 # Graph-vs-eager is a per-stage decision; comparison code belongs in
 # bench/, not in this deploy config.
-max_batch: 2
-post_eos_padding_count: 128
-internal_stop_token_id: 17
-talker_max_steps_after_last_thinker_token: 192
 stages:
   - name: thinker
     max_num_batched_tokens: 512

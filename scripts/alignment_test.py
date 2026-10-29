@@ -226,7 +226,7 @@ def test_smolvla_alignment():
         ),
         default_deploy_config_name="smolvla.yaml",
     )
-    deploy = DeployConfig(stages=(), max_batch=2)
+    deploy = DeployConfig()
     args = OmniEngineArgs(
         model=SMOLVLM_MODEL,
         dtype="bfloat16",

@@ -107,7 +107,7 @@ if WHICH == "smolvla":
         device="cuda",
         extra={{"allow_hf_download": False}},
     )
-    runner = PipelineRunner(pipeline, DeployConfig(stages=(), max_batch=2), args)
+    runner = PipelineRunner(pipeline, DeployConfig(), args)
     sampling = SamplingParams(
         extra={{
             "image": torch.randn(3, 224, 224).byte(),

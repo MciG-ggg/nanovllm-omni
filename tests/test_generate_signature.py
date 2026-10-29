@@ -17,11 +17,6 @@ from nanovllm_omni.config.params import SamplingParams  # noqa: E402
 from nanovllm_omni.outputs import OmniRequestOutput  # noqa: E402
 
 
-class _Deploy:
-    max_batch = 1
-    stages = ()
-
-
 class _RunnerStub:
     """Stand-in for PipelineRunner: records the calls generate() makes."""
 

@@ -234,28 +234,12 @@ class DeployStageConfig:
 class DeployConfig:
     """Runtime knob bundle loaded from one deploy YAML.
 
-    ``stages`` carries per-stage sampling defaults; engine-level resource
-    knobs (continuous-batching width, etc.) are top-level keys in the YAML
-    (AGENTS: runtime knobs belong in ``deploy/*.yaml``, not in pipeline code).
+    ``stages`` carries per-stage sampling defaults and resource knobs.
+    Only knobs that a stage actually reads belong here: a key that is
+    parsed but never consumed makes the YAML lie about what it controls.
     """
 
     stages: tuple[DeployStageConfig, ...] = ()
-    max_batch: int = 2
-    # Full three-stage MiniMind-O mode: post-EOS bridge sequence + watchdog.
-    # Graph-vs-eager used to live here (use_*_cuda_graph flags) — moved to
-    # each stage's own default; comparison code belongs in bench, not in
-    # deploy config.
-    post_eos_padding_count: int = 128
-    internal_stop_token_id: int = 17
-    talker_max_steps_after_last_thinker_token: int = 192
-
-    def __post_init__(self) -> None:
-        _validate_runtime_int("post_eos_padding_count", self.post_eos_padding_count, minimum=0)
-        _validate_runtime_int("internal_stop_token_id", self.internal_stop_token_id)
-        _validate_runtime_int(
-            "talker_max_steps_after_last_thinker_token",
-            self.talker_max_steps_after_last_thinker_token,
-        )
 
 
 def _validate_runtime_int(name: str, value: Any, minimum: int | None = None) -> None:
@@ -390,18 +374,13 @@ def resolve_pipeline_config(model_type: str, hf_config: Any | None = None) -> Pi
 
 
 def load_deploy_config(path: str | Path) -> DeployConfig:
-    """Parse a deploy YAML into a DeployConfig."""
+    """Parse a deploy YAML into a DeployConfig.
+
+    Unknown keys are ignored so older configs keep loading.
+    """
     data = yaml.safe_load(Path(path).read_text()) or {}
     if not isinstance(data, Mapping):
         raise ValueError("deploy YAML must contain a mapping at the top level")
-    max_batch = int(data.get("max_batch", 2))
-    if max_batch < 1:
-        raise ValueError(f"max_batch must be >= 1, got {max_batch}")
-    post_eos_padding_count = data.get("post_eos_padding_count", 128)
-    internal_stop_token_id = data.get("internal_stop_token_id", 17)
-    talker_max_steps_after_last_thinker_token = data.get(
-        "talker_max_steps_after_last_thinker_token", 192
-    )
     return DeployConfig(
         stages=tuple(
             DeployStageConfig(
@@ -415,10 +394,6 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
             )
             for s in data.get("stages", [])
         ),
-        max_batch=max_batch,
-        post_eos_padding_count=post_eos_padding_count,
-        internal_stop_token_id=internal_stop_token_id,
-        talker_max_steps_after_last_thinker_token=talker_max_steps_after_last_thinker_token,
     )
 
 

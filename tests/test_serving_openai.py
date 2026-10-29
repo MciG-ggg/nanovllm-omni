@@ -108,6 +108,46 @@ def test_extract_prompt_rejects_remote_image_url() -> None:
         _extract_prompt(messages)
 
 
+def test_extract_prompt_rejects_multiple_images() -> None:
+    """Two ``image_url`` blocks must fail loudly, not overwrite silently."""
+    import base64
+
+    from nanovllm_omni.serving.openai_adapter import _extract_prompt
+
+    uri = "data:image/png;base64," + base64.b64encode(b"x").decode("ascii")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": uri}},
+                {"type": "image_url", "image_url": {"url": uri}},
+            ],
+        }
+    ]
+    with pytest.raises(ValueError, match="only one image_url block"):
+        _extract_prompt(messages)
+
+
+def test_build_state_forwards_config_path(monkeypatch, tmp_path) -> None:
+    """``--config`` must reach the engine through ``deploy_config_path``."""
+    from nanovllm_omni.serving import openai_adapter
+
+    seen: dict = {}
+
+    class _RecordingOmni:
+        def __init__(self, model, **kwargs) -> None:
+            seen["model"] = model
+            seen["extra"] = kwargs["extra"]
+
+    monkeypatch.setattr(openai_adapter, "Omni", _RecordingOmni)
+    config = tmp_path / "deploy.yaml"
+    config.write_text("stages:\n  - name: thinker\n", encoding="utf-8")
+
+    openai_adapter._build_state(config, "m", "mimi", "cpu")
+
+    assert seen["extra"] == {"deploy_config_path": str(config)}
+
+
 def test_extract_text_ignores_image_block_in_text_compat() -> None:
     """TK-017: image_url block no longer rejected; _extract_text drops it."""
     import base64

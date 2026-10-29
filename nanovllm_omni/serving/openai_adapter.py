@@ -69,6 +69,8 @@ def _extract_prompt(messages: list[dict[str, Any]]) -> tuple[str, bytes | None]:
                     raise ValueError(
                         "image_url must be a base64 data URI " '(e.g. "data:image/png;base64,...")'
                     )
+                if image is not None:
+                    raise ValueError("only one image_url block is supported")
                 import base64
 
                 image = base64.b64decode(url.split(";base64,", 1)[1])
@@ -133,7 +135,14 @@ def _build_state(config_path: Path, model_id: str, mimi_id: str, device: str | N
     allowed = {"temperature", "top_p", "top_k", "max_tokens", "stop", "seed"}
     sampling = SamplingParams(**{key: value for key, value in defaults.items() if key in allowed})
     return (
-        Omni(model_id, device=device, mimi_model_id=mimi_id, extra={"deploy_config": deploy}),
+        Omni(
+            model_id,
+            device=device,
+            mimi_model_id=mimi_id,
+            # The engine reads ``deploy_config_path``; it reloads the YAML
+            # so per-stage resource knobs reach it too.
+            extra={"deploy_config_path": str(config_path)},
+        ),
         sampling,
     )
 

@@ -8,9 +8,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-STAGE_NAMES = frozenset({"tokenize", "generate", "decode", "wav"})
-# Sub-event names we want to ignore when counting "child kernels" of a stage.
-_SUB_STAGE_NAMES = frozenset({"generate.step"})
+STAGE_NAMES = frozenset(
+    {
+        "tokenize",
+        "unet",
+        "vae-decode",
+        "vlm",
+        "vlm-prefill",
+        "vlm-decode",
+        "flow-step",
+        "action-decode",
+        # code2wav annotates without the leading colon.
+        "decode",
+        "wav",
+    }
+)
+
+
+def _normalized_name(name: str) -> str:
+    """``profile_range`` prefixes stage labels with ``:`` (ADR-0001)."""
+    return name[1:] if name.startswith(":") else name
 
 
 @dataclass(frozen=True)
@@ -31,9 +48,6 @@ class StageProfile:
     kernel_count: int
     total_kernel_us: float
     top_kernels: tuple[KernelStat, ...] = field(default_factory=tuple)
-    # n_steps shows how many AR iterations ran inside generate (informational
-    # when the trace is from a single generate call).
-    num_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,7 +75,7 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
         for ev in events
         if ev.get("ph") == "X"
         and ev.get("cat") == "user_annotation"
-        and ev.get("name") in STAGE_NAMES
+        and _normalized_name(ev.get("name", "")) in STAGE_NAMES
     ]
 
     profiles: list[StageProfile] = []
@@ -72,7 +86,6 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
         kernel_count: dict[str, int] = defaultdict(int)
         total_kernel_us = 0
         kernel_n = 0
-        num_steps = 0
         for ev in events:
             if ev.get("ph") != "X":
                 continue
@@ -84,12 +97,7 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
                 continue
             cat = ev.get("cat", "")
             name = ev.get("name", "")
-            # Count generate.step sub-events so the trace tells us how many
-            # AR iterations the model ran inside this generate stage.
-            if name == "generate.step" and stage["name"] == "generate":
-                num_steps += 1
-                continue
-            if name in STAGE_NAMES:
+            if _normalized_name(name) in STAGE_NAMES:
                 continue
             if cat not in ("kernel", "cuda_runtime"):
                 continue
@@ -101,12 +109,11 @@ def _parse_events(events: list[dict[str, Any]]) -> TraceProfile:
         top_kernels = tuple(KernelStat(name=k, total_us=v, count=kernel_count[k]) for k, v in top)
         profiles.append(
             StageProfile(
-                name=stage["name"],
+                name=_normalized_name(stage["name"]),
                 wall_us=stage["dur"],
                 kernel_count=kernel_n,
                 total_kernel_us=total_kernel_us,
                 top_kernels=top_kernels,
-                num_steps=num_steps,
             )
         )
     return TraceProfile(stages=tuple(profiles))
@@ -117,7 +124,6 @@ def trace_profile_markdown(profile: TraceProfile) -> str:
     cols = (
         "stage",
         "wall_us",
-        "n_steps",
         "kernel_count",
         "total_kernel_us",
         "top_kernel",
@@ -135,7 +141,6 @@ def trace_profile_markdown(profile: TraceProfile) -> str:
                 (
                     s.name,
                     f"{s.wall_us:.1f}",
-                    str(s.num_steps),
                     str(s.kernel_count),
                     f"{s.total_kernel_us:.1f}",
                     top.name if top else "(none)",

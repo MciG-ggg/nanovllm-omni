@@ -347,9 +347,10 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     from nanovllm_omni.bench.trace import parse_kineto_trace
 
     events = [
-        # Stage events (user_annotation, ph=X)
+        # Stage events (user_annotation, ph=X). profile_range labels
+        # stages with a leading colon; the parser normalizes it away.
         {
-            "name": "generate",
+            "name": ":unet",
             "ph": "X",
             "cat": "user_annotation",
             "ts": 0,
@@ -359,7 +360,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
             "args": {"id": 1},
         },
         {
-            "name": "decode",
+            "name": ":vae-decode",
             "ph": "X",
             "cat": "user_annotation",
             "ts": 1100,
@@ -368,7 +369,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
             "pid": 0,
             "args": {"id": 2},
         },
-        # Children of generate (CUDA kernels).
+        # Children of the unet stage (CUDA kernels).
         {
             "name": "aten::addmm",
             "ph": "X",
@@ -399,38 +400,7 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
             "pid": 1,
             "args": {"kernel": "softmax"},
         },
-        # generate.step sub-events: 3 iterations.
-        {
-            "name": "generate.step",
-            "ph": "X",
-            "cat": "user_annotation",
-            "ts": 20,
-            "dur": 90,
-            "tid": 1,
-            "pid": 0,
-            "args": {"id": 10},
-        },
-        {
-            "name": "generate.step",
-            "ph": "X",
-            "cat": "user_annotation",
-            "ts": 220,
-            "dur": 180,
-            "tid": 1,
-            "pid": 0,
-            "args": {"id": 11},
-        },
-        {
-            "name": "generate.step",
-            "ph": "X",
-            "cat": "user_annotation",
-            "ts": 510,
-            "dur": 40,
-            "tid": 1,
-            "pid": 0,
-            "args": {"id": 12},
-        },
-        # Child of decode (one kernel).
+        # Child of the vae-decode stage (one kernel).
         {
             "name": "aten::conv2d",
             "ph": "X",
@@ -449,10 +419,9 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     profile = parse_kineto_trace(path)
     assert len(profile.stages) == 2
 
-    gen = profile.by_stage("generate")
+    gen = profile.by_stage("unet")
     assert gen is not None
     assert gen.wall_us == 1000
-    assert gen.num_steps == 3
     assert gen.kernel_count == 3
     assert gen.total_kernel_us == 350
     top = gen.top_kernels[0]
@@ -460,11 +429,10 @@ def test_parse_kineto_trace_groups_kernels_under_stage_events():
     assert top.total_us == 300
     assert top.count == 2
 
-    dec = profile.by_stage("decode")
+    dec = profile.by_stage("vae-decode")
     assert dec is not None
     assert dec.wall_us == 200
     assert dec.kernel_count == 1
-    assert dec.num_steps == 0
 
 
 def test_trace_profile_markdown_renders_table():
@@ -478,7 +446,7 @@ def test_trace_profile_markdown_renders_table():
     tp = TraceProfile(
         stages=(
             StageProfile(
-                name="generate",
+                name="unet",
                 wall_us=1000.0,
                 kernel_count=3,
                 total_kernel_us=350.0,
@@ -486,10 +454,9 @@ def test_trace_profile_markdown_renders_table():
                     KernelStat(name="aten::addmm", total_us=300.0, count=2),
                     KernelStat(name="aten::softmax", total_us=50.0, count=1),
                 ),
-                num_steps=3,
             ),
             StageProfile(
-                name="decode",
+                name="vae-decode",
                 wall_us=200.0,
                 kernel_count=1,
                 total_kernel_us=80.0,
@@ -499,8 +466,8 @@ def test_trace_profile_markdown_renders_table():
     )
     md = trace_profile_markdown(tp)
     assert "| stage |" in md
-    assert "| generate |" in md
-    assert "| decode |" in md
+    assert "| unet |" in md
+    assert "| vae-decode |" in md
     assert "aten::addmm" in md
 
 

@@ -47,8 +47,8 @@ def get_policy(args: Any, extra: dict[str, Any] | None = None) -> Any:
     """Return the shared policy for this model path (loads once per key).
 
     Raises the loader's error when lerobot is missing or the checkpoint
-    is unreadable — no fake fallback here; test doubles are built by
-    the caller (see ``action_stage._FakePolicy``).
+    is unreadable — there is no fake fallback. Tests build their own
+    double (``tests/test_smolvla_split_stages.py``).
     """
     extra = dict(extra or {})
     allow_hf = bool(extra.get("allow_hf_download", False))

@@ -136,58 +136,23 @@ class SmolVLAActionPipeline:
 def _action_stage(deploy: Any, args: Any) -> Any:
     """Stage 1 factory: return SmolVLAActionPipeline.
 
-    Same shared instance as vlm_stage (same cache key → same object),
-    so no second ~2GB load on the 4GB card and identical sample_noise
-    RNG state. Falls back to a fake only when lerobot is missing.
+    Same shared policy instance as vlm_stage (same cache key → same
+    object), so no second ~2GB load on the 4GB card and identical
+    sample_noise RNG state. A missing lerobot install or an unreadable
+    checkpoint raises here; substituting a constant-velocity fake would
+    return plausible-looking garbage actions instead.
     """
     from .policy import get_policy
 
     extra = dict(getattr(args, "extra", None) or {})
     num_inference_steps = int(extra.get("num_inference_steps", 0)) or None
 
-    try:
-        policy = get_policy(args, extra)
-    except (ImportError, OSError):
-        # lerobot not installed; use fake for testing.
-        return DiffusionRunner(
-            SmolVLAActionPipeline(
-                policy=_FakePolicy(),
-                num_inference_steps=num_inference_steps,
-            )
-        )
-
     return DiffusionRunner(
         SmolVLAActionPipeline(
-            policy=policy,
+            policy=get_policy(args, extra),
             num_inference_steps=num_inference_steps,
         )
     )
-
-
-class _FakePolicy:
-    """Fake policy for testing without lerobot + GPU."""
-
-    class _FakeConfig:  # noqa: N801 (test double mirrors lerobot's lowercase config attrs)
-        chunk_size = 10
-        max_action_dim = 7
-        num_steps = 3
-        use_cache = True
-
-        class action_feature:  # noqa: N801 (mirrors policy.config.action_feature)
-            shape = [7]
-
-    def __init__(self) -> None:
-        import torch  # noqa: F401  (used inside nested _FakeModel methods)
-
-        class _FakeModel:
-            def sample_noise(self, shape, device):
-                return torch.randn(shape, device=device, dtype=torch.float32)
-
-            def denoise_step(self, x_t, prefix_pad_masks, past_key_values, timestep):
-                return torch.full_like(x_t, 0.1)
-
-        self.config = self._FakeConfig()
-        self.model = _FakeModel()
 
 
 __all__ = ["SmolVLAActionPipeline", "_action_stage"]

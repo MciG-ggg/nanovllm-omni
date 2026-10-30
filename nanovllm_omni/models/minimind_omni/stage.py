@@ -278,14 +278,16 @@ class ThinkerStage:
         self.deploy = deploy
         self.args = args
         self.model_class = model_class or MiniMindThinker
-        # Graph capture fails on RTX 3050 with the current minimind-3o
-        # fork Config (cudaErrorStreamCaptureInvalidated); eager is the
-        # safe path. See ADR-0005. Bridge-buffer wiring lives in thinker.py
-        # and is exercised by test_thinker_bridge_buffer.py.
+        # The decode graph is the default: on the RTX 3050 it cuts the
+        # thinker stage from ~2250 ms to ~595 ms per request (ADR-0007),
+        # and eager and graph produce byte-identical audio for the same
+        # seed (tests/test_minimind_graph_parity.py). The fork falls back
+        # to eager when capture fails, so a device that cannot capture
+        # still runs.
         #
-        # ``extra["use_thinker_cuda_graph"]`` opts back in; that is the
-        # bench harness's comparison knob (ADR-0005 keeps it out of
-        # DeployConfig).
+        # ``extra["use_thinker_cuda_graph"] = False`` opts back out; that
+        # is the bench harness's comparison knob (ADR-0005 keeps the
+        # choice at the stage, out of DeployConfig).
         extra = dict(getattr(args, "extra", None) or {})
         # The local config class replaces the hub's ``auto_map`` file, so
         # no remote code runs and the fork Config can ask for none.
@@ -296,7 +298,7 @@ class ThinkerStage:
             model_path=_resolve_model_path(args, stage="thinker"),
             **stage_kwargs,
         )
-        self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", False)
+        self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
         self.stage_runner = StageRunner(

@@ -3,8 +3,9 @@
 ``--use-thinker-cuda-graph`` reaches the stage as
 ``OmniEngineArgs.extra["use_thinker_cuda_graph"]`` (unknown kwargs land
 in ``extra``). The stage turns it into the fork ``Config``'s
-``enforce_eager``: eager by default (graph capture fails on RTX 3050,
-ADR-0005), graph when the flag is set.
+``enforce_eager``: graph by default (3.8x on RTX 3050 with byte-identical
+output, ADR-0005 amendment 2026-10-30), eager when the bench asks for the
+comparison cell.
 
 The fork layers are heavy, so the stage is built with the three fork
 touch points stubbed: ``get_stage_config`` (returns the config the
@@ -33,16 +34,18 @@ def _build_stage(monkeypatch: pytest.MonkeyPatch, extra: dict) -> object:
     return thinker, config
 
 
-def test_thinker_is_eager_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_thinker_uses_the_graph_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     thinker, config = _build_stage(monkeypatch, {})
 
-    assert thinker.config.enforce_eager is True
-
-
-def test_thinker_graph_flag_enables_graph(monkeypatch: pytest.MonkeyPatch) -> None:
-    thinker, config = _build_stage(monkeypatch, {"use_thinker_cuda_graph": True})
-
     assert thinker.config.enforce_eager is False
+
+
+def test_thinker_eager_flag_selects_the_comparison_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thinker, config = _build_stage(monkeypatch, {"use_thinker_cuda_graph": False})
+
+    assert thinker.config.enforce_eager is True
 
 
 if __name__ == "__main__":

@@ -38,9 +38,10 @@
 `steady` 是 warmup 之后的常驻占用（权重 + fork 的 paged KV 池）；`peak` 是单次请求
 跑完整个 pipeline 过程中的最高分配。
 
-> 注意：`smolvlm` 这一行测于提交 `d1406e5` **之前**。该提交去掉了 stage 自己构造的
-> 第二份 `SmolVLMForConditionalGeneration`（约 1 GiB），所以之后的峰值会低于 2189 MiB，
-> 且 KV 池不再被挤到单个 256-token block。复测之前，不要把本表当作当前代码的结论。
+> 注意：`smolvlm` 这一行的 2189 MiB 是 `d1406e5` **之前**的数（当时 stage 持有一份
+> 重复模型副本，KV 池只剩 1 个 block）。修复后同机实测：加载后 1587.6 MiB，
+> 文本请求峰值 1587.9 MiB，图片请求（512², 17 tiles）峰值 1922.1 MiB。
+> 详见 ADR 0008。
 
 结论：
 

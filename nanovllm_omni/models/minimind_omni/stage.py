@@ -404,6 +404,17 @@ _AUDIO_VENDOR_TEMPERATURE = 0.2
 _AUDIO_REPETITION_PENALTY = 1.05
 
 
+def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
+    """Whether the emission gate opens at ``step`` or at any later step.
+
+    The gate needs all eight codebooks active, ``idx[i] = step - 7 + i``.
+    ``idx`` only grows, so a codebook that stays inactive now stays inactive
+    forever: a closed gate is permanent, which is what lets the decode loop
+    stop early without changing the emitted frames.
+    """
+    return all(stop_positions[i] is None or step - 7 + i < stop_positions[i] for i in range(8))
+
+
 class TalkerStage:
     """Stage 1 — MiniMind talker MTP decode.
 
@@ -509,6 +520,15 @@ class TalkerStage:
             raise ValueError("TalkerStage received empty text_token_ids")
 
         extra = getattr(sampling, "extra", None) or {}
+        # Seed here as well as in the thinker: the talker's own sampling is
+        # the last RNG consumer, and the first request in a process also
+        # consumes RNG building the talker weights (``_ensure_model`` above).
+        # Without this, the same (prompt, seed) yields different audio
+        # depending on how many requests the process served before.
+        # Mirrors ``models/smolvlm/stage.py``.
+        seed = getattr(sampling, "seed", None)
+        if seed is not None:
+            torch.manual_seed(int(seed))
         # ``watchdog_limit`` caps the number of talker decode steps the
         # way upstream's ``talker_max_steps_after_last_thinker_token``
         # does; unset means "replay every generated thinker row".
@@ -635,14 +655,14 @@ class TalkerStage:
                 # active-layer filter ``stop_pos[i] is None or
                 # step - 7 + i < stop_pos[i]`` over all 8 layers.
                 if audio_step >= 7:
-                    idx = [step - 7 + i for i in range(8)]
-                    active = sum(
-                        1
-                        for i in range(8)
-                        if audio_stop_pos[i] is None or idx[i] < audio_stop_pos[i]
-                    )
-                    if active >= 8:
+                    if _can_emit_frame(audio_stop_pos, step):
+                        idx = [step - 7 + i for i in range(8)]
                         emitted_frames.append([audio_codes[i][idx[i]] for i in range(8)])
+                    else:
+                        # A closed gate never reopens, so every remaining step
+                        # would be a full-sequence forward with no observable
+                        # effect. Stopping here keeps the frames byte-identical.
+                        break
 
         # ---- Pack output ----
         # ``emitted_frames`` mirrors the vendor: one row per emitted

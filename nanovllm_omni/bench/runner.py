@@ -15,7 +15,14 @@ _logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StageTimes:
-    """Per-stage wall-clock + GPU-only milliseconds for one ``run_one`` call."""
+    """Per-stage wall-clock + GPU-only milliseconds for one ``run_one`` call.
+
+    ``wall_ms`` is the whole-request wall clock for the full-E2E path, where
+    the per-stage fields below carry stage-specific numbers that do not add
+    up to the request (``talker`` has no StageTimes field). ``total_ms``
+    prefers ``wall_ms`` when it is set so a throughput read off the CSV is
+    the real request cost, not a partial sum.
+    """
 
     tokenize_ms: float = 0.0
     generate_ms: float = 0.0
@@ -24,9 +31,12 @@ class StageTimes:
     # GPU-only time per stage (0 if CUDA unavailable or the stage is CPU-only).
     generate_cuda_ms: float = 0.0
     decode_cuda_ms: float = 0.0
+    wall_ms: float | None = None
 
     @property
     def total_ms(self) -> float:
+        if self.wall_ms is not None:
+            return self.wall_ms
         return self.tokenize_ms + self.generate_ms + self.decode_ms + self.wav_ms
 
     @property
@@ -275,9 +285,11 @@ def run_one_full(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                seed=seed,
             ),
         )
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
+        t_wall_ms = t_generate_ms
     except Exception as exc:  # benchmark helper returns a measurable failed row.
         _logger.warning("Full pipeline benchmark failed: %s", exc)
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
@@ -285,7 +297,7 @@ def run_one_full(
             prompt_id=p.id,
             seed=seed,
             run_idx=run_idx,
-            times=StageTimes(generate_ms=t_generate_ms),
+            times=StageTimes(generate_ms=t_generate_ms, wall_ms=t_generate_ms),
             frames=0,
             vram_peak_mb=_vram_peak_mb(),
         )
@@ -305,9 +317,10 @@ def run_one_full(
 
     # Map per-stage timings onto existing StageTimes fields so the CSV's
     # ``generate_ms`` / ``decode_ms`` columns carry the stage-specific
-    # measurements (thinker -> generate, code2wav -> decode) rather than
-    # the coarse omni.generate() wall clock. Falls back to wall-clock when
-    # the runner did not record timings (test stubs).
+    # measurements (thinker -> generate, code2wav -> decode). The talker has
+    # no field of its own, so those columns do NOT sum to the request;
+    # ``wall_ms`` carries the real request cost that ``total_ms`` reports.
+    # Falls back to wall-clock when the runner did not record timings.
     t_decode_ms = 0.0
     if stage_ms is not None:
         if "thinker" in stage_ms:
@@ -336,6 +349,7 @@ def run_one_full(
             generate_ms=t_generate_ms,
             decode_ms=t_decode_ms,
             generate_cuda_ms=t_generate_cuda_ms,
+            wall_ms=t_wall_ms,
         ),
         frames=frames,
         vram_peak_mb=_vram_peak_mb(),

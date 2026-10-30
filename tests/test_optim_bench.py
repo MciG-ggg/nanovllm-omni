@@ -248,6 +248,12 @@ def test_run_one_full_records_per_stage_breakdown():
     assert r.times.generate_ms == 100.5
     assert r.times.decode_ms == 50.125
     assert r.times.wav_ms == 0.0
+    # ``total_ms`` is the request wall, not the sum of the two mapped
+    # stages: the talker has no StageTimes field, so summing them would
+    # report a request that is missing two thirds of its cost.
+    assert r.times.wall_ms is not None
+    assert r.times.total_ms == r.times.wall_ms
+
     # CSV row carries the new column; round-trips through json.
     row = r.as_csv_row()
     assert "stage_ms" in row

@@ -80,12 +80,26 @@ talker 的发射门要求 8 个 codebook 同时 active，判据是
 | seeded + 提前退出（eager） | 2692 ms | **2.6×** |
 | seeded + 提前退出 + thinker CUDA Graph | 990 ms | **对上面再 2.7×** |
 
-### 2. thinker CUDA Graph（既有开关，opt-in）
+### 2. thinker CUDA Graph（既有开关，**已于 2026-10-30 转为 stage 默认**）
 
 `--use-thinker-cuda-graph` 把 thinker decode 从 eager 派发换成 graph replay：
-thinker 阶段 2250 ms → 580 ms（3.9×）。仍在 opt-in：ADR-0005 记录了 3050 上
-capture 的既有风险，而 graph 与 eager 的逐位 parity 还没有测试锁住，
-所以没有改默认值。
+thinker 阶段 2250 ms → 580 ms（3.9×）。
+
+转默认的依据（ADR-0005 修订要求“测量 + parity”）：
+
+- 测量：本节六题 `--runs 5` 的 eager 2692 ms vs graph 990 ms（2.7×，整请求）。
+- parity：graph 与 eager 同 prompt/同 seed 输出音频**逐字节相同**，两个 prompt
+  均验证（`tests/test_minimind_graph_parity.py`，`@pytest.mark.smoke`）。
+
+因此 `ThinkerStage` 现在默认 `enforce_eager = False`，bench 仍可用
+`extra["use_thinker_cuda_graph"] = False` 测 eager cell；`DeployConfig`
+依然不带 graph 旋钮（ADR-0005 的拒绝项没被重新打开）。
+
+> 时钟状态提醒：借默认值生效后复测同一 cell，得到 1124–1476 ms（中位 ≈1250），
+> 而本文表中的 990 ms 是在更高的 GPU 时钟状态下测的（复测时 `clocks.sm` 为
+> 1725/2100 MHz、62 °C）。显式 `--use-thinker-cuda-graph` 与不传 flag 在同一
+> 会话内给出相同数字，证明差异来自机器状态而不是默认值。**跨会话只比同一批
+> 次内的相对值，不要拿不同天的绝对 wall 相减。**
 
 ### 3. 其余（噪声级，已记录不宣称收益）
 

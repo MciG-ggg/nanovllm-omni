@@ -143,6 +143,29 @@ measured on the pre-fork bench stack, and the current fork path has no
 measurement on that card, so the default stays until a measurement
 exists.
 
+## Amendment (2026-10-30)
+
+The measurement the previous amendment asked for now exists, so the
+thinker default flips to the graph.
+
+1. **Speedup on the card.** With the thinker graph on, the stage drops
+   from ~2250 ms to ~595 ms per request, and a full request from 2692 ms
+   to 990 ms (ADR-0007, `--runs 5`, seed 7, six prompts).
+2. **No output change.** Graph and eager produce byte-identical WAV for
+   the same prompt and seed, across two prompts
+   (`tests/test_minimind_graph_parity.py`, `@pytest.mark.smoke`, one
+   subprocess per cell). This is the gate the previous amendment implied
+   but did not require; it is required now.
+3. **The decision stays at the stage.** `DeployConfig` still carries no
+   graph knob: `ThinkerStage.__init__` sets
+   `cfg.enforce_eager = not extra.get("use_thinker_cuda_graph", True)`,
+   so the graph is the default and `extra[...] = False` is how the bench
+   measures the eager cell. Nothing about this amendment re-opens the
+   rejected alternative of putting the flag back in `DeployConfig`.
+
+The same rule applies to any future stage that wants to turn its graph on
+by default: a measurement plus a parity test, not a config flag.
+
 The ADR-006 reference below points at the decision written up in
 `docs/dev/nanovllm-omni-paged-engine.md` (its own ADR-006 section).
 

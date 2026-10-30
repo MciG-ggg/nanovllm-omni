@@ -34,6 +34,7 @@ class SmolVLAActionPipeline:
         self,
         policy: Any,
         num_inference_steps: int | None = None,
+        compile_flow: bool = False,
     ) -> None:
         """policy: lerobot SmolVLAPolicy (provides denoise_step + sample_noise)."""
         if policy is None:
@@ -41,6 +42,8 @@ class SmolVLAActionPipeline:
         self.policy = policy
         self.config = policy.config
         self.num_inference_steps = num_inference_steps or self.config.num_steps
+        self.compile_flow = compile_flow
+        self._compiled_step: Any = None
 
     def prepare_encode(self, request: Any, sampling: Any = None) -> Any:
         """Init latent noise; stash VLM KV cache state for conditioning.
@@ -87,6 +90,22 @@ class SmolVLAActionPipeline:
             },
         )
 
+    def _step_callable(self, policy: Any) -> Any:
+        """The one place the per-step callable is chosen.
+
+        One flow step costs ~125 ms while the GPU is busy ~9 ms of it, and a
+        single step issues ~2400 kernel launches (ADR-0009). ``torch.compile``
+        is the only lever that does not need the dependency changed: CUDA
+        Graph capture is refused by lerobot's unpinned CPU->CUDA copy.
+        """
+        if not self.compile_flow:
+            return policy.model.denoise_step
+        if self._compiled_step is None:
+            import torch
+
+            self._compiled_step = torch.compile(policy.model.denoise_step)
+        return self._compiled_step
+
     def denoise_step(self, state: Any, *, step: int, num_steps: int) -> Any:
         """Run action expert; return velocity.
 
@@ -102,7 +121,7 @@ class SmolVLAActionPipeline:
         time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
         policy = state.metadata["policy"]
-        v_t = policy.model.denoise_step(
+        v_t = self._step_callable(policy)(
             x_t=state.latents,
             prefix_pad_masks=state.metadata["prefix_pad_masks"],
             past_key_values=state.metadata["past_key_values"],
@@ -151,6 +170,7 @@ def _action_stage(deploy: Any, args: Any) -> Any:
         SmolVLAActionPipeline(
             policy=get_policy(args, extra),
             num_inference_steps=num_inference_steps,
+            compile_flow=bool(extra.get("compile_flow", False)),
         )
     )
 

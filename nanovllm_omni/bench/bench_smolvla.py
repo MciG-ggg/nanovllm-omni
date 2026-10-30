@@ -100,7 +100,7 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None, model: str) -> tuple[Any, Any]:
+def _load_pipeline(device: str | None, model: str, compile_flow: bool = False) -> tuple[Any, Any]:
     """Load both SmolVLA stages via the project's factories.
 
     vlm_stage and action_stage share one policy via ``smolvla.policy``, so calling both loads the
@@ -112,7 +112,7 @@ def _load_pipeline(device: str | None, model: str) -> tuple[Any, Any]:
     args = SimpleNamespace(
         model=model,
         device=device,
-        extra={"allow_hf_download": False},
+        extra={"allow_hf_download": False, "compile_flow": compile_flow},
     )
     vlm = _vlm_stage(None, args)
     action = _action_stage(None, args)
@@ -209,6 +209,7 @@ def _env_snapshot(out_dir: Path, today: str, gpu: str, commit: str) -> Path:
         lines.append(f"cuda: {torch.version.cuda}")
         lines.append(f"device: {torch.cuda.get_device_name(0)}")
     path = _env_path(out_dir, today)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -219,6 +220,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--compile-flow",
+        action="store_true",
+        help="Run the flow step under torch.compile (comparison cell; ADR-0009).",
+    )
     parser.add_argument(
         "--no-trace",
         action="store_true",
@@ -246,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    vlm, action = _load_pipeline(args.device, args.model)
+    vlm, action = _load_pipeline(args.device, args.model, args.compile_flow)
     rows: list[dict[str, Any]] = []
     for sm_input in SMOLVLA_INPUTS:
         walls, peak_vram = _run_baseline(

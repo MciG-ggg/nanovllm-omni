@@ -98,21 +98,23 @@ def _write_csv(rows: Sequence[dict[str, Any]], path: Path) -> Path:
     return path
 
 
-def _load_pipeline(device: str | None, model: str, use_cuda_graph: bool = False) -> Any:
+def _load_pipeline(device: str | None, model: str, use_cuda_graph: bool | None = None) -> Any:
     """Load SmolVLM vlm_forward via the project's factory (not raw transformers).
 
     Going through ``_vlm_stage`` keeps the profile on OUR code path,
     not the upstream transformers generate -- Phase 3 parity is the one
     that benchmarks transformers directly.
+
+    ``use_cuda_graph`` is left out of ``extra`` when None so the stage's own
+    default applies; a bench that pinned eager measured a path the engine
+    never runs (ADR-0008).
     """
     from nanovllm_omni.models.smolvlm.stage import _vlm_stage
 
-    args = SimpleNamespace(
-        model=model,
-        device=device,
-        dtype="bfloat16",
-        extra={"allow_hf_download": False, "use_cuda_graph": use_cuda_graph},
-    )
+    extra: dict[str, Any] = {"allow_hf_download": False}
+    if use_cuda_graph is not None:
+        extra["use_cuda_graph"] = use_cuda_graph
+    args = SimpleNamespace(model=model, device=device, dtype="bfloat16", extra=extra)
     return _vlm_stage(None, args)
 
 
@@ -214,9 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         help="CSV output path (default: docs/perf/bench_smolvlm_<commit>.csv)",
     )
     parser.add_argument(
-        "--use-cuda-graph",
+        "--no-cuda-graph",
         action="store_true",
-        help="Decode-loop CUDA graph replay (default: eager).",
+        help="Run the decode loop eager instead of replaying the stage's default graph.",
     )
     args = parser.parse_args(argv)
 
@@ -237,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path} (cpu host; no timings collected)")
         return 0
 
-    pipeline = _load_pipeline(args.device, args.model, args.use_cuda_graph)
+    pipeline = _load_pipeline(args.device, args.model, False if args.no_cuda_graph else None)
     rows: list[dict[str, Any]] = []
     for sm_input in SMOLVLM_INPUTS:
         walls, peak_vram = _run_baseline(

@@ -57,7 +57,19 @@ decode graph 相对 eager：文本 **3.5×**、图片 **2.2×**。
 
 ## 这次的教训：同一个决定散在三处
 
-`enforce_eager` 的取值现在是这样分布的：
+> 2026-10-30 已修：bench 不再固定传 eager，改为跟 stage 默认（`--no-cuda-graph`
+> 才测 eager cell）。修复后同一套 bench 命令的两臂实测：
+>
+> | 输入 | graph | eager |
+> |---|---:|---:|
+> | short | 112.3 ms | 218.2 ms |
+> | medium | 1452.2 ms | 5501.2 ms |
+> | long | 1452.8 ms | 5639.4 ms |
+>
+> 即 medium/long 上 **3.8×**，与 ADR-0003 在 T4 上的 3.16× 同量级，也证实了
+> 旧记录里的“241 ms”确实测的是引擎不走的 eager 路径（且那还是早停后的 input）。
+
+原本的分布是这样：
 
 | stage | 默认 | 该族的 bench 传什么 |
 |---|---|---|

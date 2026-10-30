@@ -21,6 +21,21 @@ from collections.abc import Callable
 from typing import Any
 
 
+def _apply_repetition_penalty(logits: Any, token_ids: list[int], penalty: float) -> None:
+    """Divide every already-seen token's logit by ``penalty``, in place.
+
+    One indexed divide instead of one in-place op per token. The history is
+    re-scanned on every step, and each per-token ``/=`` costs two kernel
+    launches, so the loop's cost grows with the token set (~0.33 ms/step on
+    RTX 3050 at 120 steps). Same arithmetic either way: every element is
+    divided exactly once by the same scalar.
+    """
+    import torch
+
+    history = torch.tensor(list(set(token_ids)), dtype=torch.long, device=logits.device)
+    logits[history] /= penalty
+
+
 def decode_minimind(
     stage_runner: Any,
     token_ids: list[int],
@@ -88,8 +103,7 @@ def decode_minimind(
         # probability tensor contains inf, nan or element < 0``.
         # Vendor's reference is FP32 throughout; we mirror that here.
         logits_i = logits[-1, :].float() / (temperatures[0] + 1e-9)
-        for token in set(sequence.token_ids):
-            logits_i[token] /= repetition_penalty
+        _apply_repetition_penalty(logits_i, sequence.token_ids, repetition_penalty)
         if top_p < 1.0:
             sorted_logits, sorted_indices = torch.sort(logits_i, descending=True)
             remove = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1) > top_p
@@ -130,14 +144,15 @@ def decode_minimind(
             # Decode steps only see the last token, so only row 0 of
             # the bridge buffer is new (overwritten on every replay);
             # Prefill covers the prompt and writes all rows eagerly.
+            # Clone after slicing: the buffer is ``max_position`` rows
+            # (6 MB), and only the rows this step produced travel.
             bh = model.get_bridge_hidden()
             if bh is not None:
-                bh = bh.detach().clone()
                 if is_prefill:
                     seq_len = input_ids.size(0)
-                    bridge_hidden = bh[:seq_len]
+                    bridge_hidden = bh[:seq_len].detach().clone()
                 elif bridge_hidden is not None:
-                    bridge_hidden = torch.cat([bridge_hidden, bh[:1]], dim=0)
+                    bridge_hidden = torch.cat([bridge_hidden, bh[:1].detach().clone()], dim=0)
 
             token_id_list = runner.sampler(logits, temperatures).tolist()
             sampled_id = token_id_list[0]

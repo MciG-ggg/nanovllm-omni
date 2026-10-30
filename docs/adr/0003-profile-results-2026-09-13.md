@@ -26,6 +26,10 @@
 | smolvlm long | 4449.954 ms | 4524.247 ms | 2183 MiB | AR decode |
 | smolvla | 1385.219 ms | 2291.388 ms | 2021 MiB | flow matching loop |
 
+四族同口径（同一台 3050、同一份代码、`max_memory_allocated`、无 profiler）的显存对比见
+[ADR 0006](0006-four-family-vram-2026-10-30.md)：minimind-o 1086.7 MiB、smolvla 1217.6 MiB、
+smolvlm 2189.3 MiB、sd-turbo 3097.6 MiB。smolvla 两项相差 803 MiB，尚未定位。
+
 ## sd-turbo
 
 配置：1 个 prompt、5 次计时、1 次 warmup、1-step、fp16、seed=42。

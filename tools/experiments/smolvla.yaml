@@ -1,0 +1,14 @@
+# SmolVLA flow step: eager (default, bit-exact with predict_action_chunk) vs
+# torch.compile (3.07x, action drift ~3.6e-3). See docs/adr/0009.
+family: smolvla
+model: /home/mcig/models/smolvla_libero
+runs: 5
+warmup: 1
+device: cuda
+cells:
+  - name: eager
+    flags:
+      compile_flow: false
+  - name: compiled
+    flags:
+      compile_flow: true

@@ -1,0 +1,14 @@
+# SmolVLM decode: graph (stage default) vs eager. The bench used to pin eager,
+# which measured a path the engine never runs (docs/adr/0008).
+family: smolvlm
+model: /home/mcig/models/SmolVLM-500M-Instruct
+runs: 5
+warmup: 1
+device: cuda
+cells:
+  - name: graph
+    flags:
+      use_cuda_graph: true
+  - name: eager
+    flags:
+      use_cuda_graph: false

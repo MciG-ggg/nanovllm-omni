@@ -1,0 +1,16 @@
+# MiniMind-O decode: graph (stage default) vs the eager comparison cell.
+# See docs/adr/0005 for why the choice lives at the stage and not in deploy.
+family: minimind
+model: /home/mcig/models/minimind-3o
+runs: 5
+warmup: 1
+max_tokens: 120
+seed: 7
+device: cuda
+cells:
+  - name: graph
+    flags:
+      use_thinker_cuda_graph: true
+  - name: eager
+    flags:
+      use_thinker_cuda_graph: false

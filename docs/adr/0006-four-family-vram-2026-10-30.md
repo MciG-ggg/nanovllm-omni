@@ -38,6 +38,10 @@
 `steady` 是 warmup 之后的常驻占用（权重 + fork 的 paged KV 池）；`peak` 是单次请求
 跑完整个 pipeline 过程中的最高分配。
 
+> 注意：`smolvlm` 这一行测于提交 `d1406e5` **之前**。该提交去掉了 stage 自己构造的
+> 第二份 `SmolVLMForConditionalGeneration`（约 1 GiB），所以之后的峰值会低于 2189 MiB，
+> 且 KV 池不再被挤到单个 256-token block。复测之前，不要把本表当作当前代码的结论。
+
 结论：
 
 1. **`minimind_omni` 显存占用最低**，峰值 1086.7 MiB，占 4 GiB 卡的 26.5%。

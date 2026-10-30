@@ -73,33 +73,25 @@ class SmolVLMStage:
         if not allow_hf:
             kwargs["local_files_only"] = True
 
-        # 1) Build our model from HF config
+        # The image token and eos live on the top-level Idefics3 shell
+        # config; the fork mounts the text fields over it but keeps
+        # ``vision_config`` / ``text_config`` intact.
         hf_config = AutoConfig.from_pretrained(model_id, **kwargs)
-        model_class = model_class or SmolVLMForConditionalGeneration
-        self.model = model_class(hf_config)
 
-        # 2) Load HF weights via fork loader (default prefix=""; submodule
-        # names mirror HF checkpoint keys, so weights land directly).
-        from nanovllm.utils.loader import load_model
-
-        try:
-            load_model(self.model, model_id)
-        except (FileNotFoundError, OSError):
-            # Hub snapshot fallback when offline cache misses
-            from huggingface_hub import snapshot_download
-
-            local_dir = snapshot_download(model_id, local_files_only=not allow_hf)
-            load_model(self.model, local_dir)
-
-        self.model = self.model.to(device=self.device, dtype=self.dtype)
-        self.model.eval()
-
-        # 3) Build fork StageRunner wrapping the language_model-only forward
-        # The decode loop runs under a CUDA graph: on a T4 the eager
-        # path spends most of the wall time in kernel launches, not in
-        # the GPU. The fork falls back to eager when the capture fails
-        # on the device, so the graph is on by default and
-        # ``extra["use_cuda_graph"] = False`` turns it off.
+        # 1) Build the fork StageRunner. Its ModelRunner constructs and
+        # loads the whole ``SmolVLMForConditionalGeneration`` (vision +
+        # connector + text), because that is the model_class; the stage
+        # reuses that copy for vision prefill instead of holding a
+        # second one. A duplicate costs ~1 GiB, and the fork sizes the
+        # paged KV cache from the memory PyTorch has left, so the copy
+        # used to shrink the cache to a single 256-token block -- too
+        # little for one image request (1088 image tokens).
+        #
+        # The decode loop runs under a CUDA graph: eager spends most of
+        # the wall time in kernel launches, not in the GPU. The fork
+        # falls back to eager when the capture fails on the device, so
+        # the graph is on by default and ``extra["use_cuda_graph"] =
+        # False`` turns it off.
         # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
         # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
         from huggingface_hub import snapshot_download
@@ -113,19 +105,23 @@ class SmolVLMStage:
             **stage_kwargs_from_args(args),
         )
         config.enforce_eager = not extra.get("use_cuda_graph", True)
-        # fork Config is a frozen-ish dataclass; dtype is a process-wide
-        # torch default, not a per-stage attribute. Set it for downstream
-        # model construction (smolvlm.py weights load as bf16).
+        # A stage call schedules exactly one Sequence, so only the bs=1
+        # decode graph is ever replayed and the bs=2/4/8 graphs cost
+        # memory the KV cache needs more.
+        config.max_capture_bs = 1
+        # An image request is 1088 vision tokens before the prompt, so
+        # the fork default (512) sends every image decode step to the
+        # eager path. 2048 covers one image plus 512 generated tokens.
+        config.graph_max_seq_len = 2048
         self.stage_runner = StageRunner(
-            model_class=model_class,
+            model_class=model_class or SmolVLMForConditionalGeneration,
             config=config,
             rank=0,
         )
+        self.model = self.stage_runner.model_runner.model
+        self.model.eval()
 
-        # 4) Set process-wide torch default dtype before ModelRunner init
-        torch.set_default_dtype(self.dtype)
-
-        # 5) Processor + image-token metadata
+        # 2) Processor + image-token metadata
         self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
         image_token_id = getattr(hf_config, "image_token_id", None)
         if image_token_id is None:
@@ -143,7 +139,15 @@ class SmolVLMStage:
         input_ids: torch.Tensor,
         pixel_values: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        """Return [T, hidden] merged embeddings, or None for text-only."""
+        """Return [T, hidden] merged embeddings, or None for text-only.
+
+        ``pixel_values`` arrives as ``[num_images, num_tiles, 3, H, W]``:
+        the processor keeps the per-image tile axis that the SigLIP tower
+        wants folded into its batch axis, so one 512x512 image is 17
+        tile forwards of 1024 patches each. ``pixel_attention_mask`` is
+        all ones for the 512x512 tiles this processor produces and the
+        tower takes no mask, so the vision pass reads pixels only.
+        """
         if pixel_values is None:
             return None
         if self.image_token_id is None:
@@ -153,22 +157,23 @@ class SmolVLMStage:
             )
 
         with torch.inference_mode():
-            vision_out = self.model.model.vision_model(pixel_values=pixel_values)
-            image_features = vision_out.last_hidden_state  # [B, P, v_dim]
+            tiles = pixel_values.flatten(0, 1)  # [num_images*num_tiles, 3, H, W]
+            vision_out = self.model.model.vision_model(pixel_values=tiles)
+            image_features = vision_out.last_hidden_state  # [tiles, P, v_dim]
             # The connector owns the pixel shuffle and the bias-free
             # projection (see smolvlm.py).
-            image_embeds = self.model.model.connector(image_features)  # [B, P', t_dim]
+            image_embeds = self.model.model.connector(image_features)  # [tiles, P', t_dim]
+            image_embeds = image_embeds.flatten(0, 1)  # [tiles * P', t_dim]
             text_embeds = self.model.model.text_model.embed_tokens(input_ids)  # [1, T, t_dim]
             image_mask = input_ids == self.image_token_id  # [1, T]
             n_image_tokens = int(image_mask.sum().item())
-            n_image_patches = int(image_embeds.shape[1])
-            if n_image_tokens != n_image_patches:
+            if n_image_tokens != image_embeds.shape[0]:
                 raise RuntimeError(
                     f"smolvlm: image-token positions {n_image_tokens} "
-                    f"!= vision patches {n_image_patches}; check processor expansion"
+                    f"!= vision patches {image_embeds.shape[0]}; check processor expansion"
                 )
             merged = text_embeds.clone()
-            merged[image_mask] = image_embeds[0]
+            merged[image_mask] = image_embeds
         return merged.flatten(0, 1)  # [T, t_dim]
 
     def __call__(self, payload: Any, sampling: Any) -> str:
@@ -204,6 +209,10 @@ class SmolVLMStage:
         # Stop strings: stop as soon as one of them appears in the text
         # generated so far.
         stop_strings = list(getattr(sampling, "stop", None) or [])
+        # Throughput measurements need a fixed output length: with EOS
+        # enabled a short prompt answers in two tokens, so a wall time
+        # labelled "64 new tokens" would measure a two-token request.
+        ignore_eos = bool(extras.get("ignore_eos", False))
 
         def _stop_hit(ids: list[int]) -> bool:
             text = self.processor.batch_decode([ids], skip_special_tokens=True)[0]
@@ -246,7 +255,7 @@ class SmolVLMStage:
             fork_sp = ForkSamplingParams(
                 temperature=_fork_temp,
                 max_tokens=max_new_tokens,
-                ignore_eos=False,
+                ignore_eos=ignore_eos,
             )
             sequence = Sequence(input_ids[0].tolist(), fork_sp)
             scheduler = Scheduler(config)
@@ -281,7 +290,7 @@ class SmolVLMStage:
                 scheduler.postprocess(seqs, token_ids, is_prefill)
                 self.stage_runner.reset_context()
                 generated.extend(token_ids)
-                if generated[-1] == self.eos_token_id:
+                if not ignore_eos and generated[-1] == self.eos_token_id:
                     break
                 if sequence.num_completion_tokens >= max_new_tokens:
                     break

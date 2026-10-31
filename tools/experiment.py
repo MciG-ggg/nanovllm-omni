@@ -29,7 +29,7 @@ EXPERIMENTS_DIR = Path(__file__).resolve().parent / "experiments"
 # an error rather than a silent no-op, so a typo cannot produce a "cell" that
 # measures the default twice.
 _ALLOWED_FLAGS: dict[str, frozenset[str]] = {
-    "minimind": frozenset({"use_thinker_cuda_graph"}),
+    "minimind": frozenset({"use_thinker_cuda_graph", "bench_mode", "thinker_max_capture_bs"}),
     "smolvlm": frozenset({"use_cuda_graph"}),
     "smolvla": frozenset({"compile_flow"}),
 }
@@ -105,11 +105,15 @@ def build_command(experiment: Experiment, cell: Cell, out_path: Path) -> list[st
         str(out_path),
     ]
     if experiment.family == "minimind":
+        # ``bench_mode: batch`` swaps the subcommand: the batch sweep
+        # measures throughput against batch size instead of one request at
+        # a time.
+        subcommand = "batch" if cell.flags.get("bench_mode") == "batch" else "time"
         command = [
             sys.executable,
             "-m",
             "nanovllm_omni.bench",
-            "time",
+            subcommand,
             "--pipeline",
             "full",
             *common,
@@ -121,6 +125,9 @@ def build_command(experiment: Experiment, cell: Cell, out_path: Path) -> list[st
         graph = cell.flags.get("use_thinker_cuda_graph")
         if graph is not None:
             command.append("--use-thinker-cuda-graph" if graph else "--no-use-thinker-cuda-graph")
+        capture_bs = cell.flags.get("thinker_max_capture_bs")
+        if capture_bs is not None:
+            command += ["--thinker-max-capture-bs", str(capture_bs)]
         return command
     if experiment.family == "smolvlm":
         command = [sys.executable, "-m", "nanovllm_omni.bench.bench_smolvlm", *common, "--no-trace"]

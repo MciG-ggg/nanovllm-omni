@@ -157,6 +157,8 @@ stages:
 
 族改了任何公共符号/行为,就按仓库工作流补聚焦测试并更新 README 支持表。
 
+- 本族的 P0 / P1 / P2 闸门按 `docs/adr/0011-parity-standard.md` 声明，并落到 `tests/test_parity_<family>.py`；没有闸门不写“已对齐”。
+
 **如果是替换既有族(rev1 → rev2)**:GitHub issue 的 title + body 也要同步(`gh issue edit <n>` 不可逆,改之前草稿准备好)。正文里写明 model pivot 原因、新 commit 引用、acceptance criteria 勾选状态。本地命令行是 `rtk gh issue edit <n> --title "..." --body-file /tmp/issue.md`(项目里 `rtk` 是 gh wrapper,不带 `--quiet`)。
 
 ## Step 7 — 本地验证

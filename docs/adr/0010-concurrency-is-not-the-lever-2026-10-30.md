@@ -84,6 +84,23 @@ smolvlm ≈1.6 GB、smolvla ≈2.15 GB），smolvlm 与 smolvla 两份立刻越�
    `decode_minimind` 每请求新建 `Scheduler` 且 deploy 把 `max_num_seqs` 锁在 1，
    要开它同样属于设计级改动，且必须重测。
 
+## 补记（2026-10-31）
+
+ADR-0012 开了这个门：`decode_minimind` 现在收一组请求共用一个 `Scheduler`，
+`deploy` 的 thinker `max_num_seqs` 从 1 开到 8，形状对齐 `vllm_omni`
+（AR stage ≥ 4，codec stage 1）。重测结论：
+
+- **thinker 的派发确实摊开了**：每个 batch bucket 都捕获成图时，整批 thinker 耗时
+  449 / 598 / 1170 / 2086 ms，对应 batch 1 / 2 / 4 / 8（每请求 449 → 261 ms）。
+- **端到端却更慢**：和"8 个请求各跑一次"的 22480 ms 相比，批 8 个是 29696 ms
+  （每 bucket 有图）或 31107 ms（默认只捕获 bs=1，批走 eager）。所以
+  `deploy` 的 thinker `max_num_seqs` **留在 1**，批作为能力存在。
+
+所以本文的结论没有被推翻，只是补上了它当时缺的那一格：**并发不是杠杆，
+因为瓶颈不在 thinker**。批处理把 thinker 的问题解决了，剩下的杠杆是 talker
+（ADR-0007 的"下一步 #1"，窗口化 KV）。本文测的**线程**并发仍然不适用：
+GIL 下的交错不会摊薄任何一次派发，批处理则根本不需要线程。
+
 ## 限制
 
 1. 只测了 `minimind_o` 一个族。但它与 smolvlm / smolvla 的瓶颈类型相同

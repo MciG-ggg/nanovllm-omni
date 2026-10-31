@@ -14,3 +14,16 @@ cells:
   - name: eager
     flags:
       use_thinker_cuda_graph: false
+  # Throughput and output identity as a function of batch size: every
+  # request in a batch must produce the audio it produced on its own.
+  - name: batch
+    flags:
+      bench_mode: batch
+      use_thinker_cuda_graph: true
+  # Same sweep with a CUDA graph per batch bucket. Faster batches, but the
+  # bs=1 graph then no longer matches eager byte-for-byte (ADR-0012).
+  - name: batch-graphed
+    flags:
+      bench_mode: batch
+      use_thinker_cuda_graph: true
+      thinker_max_capture_bs: 8

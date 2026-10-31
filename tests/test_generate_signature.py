@@ -27,12 +27,17 @@ class _RunnerStub:
         self.calls.append((prompt, sampling))
         return SimpleNamespace(audio=b"RIFF....", sample_rate=24000), {"s": 1.0}
 
+    def run_many(self, prompts: list, samplings: list) -> list[tuple]:
+        return [
+            self.run(prompt, sampling) for prompt, sampling in zip(prompts, samplings, strict=True)
+        ]
+
 
 def _make_omni(runner: _RunnerStub) -> object:
     from nanovllm_omni.entrypoints.omni import Omni
 
     omni = Omni("minimind_o")
-    omni._executor = SimpleNamespace(run=runner.run)  # type: ignore[attr-defined]
+    omni._executor = SimpleNamespace(run=runner.run, run_many=runner.run_many)  # type: ignore[attr-defined]
     return omni
 
 
@@ -46,6 +51,12 @@ class _AsyncSubmitStub:
     async def submit(self, prompt: str, sampling: SamplingParams | None) -> tuple:
         self.submit_calls.append((prompt, sampling))
         return self._runner.run(prompt, sampling)
+
+    async def submit_many(self, prompts: list, samplings: list) -> list[tuple]:
+        return [
+            await self.submit(prompt, sampling)
+            for prompt, sampling in zip(prompts, samplings, strict=True)
+        ]
 
 
 def _make_async_omni(runner: _RunnerStub) -> tuple[object, _AsyncSubmitStub]:

@@ -169,6 +169,23 @@ by default: a measurement plus a parity test, not a config flag.
 The ADR-006 reference below points at the decision written up in
 `docs/dev/nanovllm-omni-paged-engine.md` (its own ADR-006 section).
 
+## Amendment (2026-10-31)
+
+The stage now also caps **which decode batch sizes get a graph**, and the
+cap lives at the stage like every other graph knob (ADR-0012).
+
+`Config.max_capture_bs` defaults to 1 in `ThinkerStage.__init__`, so only
+the single-request graph is captured. The fork captures every bucket into
+one shared memory pool, largest first; a bucket captured alongside bigger
+ones reduces in a different order than the eager path, so the bridge rows
+differ in the last bits and graph and eager stop producing byte-identical
+audio. Capturing only bs=1 keeps the bs=1 path byte-identical to the
+ADR-0007 baseline, which is the guarantee
+`tests/test_minimind_graph_parity.py` pins.
+
+`extra["thinker_max_capture_bs"]` raises the cap for a bench cell. The
+decision stays at the stage; `DeployConfig` still carries no graph knob.
+
 ## References
 
 - `nanovllm_omni/config/registry.py:245,250` — fields removed

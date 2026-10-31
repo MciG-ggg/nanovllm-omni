@@ -95,15 +95,22 @@ model classes. Performance evolution history is recorded in
 
 For a normal synchronous request:
 
-1. `Omni.generate(...)` materializes prompts and sampling overrides.
+1. `Omni.generate(...)` materializes prompts and sampling overrides. The
+   list form puts every request in flight before draining
+   (`PipelineExecutor.run_many`), so a stage can batch across requests;
+   `py_generator=True` runs them one at a time.
 2. `Omni._one(...)` resolves the executor and converts a multimodal prompt
    dictionary into text plus `SamplingParams.extra`.
-3. `PipelineExecutor._runner.run(...)` lazily constructs the configured stage
+3. `PipelineRunner.add_request(...)` lazily constructs the configured stage
    instances. For stages with `model_architecture`, the runner resolves the
-   model class from `OmniModelRegistry` and injects it into the stage wrapper.
-4. `PipelineRunner.run(...)` applies each stage's optional `process_input`,
-   merges deploy defaults with request sampling, calls the stage instance in
-   pipeline order, and adapts terminal output by `final_output_type`.
+   model class from `OmniModelRegistry` and injects it into the stage wrapper,
+   then applies the first stage's `process_input` and queues the request.
+4. `PipelineRunner.step(...)` lets one stage serve the requests it is holding
+   (`StageEngine.step`), merges deploy defaults with request sampling, and
+   routes each finished payload into the next stage's queue with that stage's
+   `process_input`. Stages are served round-robin. Terminal output is adapted
+   by `final_output_type` when a request leaves the last stage.
+   `run(...)` is `add_request` + this loop, for single-request callers.
 5. `OmniRequestOutput.from_pipeline(...)` wraps the terminal stage result.
 
 For MiniMind-O the stage order is:

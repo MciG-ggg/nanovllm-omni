@@ -108,6 +108,11 @@ class Omni(OmniBase):
         SamplingParams per prompt, or a single SamplingParams that applies to
         every prompt. ``sampling_params`` is the local alias for that single
         object.
+
+        The list form puts every prompt in flight before draining, so a
+        stage that batches across requests sees all of them in one step.
+        ``py_generator=True`` runs them one at a time and therefore cannot
+        batch.
         """
         if sampling_params is not None and sampling_params_list is not None:
             raise ValueError("pass sampling_params or sampling_params_list, not both")
@@ -125,7 +130,17 @@ class Omni(OmniBase):
 
         if py_generator:
             return _iter()
-        return list(_iter())
+
+        prepared = [
+            _merge_modal(params_list[idx] if idx < len(params_list) else None, prompt)
+            for idx, prompt in enumerate(prompts_list)
+        ]
+        results = self._ensure_executor().run_many(
+            [text for text, _ in prepared],
+            [params for _, params in prepared],
+        )
+        final_output_type = self._final_output_type()
+        return [_make_output(payload, stage_ms, final_output_type) for payload, stage_ms in results]
 
 
 __all__ = ["Omni"]

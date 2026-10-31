@@ -1,8 +1,8 @@
 """How far does the compiled SmolVLA flow step drift from eager?
 
 ``--compile-flow`` cuts a request from ~1342 ms to ~437 ms (ADR-0009), but
-torch.compile fuses kernels and the stage's stated contract is bit-exact
-alignment with ``policy.predict_action_chunk``. So the compiled path is
+torch.compile fuses kernels and the stage's parity contract
+(docs/adr/0011-parity-standard.md) is atol-based, not bitwise. So the compiled path is
 off by default and this test pins what turning it on costs: the measured
 drift, not exactness.
 

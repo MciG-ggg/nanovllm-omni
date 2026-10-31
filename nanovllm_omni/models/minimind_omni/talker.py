@@ -113,6 +113,13 @@ class TalkerEmbedding(nn.Module):
 
 
 class TalkerAttention(nn.Module):
+    # Keep this here: a model-level mapping makes the loader skip o_proj/q_norm/k_norm.
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+    }
+
     def __init__(
         self,
         hidden_size: int,
@@ -171,6 +178,12 @@ class TalkerAttention(nn.Module):
 
 
 class TalkerMLP(nn.Module):
+    # Keep this here: a model-level mapping makes the loader skip down_proj.
+    packed_modules_mapping = {
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -246,14 +259,6 @@ class MiniMindTalker(nn.Module):
     ``codec_proj`` / ``speaker_proj`` work) and ``body`` (the 4
     transformer blocks + final norm).
     """
-
-    packed_modules_mapping = {
-        "q_proj": ("qkv_proj", "q"),
-        "k_proj": ("qkv_proj", "k"),
-        "v_proj": ("qkv_proj", "v"),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     def __init__(self, config) -> None:
         super().__init__()

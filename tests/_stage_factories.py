@@ -8,6 +8,8 @@ Conventions:
   - Generic, stateless factories live alongside this docstring
     (``thinker_simple``, ``talker_simple``, ``code2wav_simple``,
     ``executor_simple``, ``diffusion_dit``).
+  - Every stage factory returns a ``StageEngine``. The stubs below serve
+    one request per step unless they say otherwise.
   - Per-test state observation uses a shared module-level slot keyed by
     string. Tests that share a slot MUST call its reset helper at the top
     of the test body so the captured state is fresh. Pytest runs tests
@@ -18,38 +20,41 @@ Conventions:
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
+
+from nanovllm_omni.engine.stage_engine import StageEngine
 
 # ---------------------------------------------------------------------------
 # Generic (no-state) stage factories
 # ---------------------------------------------------------------------------
 
 
+class _FakeStage(StageEngine):
+    """Stage stub: runs ``fn(payload, sampling)`` for one request."""
+
+    def __init__(self, fn: Any) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def __call__(self, payload: Any, sampling: Any) -> Any:
+        return self._fn(payload, sampling)
+
+
 def thinker_simple(deploy: Any, args: Any) -> Any:
     """Stage 0 stub: returns ``f"th|{payload}"``."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return f"th|{payload}"
-
-    return forward
+    return _FakeStage(lambda payload, sampling: f"th|{payload}")
 
 
 def talker_simple(deploy: Any, args: Any) -> Any:
     """Stage 1 stub: returns ``f"tk|{payload}"``."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return f"tk|{payload}"
-
-    return forward
+    return _FakeStage(lambda payload, sampling: f"tk|{payload}")
 
 
 def code2wav_simple(deploy: Any, args: Any) -> Any:
     """Stage 2 stub: identity pass-through (same shape as the real CODEC)."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return payload
-
-    return forward
+    return _FakeStage(lambda payload, sampling: payload)
 
 
 class TextTerminal:
@@ -58,29 +63,17 @@ class TextTerminal:
 
 def model_aware_factory(deploy: Any, args: Any, model_class: Any = None) -> Any:
     """Factory that exposes the class supplied by the model registry."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return model_class
-
-    return forward
+    return _FakeStage(lambda payload, sampling: model_class)
 
 
 def text_terminal_factory(deploy: Any, args: Any) -> Any:
     """Factory returning a wrapper-shaped text terminal output."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return TextTerminal()
-
-    return forward
+    return _FakeStage(lambda payload, sampling: TextTerminal())
 
 
 def executor_simple(deploy: Any, args: Any) -> Any:
     """Single-stage async-executor stub: ``f"out({payload})"``."""
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return f"out({payload})"
-
-    return forward
+    return _FakeStage(lambda payload, sampling: f"out({payload})")
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +90,11 @@ def bridge_process_input(payload: Any, prompt: str) -> Any:
     """Bridge hook: prepends ``"br|"`` to ``payload`` for tests that
     want to observe that ``process_input`` ran between stages."""
     return f"br|{payload}"
+
+
+def raising_process_input(payload: Any, prompt: str) -> Any:
+    """Bridge hook that fails, to pin the failure path inside ``_advance``."""
+    raise ValueError("bridge exploded")
 
 
 # ---------------------------------------------------------------------------
@@ -123,29 +121,79 @@ _captures, reset_captures, get_captures = _make_slot()
 _factory_observations, reset_factory_observations, get_factory_observations = _make_slot()
 _log, reset_log, get_log = _make_slot()
 _diffusion_log, reset_diffusion_log, get_diffusion_log = _make_slot()
+_batch_sizes, reset_batch_sizes, get_batch_sizes = _make_slot()
+
+
+class _BatchingStage(StageEngine):
+    """Stage stub that serves its whole queue in one step and records the size."""
+
+    def step(self) -> list[tuple[str, Any]]:
+        if not self._pending:
+            return []
+        batch = list(self._pending)
+        self._pending.clear()
+        _batch_sizes.append(len(batch))
+        return [(request.request_id, f"b|{request.payload}") for request in batch]
+
+
+def batching_simple(deploy: Any, args: Any) -> Any:
+    """One-stage stub whose backend batches across requests."""
+    return _BatchingStage()
+
+
+class _OverlapStage(StageEngine):
+    """Stage stub that records the deepest overlap it observed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth = 0
+        self.max_depth = 0
+        self._guard = threading.Lock()
+
+    def __call__(self, payload: Any, sampling: Any) -> Any:
+        with self._guard:
+            self.depth += 1
+            self.max_depth = max(self.max_depth, self.depth)
+        time.sleep(0.002)
+        with self._guard:
+            self.depth -= 1
+        return f"out({payload})"
+
+
+def overlap_stage(deploy: Any, args: Any) -> Any:
+    """One-stage stub whose overlap is observable from the test."""
+    return _OverlapStage()
+
+
+class _RaisingStage(StageEngine):
+    """Stage stub that fails while holding a request."""
+
+    def __call__(self, payload: Any, sampling: Any) -> Any:
+        raise RuntimeError("stage exploded")
+
+
+def raising_simple(deploy: Any, args: Any) -> Any:
+    """One-stage stub used to pin the failure path."""
+    return _RaisingStage()
 
 
 def observing_factory(deploy: Any, args: Any) -> Any:
     _factory_observations.append((deploy, args))
-
-    def forward(payload: Any, sampling: Any) -> Any:
-        return payload
-
-    return forward
+    return _FakeStage(lambda payload, sampling: payload)
 
 
 def capturing_simple(deploy: Any, args: Any) -> Any:
-    """Capturing factory: appends ``sampling`` to a shared list.
+    """Capturing factory: appends every ``sampling`` to a shared list.
 
     Tests that want to observe the ``SamplingParams`` seen by the runner
     call ``reset_captures()`` first and ``get_captures()`` after.
     """
 
-    def forward(payload: Any, sampling: Any) -> Any:
+    def capture(payload: Any, sampling: Any) -> Any:
         _captures.append(sampling)
         return payload
 
-    return forward
+    return _FakeStage(capture)
 
 
 def logged_thinker(deploy: Any, args: Any) -> Any:
@@ -153,7 +201,7 @@ def logged_thinker(deploy: Any, args: Any) -> Any:
         _log.append(("thinker", payload, sampling))
         return f"{payload}->thinker"
 
-    return forward
+    return _FakeStage(forward)
 
 
 def logged_talker(deploy: Any, args: Any) -> Any:
@@ -161,7 +209,7 @@ def logged_talker(deploy: Any, args: Any) -> Any:
         _log.append(("talker", payload, sampling))
         return f"{payload}->talker"
 
-    return forward
+    return _FakeStage(forward)
 
 
 def logged_code2wav(deploy: Any, args: Any) -> Any:
@@ -169,7 +217,7 @@ def logged_code2wav(deploy: Any, args: Any) -> Any:
         _log.append(("code2wav", payload, sampling))
         return f"{payload}->code2wav"
 
-    return forward
+    return _FakeStage(forward)
 
 
 class _LoggedDiffusionPipeline:

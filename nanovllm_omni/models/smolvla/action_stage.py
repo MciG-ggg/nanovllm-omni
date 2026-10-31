@@ -4,8 +4,9 @@ Implements the ``DiffusionPipeline`` 4-method contract to run flow
 matching with the action expert. This is the second stage of the
 SmolVLA two-stage pipeline.
 
-Uses lerobot's internal ``denoise_step`` + ``euler_integrate`` to
-maintain bit-exact alignment with ``policy.predict_action_chunk``.
+Uses lerobot's internal ``denoise_step`` + ``euler_integrate`` so the
+action stage shares the reference ops; parity is checked by
+``tests/test_parity_smolvla.py``.
 
 See ``docs/dev/nanovllm-omni-smolvla-arflow-migration.md`` §3 ADR-030.
 """
@@ -50,7 +51,7 @@ class SmolVLAActionPipeline:
 
         The ``request`` is an ``ActionInputPayload`` from ``vlm2action``.
         Prefer the policy from the payload metadata (vlm_stage's policy)
-        over self.policy to ensure bit-exact alignment.
+        over self.policy so both paths use the same weights and RNG path.
         """
         from nanovllm_omni.diffusion.interface import StepState
 

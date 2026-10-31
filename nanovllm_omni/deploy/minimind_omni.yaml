@@ -4,10 +4,20 @@
 stages:
   - name: thinker
     max_num_batched_tokens: 512
+    # Serving one request per step, the shape ADR-0007 measured. Raising
+    # this lets the thinker decode a batch together and it does amortise
+    # its host dispatch -- with a graph per bucket, 8 requests take 2086 ms
+    # against 8 x 449 ms one at a time -- but end-to-end it is a
+    # regression today. With the shipped max_capture_bs=1 a batched decode
+    # runs eager, and bs=8 costs 31107 ms against 22480 ms for eight single
+    # requests (ADR-0012). The lever is the talker, which is 84% of a
+    # request and still serves one at a time.
     max_num_seqs: 1
     gpu_memory_utilization: 0.6
     default_sampling_params:
       temperature: 0.7
+      top_p: 0.85
+      repetition_penalty: 1.0
       max_tokens: 512
   - name: talker
     max_num_batched_tokens: 256

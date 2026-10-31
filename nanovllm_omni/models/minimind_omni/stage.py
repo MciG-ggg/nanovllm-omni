@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from nanovllm_omni.engine.stage_engine import StageEngine
 from nanovllm_omni.engine.stage_runner import (
     StageRunner,
     _ensure_dist,
@@ -264,7 +265,22 @@ def _load_tokenizer(model_path: str) -> Any:
     return AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
 
 
-class ThinkerStage:
+_THINKER_CHAT_MARKER = "<|im_start|>"
+
+
+def _format_prompt(tokenizer: Any, prompt: str, open_thinking: bool) -> str:
+    """Wrap a raw user prompt in the checkpoint chat template."""
+    if _THINKER_CHAT_MARKER in prompt:
+        return prompt
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+        open_thinking=open_thinking,
+    )
+
+
+class ThinkerStage(StageEngine):
     """Stage 0 — MiniMind thinker AR decode via fork ``ModelRunner``.
 
     The factory ``_thinker_stage`` (in ``thinker.py``) constructs this
@@ -273,6 +289,7 @@ class ThinkerStage:
     """
 
     def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
+        super().__init__()
         from .thinker import MiniMindThinker
 
         self.deploy = deploy
@@ -294,6 +311,30 @@ class ThinkerStage:
         register_minimind_config()
         stage_kwargs = stage_kwargs_from_args(args)
         stage_kwargs["trust_remote_code"] = False
+        # ``Config.max_capture_bs`` caps which decode batch sizes get a
+        # CUDA graph. The fork captures them largest-first into one shared
+        # memory pool, and a batch size captured alongside bigger ones
+        # reduces in a different order than the eager path: the final
+        # logits still agree, but the bridge rows (intermediate hidden
+        # states) differ in the last bits, so graph and eager stop
+        # producing byte-identical audio.
+        #
+        # Only the single-request graph is captured by default. That is the
+        # configuration ADR-0005 and ADR-0007 measured and
+        # ``tests/test_minimind_graph_parity.py`` pins, and it leaves the
+        # bs=1 path byte-identical to that baseline. A batch (bs > 1) has no
+        # graph and runs eager, which is slower per step than the graph but
+        # is the only way to decode the batch at all without changing the
+        # bs=1 arithmetic.
+        #
+        # ``extra["thinker_max_capture_bs"]`` raises the cap for a bench
+        # cell: graphed batches decode ~4x faster on the thinker, at the
+        # cost of the cross-bucket byte-identity above. The choice lives at
+        # the stage, out of DeployConfig (ADR-0005).
+        stage_kwargs["max_capture_bs"] = int(extra.get("thinker_max_capture_bs", 1))
+        # Official eval_omni.py runs the released weights in fp16 (`.half()`).
+        if stage_kwargs.get("dtype") is None:
+            stage_kwargs["dtype"] = "float16"
         self.config = get_stage_config(
             model_path=_resolve_model_path(args, stage="thinker"),
             **stage_kwargs,
@@ -307,21 +348,86 @@ class ThinkerStage:
         )
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
-        """Run the Thinker: tokenize prompt, prefill, AR decode, extract bridge.
+        """Decode one prompt end to end (direct-call form of ``step``)."""
+        return self._decode([payload], [sampling])[0]
 
-        Args:
-            payload: text prompt string.
-            sampling: SamplingParams (or fork equivalent) with max_tokens, temperature.
+    def step(self) -> list[tuple[str, Any]]:
+        """Decode every request this stage is holding in one batched pass."""
+        if not self._pending:
+            return []
+        requests = list(self._pending)
+        outputs = self._decode(
+            [request.payload for request in requests],
+            [request.sampling for request in requests],
+        )
+        # Clear only after the decode returns: a failure leaves the queue
+        # intact so ``drop_pending`` can retire these requests instead of
+        # leaving the runner waiting on them forever.
+        self._pending.clear()
+        return [
+            (request.request_id, output) for request, output in zip(requests, outputs, strict=True)
+        ]
 
-        Returns:
-            ThinkerStageOutput with bridge_states, token_ids, text_token_ids.
-        """
+    def _decode(self, payloads: list[Any], samplings: list[Any]) -> list[Any]:
+        """Tokenize every prompt, run one batched decode, re-capture bridges."""
         import torch
 
         from .stage_processors import ThinkerStageOutput
 
-        prompt = str(payload)
         tokenizer = _load_tokenizer(_resolve_model_path(self.args, stage="thinker"))
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            eos_id = self.config.eos
+
+        prepared = [
+            self._prepare_decode(payload, sampling, tokenizer)
+            for payload, sampling in zip(payloads, samplings, strict=True)
+        ]
+        decoded = decode_minimind(
+            self.stage_runner,
+            prepared,
+            eos_id=eos_id,
+            enter_token=_THINKER_ENTER_TOKEN,
+            pad_token=_THINKER_PAD_TOKEN,
+            talker_tail=_TALKER_TAIL,
+        )
+
+        outputs = []
+        for request, result in zip(prepared, decoded, strict=True):
+            bridge_hidden = recapture_bridge_minimind(
+                self.stage_runner,
+                request.token_ids + list(result.generated),
+                result.bridge_hidden,
+            )
+            eos_index = next(
+                (i for i, token in enumerate(result.generated) if token == eos_id), None
+            )
+            content_len = len(result.generated) if eos_index is None else eos_index
+            outputs.append(
+                ThinkerStageOutput(
+                    bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),
+                    prompt_token_ids=tuple(request.token_ids),
+                    output_token_ids=tuple(result.generated),
+                    text_token_ids=tuple(request.token_ids + result.generated),
+                    text=tokenizer.decode(result.generated[:content_len], skip_special_tokens=True),
+                    text_state=result.text_state,
+                    request_id=getattr(request, "request_id", None),
+                    metadata={"content_len": content_len, "talker_tail": _TALKER_TAIL},
+                )
+            )
+        return outputs
+
+    def _prepare_decode(
+        self,
+        payload: Any,
+        sampling: Any,
+        tokenizer: Any,
+    ) -> Any:
+        """Turn one prompt + ``SamplingParams`` into a ``ThinkerDecode``."""
+        from .stage_runner import ThinkerDecode
+
+        open_thinking = bool((getattr(sampling, "extra", None) or {}).get("open_thinking", False))
+        prompt = _format_prompt(tokenizer, str(payload), open_thinking)
         token_ids = tokenizer.encode(prompt, add_special_tokens=False)
         if not token_ids:
             token_ids = [tokenizer.eos_token_id or 0]
@@ -329,66 +435,30 @@ class ThinkerStage:
         max_tokens = getattr(sampling, "max_tokens", None)
         if max_tokens is None:
             max_tokens = (getattr(sampling, "extra", None) or {}).get("max_tokens", 512)
-        max_tokens = int(max_tokens)
 
         temperature = getattr(sampling, "temperature", None)
         if temperature is None:
             temperature = (getattr(sampling, "extra", None) or {}).get("temperature", 0.7)
         temperature = float(temperature)
-        # Fork requires temperature > 1e-10 (no greedy).
         if temperature <= 1e-10:
             temperature = 1e-5
 
-        # Create fork Sequence and Scheduler inside StageRunner.decode.
-
-        _rp = float(
-            (getattr(sampling, "extra", None) or {}).get("repetition_penalty", 1.05) or 1.05
-        )
-        _top_p = float(getattr(sampling, "top_p", 1.0) or 1.0)
-        eos_id = getattr(tokenizer, "eos_token_id", None)
-        if eos_id is None:
-            eos_id = self.config.eos
-
-        # Stop strings: stop as soon as one of them appears in the text
-        # generated so far.
         stop_strings = list(getattr(sampling, "stop", None) or [])
 
         def _stop_hit(ids: list[int]) -> bool:
-            if not stop_strings:
-                return False
             text = tokenizer.decode(ids, skip_special_tokens=True)
             return any(s in text for s in stop_strings)
 
-        generated, bridge_hidden, text_state = decode_minimind(
-            self.stage_runner,
-            token_ids,
-            max_tokens=max_tokens,
+        return ThinkerDecode(
+            token_ids=token_ids,
+            max_tokens=int(max_tokens),
             temperature=temperature,
-            repetition_penalty=_rp,
-            top_p=_top_p,
-            eos_id=eos_id,
-            enter_token=_THINKER_ENTER_TOKEN,
-            pad_token=_THINKER_PAD_TOKEN,
+            repetition_penalty=float(
+                (getattr(sampling, "extra", None) or {}).get("repetition_penalty", 1.05) or 1.05
+            ),
+            top_p=float(getattr(sampling, "top_p", 1.0) or 1.0),
             seed=getattr(sampling, "seed", None),
             stop_hit=_stop_hit if stop_strings else None,
-        )
-
-        # Re-capture the bridge with one full-sequence prefill pass so the
-        # talker sees full-attention rows.
-        bridge_hidden = recapture_bridge_minimind(
-            self.stage_runner,
-            token_ids + list(generated),
-            bridge_hidden,
-        )
-
-        return ThinkerStageOutput(
-            bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),
-            prompt_token_ids=tuple(token_ids),
-            output_token_ids=tuple(generated),
-            text_token_ids=tuple(token_ids + generated),
-            text=tokenizer.decode(generated, skip_special_tokens=True),
-            text_state=text_state,
-            request_id=getattr(sampling, "request_id", None),
         )
 
 
@@ -402,8 +472,12 @@ class TalkerOutput:
 # Vendor constant — single channel of the audio-buffer pad (model_omni.py).
 _AUDIO_PAD_TOKEN = 2049
 _AUDIO_STOP_TOKEN = 2050
+_AUDIO_SPK_TOKEN = 2051
 _AUDIO_VENDOR_TEMPERATURE = 0.2
 _AUDIO_REPETITION_PENALTY = 1.05
+# The vendor talker needs post-EOS filler rows to reach its own stop token;
+# 64 covers the 56 frames measured for the teacher-forced reference.
+_TALKER_TAIL = 64
 
 
 def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
@@ -417,72 +491,87 @@ def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
     return all(stop_positions[i] is None or step - 7 + i < stop_positions[i] for i in range(8))
 
 
-class TalkerStage:
-    """Stage 1 — MiniMind talker MTP decode.
-
-    Full-sequence per step (we re-run the growing audio sequence at
-    every step, no incremental decode yet — that requires per-step
-    block-table maintenance and a fork ``Sequence`` per request, see
-    the pre-``prepare_inputs_embeds`` / ``body`` / ``compute_logits`` refactor is only partial, so full-sequence per-step is still used, not incremental decode). The fork ``Attention`` paged
-    path is used so D = num_kv_heads * head_dim = 192 is no longer
-    a Triton-kernel barrier (the kernel now pads to next-pow2).
-
-    Audio sampling uses vendor's ``topk(50)`` plus
-    ``torch.multinomial(softmax(...))`` with a repetition penalty on the
-    last 3 codes per codebook. ``enforce_eager`` for the underlying fork
-    flow is not applicable here because we don't go through a
-    ``ModelRunner``; we set up the fork ``Context`` directly.
-    """
+class TalkerStage(StageEngine):
+    """Stage 1 — MiniMind talker decode on the vendor ``TalkerModule`` (full sequence per step)."""
 
     def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
+        super().__init__()
         self.deploy = deploy
         self.args = args
         self.model_class = model_class
         self._model: Any = None
         self._device: str | None = None
         self._config: Any = None
-        self._arange_cache: Any = None
 
     def _ensure_model(self) -> Any:
-        """Lazily load the talker model from the talker-only safetensors."""
+        """Load the vendor talker from the original checkpoint."""
         if self._model is not None:
             return self._model
 
+        import os
+
         import torch
-        from nanovllm.config import Config
-        from nanovllm.utils.loader import load_model
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-        from .talker import MiniMindTalker
+        from .bundle import _resolve_snapshot
 
-        model_class = self.model_class or MiniMindTalker
-        model_path = _resolve_model_path(self.args, stage="talker")
+        model_dir = _resolve_snapshot(getattr(self.args, "model", None))
+        config_cls = get_class_from_dynamic_module("model_omni.OmniConfig", model_dir)
+        talker_cls = get_class_from_dynamic_module("model_omni.TalkerModule", model_dir)
+        config = config_cls.from_pretrained(model_dir)
 
-        # Build the fork Config. The local config class replaces the
-        # hub's ``auto_map`` file, so the fork loads no remote code; the
-        # resulting ``hf_config`` is what the talker model class consumes.
-        register_minimind_config()
-        cfg = Config(model=model_path, trust_remote_code=False)
-        hf_cfg = cfg.hf_config
-        self._config = hf_cfg
+        talker = talker_cls(config).eval()
+        weights = os.path.join(model_dir, "pytorch_model.bin")
+        if os.path.isfile(weights):
+            state = torch.load(weights, map_location="cpu", weights_only=True)
+        else:
+            from safetensors.torch import load_file
 
-        # Ensure dist is ready (may already be initialised by the
-        # thinker's ModelRunner inside the same process).
-        _ensure_dist()
+            state = {}
+            for name in sorted(os.listdir(model_dir)):
+                if name.endswith(".safetensors"):
+                    state.update(load_file(os.path.join(model_dir, name)))
+        talker.load_state_dict(
+            {
+                key[len("talker.") :]: value
+                for key, value in state.items()
+                if key.startswith("talker.")
+            },
+            strict=True,
+        )
+        talker = talker.half().to("cuda")
 
-        default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_cfg.dtype)
-        torch.set_default_device("cuda")
-        try:
-            model = model_class(hf_cfg)
-            load_model(model, model_path)
-        finally:
-            torch.set_default_device("cpu")
-            torch.set_default_dtype(default_dtype)
-
-        model.eval()
-        self._model = model
+        self._model = talker
+        self._config = talker.talker_config
         self._device = "cuda"
-        return model
+        return talker
+
+    def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any) -> Any:
+        """Run the vendor talker over the full sequence; return its 8 logit tensors."""
+        import torch
+
+        talker = self._model
+        embeds = talker.embed_tokens(audio_codes)
+        if spk_emb is not None:
+            if spk_emb.dim() == 1:
+                spk_emb = spk_emb.unsqueeze(0)
+            mask = (audio_codes[:, 0, :] == _AUDIO_SPK_TOKEN).unsqueeze(-1)
+            embeds = torch.where(mask, talker.spk_proj(spk_emb).unsqueeze(1), embeds)
+        hidden = (
+            talker.embed_proj(bridge) * talker.text_scale
+            + talker.codec_proj(embeds) * talker.audio_scale
+        )
+        seq_len = hidden.shape[1]
+        position_embeddings = (talker.freqs_cos[:seq_len], talker.freqs_sin[:seq_len])
+        for layer in talker.layers:
+            hidden, _ = layer(
+                hidden,
+                position_embeddings,
+                past_key_value=None,
+                use_cache=False,
+            )
+        hidden = talker.norm(hidden)
+        return talker.lm_head(hidden)
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Run the Talker: AR decode audio codes from bridge hidden states.
@@ -502,7 +591,6 @@ class TalkerStage:
             TalkerOutput with audio_codes [frames, 8] tensor.
         """
         import torch
-        from nanovllm.utils.context import reset_context, set_context
 
         from .stage_processors import TalkerInputPayload
 
@@ -588,39 +676,7 @@ class TalkerStage:
                 # Vendor recomputes the full sequence every step
                 # (``use_cache=False`` on the parity path), so the talker
                 # sees the whole prefix, not a sliding window.
-                embeds, positions = model.prepare_inputs_embeds(
-                    bridge[:, :seq_len, :], buf, spk_emb
-                )
-
-                # Fork ``Attention`` reads module-level ``Context`` to
-                # pick prefill vs decode kernels. We always run the
-                # prefill path because the talker recomputes the full
-                # growing sequence every step. ``k_cache.numel() == 0``
-                # on the freshly-loaded model so ``store_kvcache`` is
-                # skipped — we don't need the paged storage here, only
-                # the kernel.
-                # Cache the arange base once per TalkerStage call so the
-                # full-range slot/cu tensors share storage instead of
-                # allocating 64 KB per decode step.
-                if self._arange_cache is None or self._arange_cache.device != device:
-                    self._arange_cache = torch.arange(32768, dtype=torch.int32, device=device)
-                arange = self._arange_cache
-                n_tokens = embeds.shape[0]
-                set_context(
-                    is_prefill=True,
-                    cu_seqlens_q=torch.tensor([0, n_tokens], dtype=torch.int32, device=device),
-                    cu_seqlens_k=torch.tensor([0, n_tokens], dtype=torch.int32, device=device),
-                    max_seqlen_q=n_tokens,
-                    max_seqlen_k=n_tokens,
-                    slot_mapping=arange[:n_tokens],
-                    context_lens=None,
-                    block_tables=None,
-                )
-                try:
-                    hidden = model.body(positions, embeds)
-                finally:
-                    reset_context()
-                logits_list = model.compute_logits(hidden)
+                logits_list = self._talker_logits(bridge[:, :seq_len, :], buf, spk_emb)
 
                 # Sample one code per codebook. HF ``model_omni.py``
                 # stream_generate: ``logits_i = al[0,-1,:] / 0.2``, then
@@ -638,7 +694,7 @@ class TalkerStage:
                     # generic Gumbel sampler consumes a different RNG path;
                     # one different code recursively changes every later
                     # audio-buffer column.
-                    logits_i = logits[-1, :].clone() / temperature
+                    logits_i = logits[0, -1, :].clone() / temperature
                     for previous_code in audio_codes[i][-3:]:
                         logits_i[previous_code] /= _AUDIO_REPETITION_PENALTY
                     top_value, top_index = logits_i.topk(50)

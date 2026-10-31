@@ -42,9 +42,15 @@ def main() -> None:
     # ---- HF vendor path ----
     print("\n=== HF vendor path ===")
     torch.manual_seed(seed := SEED)
-    model = (
-        AutoModelForCausalLM.from_pretrained(MODEL_DIR, trust_remote_code=True).to("cuda").eval()
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_DIR, trust_remote_code=True, dtype=torch.float16
+        )
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_DIR, trust_remote_code=True, torch_dtype=torch.float16
+        )
+    model = model.to("cuda").eval()
     input_ids_t = torch.tensor([input_ids], device="cuda")
 
     hf_frames: list[list[int]] = []
@@ -62,7 +68,7 @@ def main() -> None:
     )
     for text_chunk, audio_frame in gen:
         if text_chunk is not None:
-            hf_text_ids.extend(text_chunk[0].tolist())
+            hf_text_ids = text_chunk[0].tolist()
         if audio_frame is not None:
             hf_frames.append(audio_frame)
     del model
@@ -89,16 +95,16 @@ def main() -> None:
         captured.append(out.audio_codes.detach().cpu().clone())
         return out
 
-    _orig_thinker = ThinkerStage.__call__
+    _orig_thinker = ThinkerStage._decode
     thinker_captured: list = []
 
-    def _spy_thinker(self, payload, sampling):
-        out = _orig_thinker(self, payload, sampling)
-        thinker_captured.append(out)
-        return out
+    def _spy_thinker(self, payloads, samplings):
+        outs = _orig_thinker(self, payloads, samplings)
+        thinker_captured.extend(outs)
+        return outs
 
     TalkerStage.__call__ = _spy
-    ThinkerStage.__call__ = _spy_thinker
+    ThinkerStage._decode = _spy_thinker
     try:
         # Match vendor sampling so we test implementation, not sampling
         # drift: temperature=0.2 + rp=1.05. ``repetition_penalty`` rides
@@ -113,7 +119,7 @@ def main() -> None:
         omni.generate([formatted], sp)
     finally:
         TalkerStage.__call__ = _orig
-        ThinkerStage.__call__ = _orig_thinker
+        ThinkerStage._decode = _orig_thinker
 
     nano_codes = captured[0] if captured else None
     nano_text: list[int] = []
@@ -175,6 +181,7 @@ def main() -> None:
             f"frame-code residue is bf16/numerical drift between two-stage and "
             f"single-model forward passes)"
         )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

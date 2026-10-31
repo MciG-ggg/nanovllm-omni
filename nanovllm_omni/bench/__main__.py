@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .prompts import BENCH_PROMPTS, BenchPrompt
 from .report import markdown_table, markdown_table_detail, write_csv
@@ -70,6 +71,14 @@ def _graph_overrides(args: argparse.Namespace) -> dict[str, bool]:
     }
 
 
+def _extra_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Stage knobs that travel through ``OmniEngineArgs.extra``."""
+    capture_bs = getattr(args, "thinker_max_capture_bs", None)
+    if capture_bs is None:
+        return {}
+    return {"thinker_max_capture_bs": capture_bs}
+
+
 def _run_all(
     bundle: object,
     prompts: list[BenchPrompt],
@@ -82,6 +91,102 @@ def _run_all(
     for prompt in prompts:
         results.extend(run_n(bundle, prompt, n=n, warmup=warmup, **run_kwargs))
     return results
+
+
+def _make_full_omni(args: argparse.Namespace):
+    """Build the full three-stage ``Omni`` the E2E measurements run on."""
+    import torch
+
+    from nanovllm_omni import Omni
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    return Omni(
+        model=args.model,
+        device=device,
+        dtype="float16" if device.startswith("cuda") else "float32",
+        trust_remote_code=True,
+        pipeline="minimind_o",
+        extra=_extra_overrides(args),
+        **_graph_overrides(args),
+    )
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    """Measure throughput as a function of how many requests share a batch.
+
+    Every size is measured against the same prompts, and each request's
+    audio is compared with its own single-request run: a batch may not
+    change what a request produces.
+    """
+    import csv
+    import statistics
+
+    from nanovllm_omni.bench.runner import run_batch
+
+    prompts = _resolve_prompts(args.prompts)
+    omni = _make_full_omni(args)
+    kwargs = {
+        "seed": args.seed,
+        "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+    }
+    sizes = [int(s) for s in args.batch_sizes.split(",") if s.strip()]
+
+    solo_audio: dict[str, bytes] = {}
+    for prompt in prompts:
+        solo_audio[prompt.id] = run_batch(omni, [prompt], **kwargs)["audios"][0]
+
+    rows: list[dict[str, Any]] = []
+    for size in sizes:
+        batch = [prompts[i % len(prompts)] for i in range(size)]
+        for _ in range(max(args.warmup, 0)):
+            run_batch(omni, batch, **kwargs)
+        runs = [run_batch(omni, batch, **kwargs) for _ in range(args.runs)]
+        wall_ms = statistics.median(r["wall_ms"] for r in runs)
+        # A request's audio may differ from its solo run: a batched prefill
+        # runs different kernels over a packed batch, so the bridge rows
+        # differ in the last bits and the talker is sensitive to them. The
+        # thinker's tokens do not differ. Count the matches instead of a
+        # boolean, so one mismatch stays visible.
+        matched = sum(
+            audio == solo_audio[prompt.id]
+            for prompt, audio in zip(batch, runs[-1]["audios"], strict=True)
+        )
+        rows.append(
+            {
+                "batch_size": size,
+                "wall_ms": f"{wall_ms:.3f}",
+                "per_request_ms": f"{wall_ms / size:.3f}",
+                "req_per_s": f"{1000.0 * size / wall_ms:.4f}",
+                "same_audio": f"{matched}/{size}",
+                "vram_mb": f"{max(r['vram_peak_mb'] for r in runs):.3f}",
+                "thinker_ms": f"{runs[-1]['stage_ms'].get('thinker', 0.0):.3f}",
+                "talker_ms": f"{runs[-1]['stage_ms'].get('talker', 0.0):.3f}",
+                "code2wav_ms": f"{runs[-1]['stage_ms'].get('code2wav', 0.0):.3f}",
+            }
+        )
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"wrote {len(rows)} rows to {out}")
+    print()
+    print(
+        f"{'batch':>5} {'wall ms':>9} {'per req ms':>11} {'req/s':>7} {'same':>6} {'vram MiB':>9}"
+    )
+    for row in rows:
+        print(
+            f"{row['batch_size']:>5} {float(row['wall_ms']):>9.0f} "
+            f"{float(row['per_request_ms']):>11.0f} {float(row['req_per_s']):>7.2f} "
+            f"{row['same_audio']:>6} {float(row['vram_mb']):>9.0f}"
+        )
+    print()
+    print("same = requests whose audio matched their own single-request run")
+    return 0
 
 
 def cmd_time(args: argparse.Namespace) -> int:
@@ -383,12 +488,39 @@ def build_parser() -> argparse.ArgumentParser:
         "the thinker-bundle path has no graph to toggle.",
     )
     common.add_argument(
+        "--thinker-max-capture-bs",
+        type=int,
+        default=None,
+        help="How many decode batch sizes get a CUDA graph (default: 1, the "
+        "stage default). Larger values graph the batch buckets too, at the "
+        "cost of the bs=1 graph no longer matching eager byte-for-byte.",
+    )
+    common.add_argument(
         "--pipeline",
         choices=("thinker", "full"),
         default="thinker",
         help="measurement target: thinker single-stage decode (default, the "
         "historical bench) or the full three-stage E2E through Omni.generate.",
     )
+
+    p_batch = sub.add_parser(
+        "batch",
+        parents=[common],
+        help="Throughput and output identity as a function of batch size",
+    )
+    p_batch.add_argument(
+        "--batch-sizes",
+        default="1,2,4,8",
+        help="Comma-separated batch sizes to measure (default: 1,2,4,8)",
+    )
+    p_batch.add_argument("--runs", type=int, default=3)
+    p_batch.add_argument("--warmup", type=int, default=1)
+    p_batch.add_argument(
+        "--out",
+        default="docs/perf/batch.csv",
+        help="CSV output path (default: docs/perf/batch.csv)",
+    )
+    p_batch.set_defaults(func=cmd_batch)
 
     p_time = sub.add_parser("time", parents=[common], help="Time N runs and write CSV")
     p_time.add_argument("--runs", type=int, default=5)

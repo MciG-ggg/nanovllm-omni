@@ -1,19 +1,24 @@
-"""PipelineRunner: synchronous single-replica pipeline runner.
+"""PipelineRunner: synchronous single-replica pipeline engine.
 
-Runs one request through ``PipelineConfig.stages`` sequentially. Knows
-nothing about concurrency, async, HTTP, or multi-replica routing. The
-companion class ``PipelineExecutor`` (in ``engine/executor.py``) wraps
-this runner for async and multi-request use.
+A request is data, not control flow. ``add_request`` puts it in the queue
+of the first stage; ``step`` lets one stage serve the requests it is
+holding and pushes whatever finished into the next stage's queue. That is
+the shape of ``vllm_omni``'s orchestrator — requests move forward stage by
+stage and each stage owns its own queue — with the replica pools and
+cross-process transport removed, because a single GPU in one process has
+one stage running at a time.
 
-Design basis: 10-round grill session. The reference's StagePool and
-Orchestrator are designed for multi-replica routing and cross-stage
-request lifecycle management; neither is needed for this project's
-single-process, single-GPU scope.
+The scheduling policy is round-robin over the stages that hold a request:
+a stage that keeps receiving work cannot starve the stages after it. The
+reference polls every stage each round and serves whichever is ready; on
+one GPU that becomes a rotation.
 
 Stage factories and ``process_input`` hooks are tuple registrations on
-``StageConfig``; this runner resolves them once per pipeline on first ``run``.
-Registered model classes are resolved at the same point and injected into the
-stage wrapper without any model-name branch in the runner.
+``StageConfig``; this runner resolves them once per pipeline on first
+``step``. Registered model classes are resolved at the same point and
+injected into the stage wrapper without any model-name branch here.
+
+The stage side of the contract lives in ``engine/stage_engine.py``.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import time
+import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
@@ -28,18 +35,47 @@ from nanovllm_omni.config.registry import (
     DeployConfig,
     OmniModelRegistry,
     PipelineConfig,
+    StageConfig,
     merge_pipeline_deploy,
     resolve_stage_factory,
 )
+from nanovllm_omni.engine.stage_engine import StageRequest
 from nanovllm_omni.outputs import adapt_terminal_output
 
 
-class PipelineRunner:
-    """Synchronous single-replica pipeline runner.
+@dataclass(frozen=True)
+class FinishedRequest:
+    """One request that reached the terminal stage."""
 
-    A runner is built once per pipeline, then ``run`` is called once per
-    request. Stage instances are constructed lazily on the first ``run``
-    call so that import-time side effects (model loading) are deferred.
+    request_id: str
+    payload: Any
+    stage_ms: dict[str, float]
+
+
+@dataclass
+class _InFlight:
+    """Mutable per-request state inside the runner.
+
+    The payload itself lives in the queue of whichever stage holds the
+    request; only the bookkeeping stays here.
+    """
+
+    request_id: str
+    prompt: Any
+    sampling: SamplingParams | None
+    stage_ms: dict[str, float] = field(default_factory=dict)
+
+
+class PipelineRunner:
+    """Synchronous single-replica pipeline engine.
+
+    Built once per pipeline. ``add_request`` / ``step`` are the engine
+    loop; ``run`` is the one-shot convenience built on top. Stage
+    instances are constructed lazily on the first ``step`` so that
+    import-time side effects (model loading) are deferred.
+
+    Not reentrant: ``step`` is the only writer to in-flight state, and
+    ``PipelineExecutor`` holds a lock across every call into the runner.
     """
 
     def __init__(
@@ -54,6 +90,8 @@ class PipelineRunner:
         self._merged = merge_pipeline_deploy(pipeline, deploy)
         self._deploy_stages = {stage.name: stage for stage in deploy.stages}
         self._stage_instances: list[Any] | None = None
+        self._in_flight: dict[str, _InFlight] = {}
+        self._next_stage = 0
 
     def _stage_args(self, stage_name: str) -> OmniEngineArgs:
         """Overlay stage-local engine knobs without mutating shared args."""
@@ -132,35 +170,139 @@ class PipelineRunner:
             extra={**extras, **(request.extra or {})},
         )
 
-    def run(
-        self, prompt: str, sampling: SamplingParams | None = None
-    ) -> tuple[Any, dict[str, float]]:
-        """Run one request through the pipeline.
+    def _submit(self, stage_index: int, request: _InFlight, payload: Any) -> None:
+        """Run the stage's bridge hook, then queue the request for that stage."""
+        stage_cfg, stage_defaults = self._merged[stage_index]
+        if stage_cfg.process_input is not None:
+            payload = resolve_stage_factory(stage_cfg.process_input)(payload, request.prompt)
+        self._ensure_stages()[stage_index].add_request(
+            StageRequest(
+                request_id=request.request_id,
+                payload=payload,
+                sampling=self._stage_sampling(stage_defaults, request.sampling),
+            )
+        )
+
+    def retire_all(self) -> None:
+        """Drop every in-flight request.
+
+        A step that raises must not leave the engine stuck: ``run`` drains
+        until nothing is in flight, so a request no stage holds would spin
+        forever. Today only the failing caller's own batch is in flight,
+        because the executor serialises callers.
+
+        Clears ``_in_flight`` first and reads the already-built stages, so
+        the handler cannot fail on its own way out.
+        """
+        self._in_flight.clear()
+        for stage in self._stage_instances or ():
+            stage.drop_pending()
+
+    def add_request(
+        self,
+        prompt: Any,
+        sampling: SamplingParams | None = None,
+        request_id: str | None = None,
+    ) -> str:
+        """Put one request in flight; returns its id.
 
         ``prompt`` is the initial payload. ``sampling`` is the per-request
-        override; per-stage deploy defaults are merged underneath. Returns
-        ``(payload, stage_ms)`` — per-stage wall-clock ms in pipeline
-        order, so bench reads timings from the return value instead of
-        reaching through privates. The executor/entrypoint seam only ever
-        sees the payload (see ``run_payload``).
+        override; per-stage deploy defaults are merged underneath.
         """
+        request_id = request_id or uuid.uuid4().hex
+        if request_id in self._in_flight:
+            raise ValueError(f"request {request_id!r} is already in flight")
+        request = _InFlight(request_id=request_id, prompt=prompt, sampling=sampling)
+        self._in_flight[request_id] = request
+        try:
+            self._submit(0, request, prompt)
+        except BaseException:
+            # Loading the first stage can fail (missing weights, OOM); an
+            # in-flight request no stage holds would hang the next ``run``.
+            self._in_flight.pop(request_id, None)
+            raise
+        return request_id
+
+    def has_unfinished(self) -> bool:
+        """Whether any request is still in flight."""
+        return bool(self._in_flight)
+
+    def step(self) -> list[FinishedRequest]:
+        """Let one stage serve the requests it is holding.
+
+        Stages are served round-robin, starting where the last step left
+        off, so a stage that keeps receiving work cannot starve the stages
+        after it. Returns the requests that reached the terminal stage
+        during this step (usually none).
+        """
+        if not self._in_flight:
+            return []
         stages = self._ensure_stages()
-        payload: Any = prompt
-        stage_ms: dict[str, float] = {}
-        for _, ((stage_cfg, stage_defaults), instance) in enumerate(
-            zip(self._merged, stages, strict=True)
-        ):
-            if stage_cfg.process_input is not None:
-                payload = resolve_stage_factory(stage_cfg.process_input)(payload, prompt)
-            stage_sampling = self._stage_sampling(stage_defaults, sampling)
+        count = len(self._merged)
+        for offset in range(count):
+            index = (self._next_stage + offset) % count
+            stage = stages[index]
+            if not stage.has_pending():
+                continue
+            self._next_stage = (index + 1) % count
+            stage_cfg = self._merged[index][0]
             t0 = time.perf_counter()
-            payload = instance(payload, stage_sampling)
+            try:
+                outputs = stage.step()
+                # Every request the stage served waited for the whole batch.
+                batch_ms = (time.perf_counter() - t0) * 1000.0
+                # ``_advance`` is inside the guard as well: its
+                # ``process_input`` hook and the next stage's construction are
+                # model code and can raise mid-route.
+                return self._advance(index, stage_cfg, outputs, batch_ms)
+            except BaseException:
+                self.retire_all()
+                raise
+        return []
+
+    def _advance(
+        self,
+        stage_index: int,
+        stage_cfg: StageConfig,
+        outputs: list[tuple[str, Any]],
+        batch_ms: float,
+    ) -> list[FinishedRequest]:
+        """Record a stage's outputs and push each request one stage forward."""
+        finished = []
+        for request_id, payload in outputs:
+            request = self._in_flight[request_id]
             if stage_cfg.is_terminal and stage_cfg.final_output_type is not None:
                 payload = adapt_terminal_output(payload, stage_cfg.final_output_type)
-            stage_ms[stage_cfg.name] = (time.perf_counter() - t0) * 1000.0
-        return payload, stage_ms
+            request.stage_ms[stage_cfg.name] = batch_ms
+            if stage_index + 1 == len(self._merged):
+                del self._in_flight[request_id]
+                finished.append(
+                    FinishedRequest(
+                        request_id=request_id,
+                        payload=payload,
+                        stage_ms=request.stage_ms,
+                    )
+                )
+            else:
+                self._submit(stage_index + 1, request, payload)
+        return finished
 
-    def run_payload(self, prompt: str, sampling: SamplingParams | None = None) -> Any:
+    def run(
+        self, prompt: Any, sampling: SamplingParams | None = None
+    ) -> tuple[Any, dict[str, float]]:
+        """Add one request and drain it; returns ``(payload, stage_ms)``.
+
+        The one-shot form every single-request caller uses (``Omni``,
+        bench). Batched callers use ``add_request`` + ``step``.
+        """
+        request_id = self.add_request(prompt, sampling)
+        while self.has_unfinished():
+            for finished in self.step():
+                if finished.request_id == request_id:
+                    return finished.payload, finished.stage_ms
+        raise RuntimeError(f"request {request_id!r} never finished")
+
+    def run_payload(self, prompt: Any, sampling: SamplingParams | None = None) -> Any:
         """Run one request, return only the payload (executor/entrypoint seam)."""
         payload, _ = self.run(prompt, sampling)
         return payload

@@ -24,6 +24,7 @@ from typing import Any
 
 import torch
 
+from nanovllm_omni.engine.stage_engine import StageEngine
 from nanovllm_omni.utils.profiling import profile_range
 
 from .smolvlm import SmolVLMForConditionalGeneration
@@ -37,10 +38,11 @@ def _vlm_stage(deploy: Any, args: Any, model_class: Any = None) -> Any:
     return SmolVLMStage(deploy, args, model_class=model_class)
 
 
-class SmolVLMStage:
+class SmolVLMStage(StageEngine):
     """Vision prefill + fork AR decode loop for SmolVLM-500M-Instruct."""
 
     def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
+        super().__init__()
         from transformers import AutoConfig, AutoProcessor
 
         from nanovllm_omni.engine.stage_runner import (

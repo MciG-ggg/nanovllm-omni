@@ -10,6 +10,7 @@ import io
 import wave
 from typing import Any
 
+from nanovllm_omni.engine.stage_engine import StageEngine
 from nanovllm_omni.outputs import AudioPayload
 from nanovllm_omni.utils.profiling import profile_range as stage
 
@@ -40,10 +41,11 @@ def load_mimi_codec(
     return _cast_model_dtype(mimi, dtype, device).to(device)
 
 
-class MiniMindOmniCode2Wav:
+class MiniMindOmniCode2Wav(StageEngine):
     """Decode one full-mode ``Code2WavInputPayload`` into ``AudioPayload``."""
 
     def __init__(self, mimi: Any, device: str | Any) -> None:
+        super().__init__()
         self.mimi = mimi
         self.device = device
 

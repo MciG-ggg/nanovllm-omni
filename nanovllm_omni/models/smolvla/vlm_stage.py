@@ -6,8 +6,9 @@ action stage. This is the "prefix phase" of flow matching.
 
 Per ADR-029 (deferred): we use lerobot's internal `vlm_with_expert` directly
 rather than weight-slicing into a fork `SmolVLMForCausalLM`. This keeps the
-KV cache format identical to lerobot's, which is critical for bit-exact
-alignment between the two-stage path and `policy.predict_action_chunk`.
+KV cache format identical to lerobot's, so the two-stage path and
+`policy.predict_action_chunk` share the same ops; parity is checked by
+`tests/test_parity_smolvla.py`.
 
 See docs/dev/nanovllm-omni-smolvla-arflow-migration.md §3 ADR-029.
 """
@@ -16,7 +17,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from nanovllm_omni.engine.stage_engine import StageEngine
+
 from .stage_processors import VlmStageOutput
+
+
+def _image_tensor(value: Any, device: str) -> Any:
+    """PIL/numpy HWC image -> batched CHW tensor; keep uint8 for lerobot's /255."""
+    import numpy as np
+    import torch
+
+    tensor = torch.from_numpy(np.array(value)).permute(2, 0, 1).unsqueeze(0)
+    if tensor.dtype != torch.uint8:
+        tensor = tensor.float()
+    return tensor.to(device)
 
 
 def _vlm_stage(deploy: Any, args: Any) -> Any:
@@ -24,7 +38,7 @@ def _vlm_stage(deploy: Any, args: Any) -> Any:
     return SmolVLAVlmStage(deploy, args)
 
 
-class SmolVLAVlmStage:
+class SmolVLAVlmStage(StageEngine):
     """AR stage: encode observation + instruction → KV cache for action expert.
 
     Internally loads the full lerobot SmolVLA policy (SigLIP + SmolVLM2 +
@@ -33,6 +47,7 @@ class SmolVLAVlmStage:
     """
 
     def __init__(self, deploy: Any, args: Any) -> None:
+        super().__init__()
         from lerobot.policies import make_pre_post_processors
 
         extra = dict(getattr(args, "extra", None) or {})
@@ -70,21 +85,25 @@ class SmolVLAVlmStage:
             else {}
         )
 
-        # Build observation batch (single image + state, preprocessor normalizes).
+        # Build observation batch (one or two images + state, preprocessor normalizes).
         img = extras.get("image")
         if img is None:
             raise ValueError("SmolVLA vlm_stage requires an image in extras['image']")
 
-        # Convert to lerobot batch format.
-        import numpy as np
-
-        arr = np.array(img)
-        img_tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float()
-        img_tensor = img_tensor.to(self.device)
-
-        batch = {"observation.images.image": img_tensor, "task": [instruction]}
+        # Keep uint8 so lerobot's prepare_images applies its /255 branch; a
+        # float [0,1] image is passed through unchanged.
+        batch = {
+            "observation.images.image": _image_tensor(img, self.device),
+            "task": [instruction],
+        }
+        wrist = extras.get("wrist_image")
+        if wrist is not None:
+            # smolvla_libero declares this camera as observation.images.image2.
+            batch["observation.images.image2"] = _image_tensor(wrist, self.device)
         robot_state = extras.get("state")
         if robot_state is not None:
+            import numpy as np
+
             batch["observation.state"] = torch.tensor(
                 np.asarray(robot_state, dtype=np.float32).reshape(1, -1),
             ).to(self.device)

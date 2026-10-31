@@ -304,12 +304,13 @@ class MiniMindThinker(nn.Module):
         # we need a registered buffer that the captured graph can write
         # into at a fixed memory address.
         #
-        # Layout: row 0 is the decode-step bridge (last token per step,
-        # overwritten on every replay); rows [0:seq_len] are also written
-        # during prefill in eager mode (``is_prefill`` branch in fork's
-        # ``ModelRunner``). ``decode_minimind`` slices
-        # ``_bridge_buffer[:1]`` after each decode replay and
-        # ``_bridge_buffer[:seq_len]`` once after prefill.
+        # Layout: rows [0:batch] are the decode-step bridge (one last-token
+        # row per sequence, overwritten on every replay); rows
+        # [0:seq_len] are also written during prefill in eager mode
+        # (``is_prefill`` branch in fork's ``ModelRunner``).
+        # ``decode_minimind`` slices ``_bridge_buffer[:batch]`` after each
+        # decode replay and ``_bridge_buffer[:seq_len]`` once after
+        # prefill.
         #
         # Size: ``max_position`` rows × ``hidden_size`` columns. Matches
         # the longest sequence the model can handle; fork-allocated KV
@@ -327,21 +328,11 @@ class MiniMindThinker(nn.Module):
         for i, layer in enumerate(self.model.layers):
             hidden_states, residual = layer(positions, hidden_states, residual)
             if i == self.bridge_layer:
+                # One row per token, packed: prefill writes every scheduled
+                # token and decode writes one row per sequence. Both land at
+                # the same fixed address so a CUDA-graph replay can write it.
                 seq_len = hidden_states.size(0)
-                if seq_len > 1:
-                    # Prefill: eager in fork's ModelRunner
-                    # (``is_prefill or self.enforce_eager`` short-circuits
-                    # graph capture). Write the full hidden_states to the
-                    # buffer's first ``seq_len`` rows; the decode loop
-                    # reads them once via ``get_bridge_hidden``.
-                    self._bridge_buffer[:seq_len].copy_(hidden_states)
-                else:
-                    # Decode (CUDA-graph captured): write the single
-                    # last-token row at the buffer's row 0 — a fixed
-                    # address that survives replay. Each replay
-                    # overwrites row 0; ``decode_minimind`` reads it out
-                    # between replays via ``get_bridge_hidden``.
-                    self._bridge_buffer[0].copy_(hidden_states[0])
+                self._bridge_buffer[:seq_len].copy_(hidden_states)
         hidden_states, _ = self.model.norm(hidden_states, residual)
         return hidden_states
 
@@ -351,9 +342,9 @@ class MiniMindThinker(nn.Module):
     def get_bridge_hidden(self) -> torch.Tensor | None:
         """Return the buffer holding the most-recent bridge rows.
 
-        Decode consumers slice ``[:1]`` per step; the prefill consumer
-        slices ``[:seq_len]`` once. Row 0 is the just-replayed decode
-        row (or the first row of a prefill pass).
+        Decode consumers take one row per sequence; the prefill consumer
+        takes ``[:seq_len]`` once. Row 0 is the first row of the
+        just-replayed step.
         """
         return self._bridge_buffer
 

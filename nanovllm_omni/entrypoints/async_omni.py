@@ -42,10 +42,15 @@ class AsyncOmni(OmniBase):
             per_prompt = list(sampling_params_list)
         executor = self._ensure_executor()
         final_output_type = self._final_output_type()
-        for idx, prompt in enumerate(prompts_list):
-            params = per_prompt[idx] if idx < len(per_prompt) else None
-            text, params = _merge_modal(params, prompt)
-            payload, stage_ms = await executor.submit(text, params)
+        prepared = [
+            _merge_modal(per_prompt[idx] if idx < len(per_prompt) else None, prompt)
+            for idx, prompt in enumerate(prompts_list)
+        ]
+        results = await executor.submit_many(
+            [text for text, _ in prepared],
+            [params for _, params in prepared],
+        )
+        for payload, stage_ms in results:
             yield _make_output(payload, stage_ms, final_output_type)
 
 

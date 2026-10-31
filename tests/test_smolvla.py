@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import nanovllm_omni
 from nanovllm_omni.config import resolve_pipeline_config
 from nanovllm_omni.config.registry import StageExecutionType
@@ -136,3 +138,30 @@ def test_compute_final_stage_id_prefers_terminal_with_matching_type():
     assert base._compute_final_stage_id(["audio"]) == 2
     # Unknown modality falls back to last stage.
     assert base._compute_final_stage_id(["video"]) == 2
+
+
+def test_image_tensor_keeps_uint8_for_lerobot_255_branch():
+    torch = pytest.importorskip("torch")
+    import numpy as np
+
+    from nanovllm_omni.models.smolvla.vlm_stage import _image_tensor
+
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    tensor = _image_tensor(image, "cpu")
+
+    assert tensor.dtype == torch.uint8
+    assert tensor.shape == (1, 3, 4, 4)
+
+
+def test_image_tensor_keeps_float_images_float():
+    torch = pytest.importorskip("torch")
+    import numpy as np
+
+    from nanovllm_omni.models.smolvla.vlm_stage import _image_tensor
+
+    image = np.zeros((4, 4, 3), dtype=np.float32)
+
+    tensor = _image_tensor(image, "cpu")
+
+    assert tensor.dtype == torch.float32

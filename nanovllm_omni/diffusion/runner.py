@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from nanovllm_omni.engine.stage_engine import StageEngine
+
 from .interface import DiffusionOutput, DiffusionPipeline, StepState
 
 
@@ -23,10 +25,11 @@ def _resolve_num_steps(state: StepState) -> int:
     return int(state.metadata["num_steps"])
 
 
-class DiffusionRunner:
+class DiffusionRunner(StageEngine):
     """Drives one DiffusionPipeline through the denoise loop."""
 
     def __init__(self, pipeline: DiffusionPipeline) -> None:
+        super().__init__()
         self.pipeline = pipeline
 
     def prepare(self, payload: Any, sampling: Any = None) -> StepState:

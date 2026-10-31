@@ -72,21 +72,20 @@ def test_no_legacy_bridge_hidden_attribute() -> None:
 
 
 def test_forward_writes_to_bridge_buffer() -> None:
-    """``forward`` writes the bridge row into ``_bridge_buffer``.
+    """``forward`` writes the bridge rows into ``_bridge_buffer``.
 
     The ``copy_`` writes are CUDA-graph safe because the buffer
     address is fixed at capture time. Writes that use a captured
     Python slice index (``_bridge_buffer[i]`` where ``i`` is a Python
     int varying per replay) would NOT survive replay; ``copy_`` to a
-    fixed slice (``[0]`` for decode, ``[:seq_len]`` for prefill) does.
+    fixed slice (``[:seq_len]``) does. Prefill and decode share that
+    slice: prefill packs every scheduled token, decode writes one row
+    per sequence.
     """
     src = _read_source()
     assert (
-        "_bridge_buffer[0]" in src
-    ), "forward should write the decode bridge row to _bridge_buffer[0]"
-    assert (
         "_bridge_buffer[:seq_len]" in src or "_bridge_buffer[:hidden_states.size" in src
-    ), "forward should write the prefill bridge rows to _bridge_buffer[:seq_len]"
+    ), "forward should write the bridge rows to _bridge_buffer[:seq_len]"
 
 
 def test_get_bridge_hidden_returns_buffer() -> None:
@@ -113,20 +112,28 @@ def test_get_bridge_hidden_returns_buffer() -> None:
     )
 
 
-def test_decode_minimind_slices_buffer_per_step() -> None:
-    """The consumer slices the buffer ``[:1]`` per decode step.
+def test_decode_minimind_takes_one_row_per_sequence_per_step() -> None:
+    """The consumer takes exactly the rows this step wrote.
 
-    Each decode replay overwrites row 0 of the buffer; the consumer
-    takes ``[:1]`` (or equivalent) to get the just-replayed row, then
-    appends to the bridge list. ``bh[-1:]`` would not work because
-    ``_bridge_buffer`` has ``max_position`` rows and ``[-1:]`` would
-    grab the stale last row.
+    Each replay writes the buffer's leading rows; the consumer advances
+    an offset by ``num_scheduled_tokens`` on prefill and by 1 on decode,
+    so the trailing ``max_position`` rows never travel. ``[-1:]`` would
+    grab a stale row instead.
+
+    Source-level guard: the loop needs a real fork ``Scheduler``, so this
+    pins the slicing expression rather than driving it.
     """
     src_path = (
         Path(__file__).resolve().parents[1] / "nanovllm_omni/models/minimind_omni/stage_runner.py"
     )
     src = src_path.read_text(encoding="utf-8")
-    assert "bh[:1]" in src, "decode_minimind should slice _bridge_buffer as bh[:1] per decode step"
+
+    assert (
+        "sequence.num_scheduled_tokens if is_prefill else 1" in src
+    ), "decode_minimind should take one bridge row per sequence on a decode step"
+    assert (
+        "bridge[offset : offset + width]" in src
+    ), "decode_minimind should slice the buffer at a per-sequence offset"
 
 
 def test_recapture_bridge_returns_only_the_sequence_rows() -> None:

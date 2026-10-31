@@ -105,8 +105,10 @@ def test_sdturbo_pipeline_real_weights():
 
 @pytest.mark.smoke
 def test_sdturbo_pipeline_matches_legacy():
-    """SD-Turbo via DiffusionRunner vs legacy StableDiffusionPipeline —
-    should be bit-exact for same seed + guidance=0.0 + 1 step.
+    """SD-Turbo via DiffusionRunner vs legacy StableDiffusionPipeline.
+
+    The gate is mean |Δ| < 2/255; exact equality is not claimed until the
+    seed is wired to a generator (docs/adr/0011-parity-standard.md).
     """
     from diffusers import (
         AutoencoderKL,

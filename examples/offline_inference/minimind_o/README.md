@@ -46,3 +46,20 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
   engine from the package's `deploy/` directory.
 - See `examples/online_serving/minimind_o/` for the HTTP `Omni`
   entrypoint and a curl-based chat client.
+
+## Gotchas
+
+- **Chat template.** MiniMind was trained on chat-formatted text. `ThinkerStage`
+  wraps a raw prompt with `tokenizer.apply_chat_template(..., add_generation_prompt=True,
+  open_thinking=False)`; text that already contains `<|im_start|>` is passed through.
+  Feeding unformatted text makes the thinker emit off-distribution tokens and the
+  talker renders noise.
+- **dtype.** The official `eval_omni.py` runs the released weights in fp16
+  (`.half()`); the checkpoint's `dtype: bfloat16` is the training dtype. The
+  MiniMind stages default to fp16. Pass `dtype="bfloat16"` only for experiments.
+- **Talker.** Audio uses the vendor `MiniMindOmni.talker` (fp16) fed by the
+  thinker bridge; the fork talker is kept for tests only. The thinker stops its
+  post-EOS filler at `content_len + 64` so the vendor talker can reach its stop
+  token (56 frames / 4.48 s for the reference prompt).
+- **Latency.** With the default `max_tokens=512`, the thinker's early stop cuts
+  most of the post-EOS filler; the vendor talker now dominates the request.

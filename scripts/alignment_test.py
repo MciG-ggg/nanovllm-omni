@@ -3,8 +3,8 @@
 
 Runs on WSL (RTX 3050 4GB) with real weights. Verifies:
 
-  1. SD-Turbo: DiffusionRunner output == StableDiffusionPipeline output
-     (bit-exact, same seed + 1 step + guidance=0).
+  1. SD-Turbo: DiffusionRunner output vs StableDiffusionPipeline output
+     (close; the exact bound lives in docs/adr/0011-parity-standard.md).
   2. SmolVLA: vlm_stage + action_stage == policy.predict_action_chunk(obs).
   3. SmolVLM (greedy): custom generate loop == model.generate() (token-level).
 
@@ -187,7 +187,7 @@ def test_smolvla_alignment():
     # Two-stage path mirrors lerobot's sample_actions: vlm_stage runs embed_prefix +
     # vlm_with_expert.forward (prefix KV cache), action_stage runs denoise_step +
     # Euler integration. Same policy instance (via _POLICY_CACHE), same seed and
-    # same preprocessor batch → expect bit-exact vs predict_action_chunk.
+    # same preprocessor batch → expect parity vs predict_action_chunk (docs/adr/0011-parity-standard.md).
     from lerobot.policies import make_pre_post_processors
     from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 

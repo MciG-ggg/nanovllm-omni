@@ -172,6 +172,9 @@ def thinker2talker(payload: Any, prompt: str = "") -> TalkerInputPayload:
     start_pos = len(prompt_ids)
     num_steps = bridge.shape[0] - start_pos
     metadata = dict(payload.metadata) if isinstance(payload.metadata, Mapping) else {}
+    content_len = int(metadata.get("content_len", num_steps))
+    tail = int(metadata.get("talker_tail", 8))
+    num_steps = min(num_steps, content_len + tail)
     if payload.text_state is not None:
         metadata["text_state"] = payload.text_state
     metadata["start_pos"] = start_pos

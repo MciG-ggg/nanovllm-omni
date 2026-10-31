@@ -372,6 +372,57 @@ def run_n(
     return [run_one(bundle, prompt, run_idx=i, **kwargs) for i in range(n)]
 
 
+def run_batch(
+    omni: Any,
+    prompts: list[BenchPrompt],
+    *,
+    seed: int = 42,
+    max_tokens: int = 16,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+) -> dict[str, Any]:
+    """Time one call that submits every prompt at once.
+
+    ``Omni.generate`` puts all of them in flight before the first step, so
+    a stage that batches sees them as one batch and the wall is the cost
+    of serving the whole batch together. The per-request cost is that wall
+    divided by the batch size.
+    """
+    import torch
+
+    from nanovllm_omni import SamplingParams
+
+    torch.manual_seed(seed)
+    _maybe_reset_cuda_peak()
+    sp = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        seed=seed,
+    )
+    t0 = time.perf_counter()
+    outs = omni.generate([p.text for p in prompts], sp)
+    wall_ms = (time.perf_counter() - t0) * 1000.0
+
+    stage_ms: dict[str, float] = {}
+    audios: list[bytes] = []
+    for out in outs:
+        custom = getattr(out, "custom_output", None) or {}
+        if isinstance(custom, dict) and custom.get("stage_ms") and not stage_ms:
+            stage_ms = dict(custom["stage_ms"])
+        audio = out.multimodal_output["audio"]
+        audios.append(audio.wav_bytes() if hasattr(audio, "wav_bytes") else bytes(audio))
+    return {
+        "n": len(prompts),
+        "wall_ms": wall_ms,
+        "per_request_ms": wall_ms / len(prompts),
+        "req_per_s": 1000.0 * len(prompts) / wall_ms,
+        "vram_peak_mb": _vram_peak_mb(),
+        "stage_ms": stage_ms,
+        "audios": audios,
+    }
+
+
 def run_n_full(
     omni: Any,
     prompt: BenchPrompt | str,

@@ -75,12 +75,38 @@ temperature=0（greedy），`rp=1.0`，seed 42。
 | P1 | greedy 文本 token | 20/20 相等，首个分歧点无 |
 | P2 | thinker 文本 logits（全 27 个位置） | max abs 0.03125，mean abs 0.00259（相对 0.097%），argmax 27/27 = 100%，ours argmax 全部落在 vendor top-1 |
 | P2 | bridge 行（layer 3 输出） | cosine 1.00000000，mean relative 0.05%，最大元素差 1.0（在 ~1004 量级上 = 1 个 fp16 ULP） |
+| P2 | talker 码本 argmax（teacher-forced） | 124/124 = 100% |
+| P2 | talker 采样码（同 seed、teacher-forced） | 123/124 = 99.2%（唯一分歧是 124 个位置里的一次采样翻转，argmax 相同） |
 
 结论：fork thinker（paged attention + 融合 kernel + fp16）与 vendor 的 eager
 全序列实现在 fp16 舍入内等价。分歧只剩 RNG：vendor 用 `torch.multinomial`，
 fork 用 Gumbel-max，取数顺序不同，**采样路径下的 code 相同不是预期**。
 旧版闸门把两侧**采样后**的音频码逐位置比较（阈值 87.5%），实测 7.81%——
 那不是实现错误，是 RNG 交错。闸门已改成上面的 P1/P2，采样码只做信息输出。
+
+### 4.2 talker 的 teacher-forced 对照（2026-10-31）
+
+生产链路的 talker 就是 vendor 的 `TalkerModule`（fp16，`strict=True` 加载
+`talker.*`），只有驱动循环是本仓库的（`TalkerStage._talker_logits` + 交错
+调度 + 采样）。所以 talker 侧唯一的不确定是：**我们的 bridge 比 vendor
+差 0.05%，会不会把音频码采错。**
+
+两臂用**同一个** `TalkerModule`、走**生产驱动** `_talker_logits`，码历史
+teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 步 × 8 码本，
+其中真实采样位置 124 个（码本 `i` 从第 `i+1` 步才开始采）：
+
+| 度量 | 结果 |
+|---|---|
+| audio logits max abs diff | 0.0625 |
+| audio logits mean abs diff | 0.0047 |
+| 码本 argmax 一致（真实位置） | 124/124 = 100% |
+| 同 seed 采样码一致（真实位置） | 123/124 = 99.2% |
+
+即：thinker 的 0.05% bridge 误差不改变 talker 的 argmax，只在一个位置翻了一个
+采样。这是当前“音频是人话”的数值解释。
+
+这条目前是**一次性 harness**（`/tmp`，未入库），不是闸门。要升级为闸门需要把
+它写成 P2 测试；在那之前，ADR 不声称 talker 有自动闸门。
 
 这些测试都带 `@pytest.mark.smoke`，CI 的 `-m "not smoke"` 不跑它们。
 它们在 WSL / RTX 3050 上手动执行，结果写回对应文档。
@@ -118,6 +144,8 @@ fork 用 Gumbel-max，取数顺序不同，**采样路径下的 code 相同不�
 - **MiniMind talker 实现**：生产路径用 vendor `MiniMindOmni.talker`（fp16），
   仓库里没有 fork talker 实现；`content_len + 64` 的 bridge tail 覆盖
   teacher-forced 实测的 56 帧。
+- **MiniMind talker 没有自动闸门**：§4.2 的 teacher-forced 对照是一次性
+  harness，未入库。ADR 只在 P1（文本）和 P2（bridge）上声称有闸门。
 - **MiniMind 旧 profile 数字**：在 chat template / fp16 / 早停 / vendor talker
   之前测得，需重测。
 - **SD-Turbo seed**：`SamplingParams.seed` 没有接到 generator，同 seed

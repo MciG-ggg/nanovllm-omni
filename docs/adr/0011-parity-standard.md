@@ -146,8 +146,9 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   teacher-forced 实测的 56 帧。
 - **MiniMind talker 没有自动闸门**：§4.2 的 teacher-forced 对照是一次性
   harness，未入库。ADR 只在 P1（文本）和 P2（bridge）上声称有闸门。
-- **MiniMind 旧 profile 数字**：在 chat template / fp16 / 早停 / vendor talker
-  之前测得，需重测。
+- **MiniMind profile 数字**：已重测（2026-10-31，WSL / RTX 3050，`bench time
+  --pipeline full --max-tokens 512`）：wall 1665.5 ms、thinker 464.9、
+talker 1166.1、code2wav 34.5（37 帧）。详见 ADR 0007。
 - **SD-Turbo seed**：`SamplingParams.seed` 没有接到 generator，同 seed
   不保证复现。
 

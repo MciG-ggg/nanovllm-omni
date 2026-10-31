@@ -572,6 +572,21 @@ class TalkerStage(StageEngine):
         audio_stop_pos: list[int | None] = [None] * 8
         emitted_frames: list[list[int]] = []
 
+        # Audio buffer: prompt columns stay pad; generated column
+        # ``start_pos + p`` holds ``audio_codes[i][p]`` for ``i < min(p, 8)``
+        # (vendor's diagonal backfill). Column ``start_pos + p`` is final as
+        # soon as codebook ``p - 1`` has sampled step ``p``, and
+        # ``audio_codes[i][p]`` never changes after it is appended — so each
+        # step writes only the column that just became final instead of
+        # rebuilding the whole buffer. Same values either way; ADR 0007 has
+        # the timings that motivated this.
+        buf = torch.full(
+            (1, 8, start_pos + num_steps),
+            _AUDIO_PAD_TOKEN,
+            dtype=torch.long,
+            device=device,
+        )
+
         with torch.no_grad():
             for step in range(num_steps):
                 audio_step = step - 1
@@ -580,19 +595,22 @@ class TalkerStage(StageEngine):
                 # ``start_pos + step`` — the very first forward covers
                 # exactly the prompt.
                 seq_len = start_pos + step
-                # Audio buffer: prompt columns stay pad; generated column
-                # ``start_pos + p`` holds ``audio_codes[i][p]`` for
-                # ``i < min(p, 8)`` (vendor's diagonal backfill).
-                buf = torch.full((1, 8, seq_len), _AUDIO_PAD_TOKEN, dtype=torch.long, device=device)
-                for p in range(step):
-                    lim = min(p, 8)
-                    for i in range(lim):
-                        buf[0, i, start_pos + p] = audio_codes[i][p]
+                column = step - 1
+                if column >= 0:
+                    filled = min(column, 8)
+                    if filled:
+                        buf[0, :filled, start_pos + column] = torch.tensor(
+                            [audio_codes[i][column] for i in range(filled)],
+                            dtype=torch.long,
+                            device=device,
+                        )
 
                 # Vendor recomputes the full sequence every step
                 # (``use_cache=False`` on the parity path), so the talker
                 # sees the whole prefix, not a sliding window.
-                logits_list = self._talker_logits(bridge[:, :seq_len, :], buf, spk_emb)
+                logits_list = self._talker_logits(
+                    bridge[:, :seq_len, :], buf[:, :, :seq_len], spk_emb
+                )
 
                 # Sample one code per codebook. HF ``model_omni.py``
                 # stream_generate: ``logits_i = al[0,-1,:] / 0.2``, then

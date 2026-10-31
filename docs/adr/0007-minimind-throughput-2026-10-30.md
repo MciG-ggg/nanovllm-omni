@@ -188,3 +188,43 @@ WSL / RTX 3050 / fp16，55 步 decode（T=27..81），分相计时（5 次中位
 
 这两项加起来 760 ms（52%），**改完与原实现逐位相同**——不涉及任何数值。
 剩下的 705 ms 模型前向要上 CUDA graph，那是下一步。
+
+### 实测：buffer 常驻（2026-10-31）
+
+已实施第 1 项。`TalkerStage.__call__` 改为分配一次
+`[1, 8, start_pos + num_steps]` 的 buffer，每步只写刚定型的列，
+不再每步重建。
+
+正确性：同一 prompt + seed 7 + `max_tokens=64`，改前改后
+
+```
+audio_codes  torch.equal = True，差异位置 0 个（56 帧 × 8 码本）
+WAV          sha256 前缀 d8c35d04dd57540a，均为 215084 字节
+```
+
+速度（talker 墙钟，同一请求，2 次预热后 5 次中位数）：
+
+| | median | min | max |
+|---|---:|---:|---:|
+| 改前（每步重建 buffer） | 2174.7 ms | 2123.2 | 2303.1 |
+| 改后（常驻 buffer，只写列） | 1379.4 ms | 1296.3 | 1399.7 |
+
+**-795.3 ms，即 -36.6%。** 比隔离测得的 buffer 构造 481 ms 更多，
+因为旧实现每步还要重新分配并填充整张 `[1,8,seq_len]` 张量（`torch.full`），
+那部分未算进隔离测量。
+
+端到端复核（`python -m nanovllm_omni.bench time --pipeline full
+--prompts short_01 --max-tokens 512 --runs 3 --warmup 1`，WSL / RTX 3050）：
+
+| | 改前 | 改后 |
+|---|---:|---:|
+| thinker | 442 ms | 464.9 ms |
+| talker | 1881 ms | 1166.1 ms |
+| code2wav | 33 ms | 34.5 ms |
+| wall | 2342 ms | 1665.5 ms |
+| 帧数 | — | 37 |
+
+talker 占比从 80% 降到 70%。thinker 的 464.9 落在噪声范围内（改的是 talker）。
+
+剩余待做：采样侧的 8 次 host sync（隔离测量 278 ms），以及模型前向的
+CUDA graph。

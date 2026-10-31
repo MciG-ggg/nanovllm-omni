@@ -8,23 +8,23 @@ The fork-AR-Engine adapter layer (``StageRunner`` /
 :mod:`nanovllm_omni.engine.stage_runner`. This module owns
 only the MiniMind-O specific bits:
 
-  - weight slicing for thinker-only / talker-only safetensors
-    (``_THINKER_KEEP_PREFIX`` / ``_TALKER_KEEP_PREFIX`` /
-    ``_filter_only_dir`` / ``_resolve_model_path``)
+  - weight slicing for the thinker-only safetensors
+    (``_THINKER_KEEP_PREFIX`` / ``_thinker_only_dir`` /
+    ``_resolve_model_path``)
   - HuggingFace tokenizer loader for the MiniMind-3o snapshot
   - ``ThinkerStage`` and ``TalkerStage`` high-level stage classes
     invoked by ``PipelineRunner``'s ``_stage_factory``.
 
 Lazy load via factory: import this module only from inside
-``thinker._thinker_stage`` / ``talker._talker_stage`` — never at the top
+``thinker._thinker_stage`` / ``stage._talker_stage`` — never at the top
 of a sibling module. ``ModelRunner.__init__`` (pulled in by
-``ThinkerStage`` / ``TalkerStage``) drags in ``triton`` / ``flash-attn``,
+``ThinkerStage``) drags in ``triton`` / ``flash-attn``,
 which aren't available on CPU-only hosts.
 
 Fork imports stay lazy — ``ModelRunner`` pulls in ``triton`` /
 ``flash-attn``, which isn't available on CPU-only hosts. The factory
-functions (``_thinker_stage`` / ``_talker_stage`` in ``thinker.py`` /
-``talker.py``) trigger the heavy ``ModelRunner.__init__``; smoke
+functions (``_thinker_stage`` in ``thinker.py`` / ``_talker_stage``
+here) trigger the heavy ``ModelRunner.__init__``; smoke
 tests that only import factory symbols don't.
 
 nano-vllm is installed as an editable package via ``uv``
@@ -61,41 +61,18 @@ _THINKER_KEEP_PREFIX = ("embed_tokens.", "layers.", "norm.", "lm_head.")
 # they only keep the forward pass clocking so the talker tail drains.
 _THINKER_ENTER_TOKEN = 201
 _THINKER_PAD_TOKEN = 0
-# Talker keys all live under submodules (``lm_head.base.`` /
-# ``lm_head.adapters.`` / ...) — the bare ``lm_head.weight`` key
-# belongs to the thinker's text head (shape 6400) and must be
-# skipped. We match the dot-separated prefix and require at least
-# one intermediate segment for ``lm_head``. ``speaker_proj.``
-# replaces the vendor's ``spk_proj.`` (the fork loader substring
-# replaces ``k_proj`` inside ``spk_proj``, which corrupts the path).
-_TALKER_KEEP_PREFIX = (
-    "embed_proj.",
-    "codec_proj.",
-    "embed_tokens.",
-    "layers.",
-    "norm.",
-    "lm_head.base.",
-    "lm_head.adapters.",
-    "text_scale",
-    "audio_scale",
-    "speaker_proj.",
-)
-# Keys whose tail we rename while copying (src -> dst).
-_TALKER_RENAME = {"spk_proj.weight": "speaker_proj.weight"}
 
 
-def _resolve_model_path(args: Any, stage: str = "thinker") -> str:
+def _resolve_model_path(args: Any) -> str:
     """Pull the model directory from ``OmniEngineArgs.model``.
 
     Fork ``Config.__post_init__`` asserts ``os.path.isdir(self.model)``.
     Resolves Hub IDs (``jingyaogong/minimind-3o``) to a local snapshot
     via ``_resolve_snapshot`` from ``bundle``. Local paths pass through.
 
-    The directory is then shaped to the stage: ``_thinker_only_dir``
-    keeps only the keys MiniMindThinker consumes; ``_talker_only_dir``
-    keeps only the keys MiniMindTalker consumes. Fork ``load_model``
-    walks every key and crashes on unknowns, so the two stages cannot
-    share a single safetensors file.
+    The directory is then shaped to the thinker: ``_thinker_only_dir``
+    keeps only the keys ``MiniMindThinker`` consumes, because fork
+    ``load_model`` walks every key and crashes on unknowns.
     """
     from .bundle import _resolve_snapshot
 
@@ -105,44 +82,17 @@ def _resolve_model_path(args: Any, stage: str = "thinker") -> str:
             "OmniEngineArgs.model is required to construct a StageRunner "
             "(fork Config validates the model path is a real directory)."
         )
-    snapshot = _resolve_snapshot(model)
-    if stage == "thinker":
-        return _thinker_only_dir(snapshot)
-    if stage == "talker":
-        return _talker_only_dir(snapshot)
-    raise ValueError(f"unknown stage: {stage!r}")
+    return _thinker_only_dir(_resolve_snapshot(model))
 
 
-def _filter_only_dir(
-    src: str,
-    dst_prefix: str,
-    keep_prefix: tuple[str, ...],
-    stage_prefix: str,
-    strip_prefix: bool = True,
-) -> str:
-    """Shared implementation for thinker / talker only-dir builds.
+def _thinker_only_dir(src: str) -> str:
+    """Build a sibling directory with only thinker-shaped weights.
 
-    Keeps the keys that belong to one stage and writes a single
-    ``model.safetensors`` into a hash-keyed sibling directory under
-    ``/tmp``. Reuses the cache if it already exists.
-
-    ``stage_prefix`` (e.g. ``model.`` or ``talker.``) plays two roles:
-
-    * **filter** — a key is kept only when it starts with
-      ``stage_prefix``, or already matches ``keep_prefix`` with no
-      prefix (HF MiniMind stores the thinker's tied ``lm_head.weight``
-      at the top level). This keeps thinker layers
-      (``model.layers.4-7.*``) out of the talker build, since the
-      talker's layer prefix is ``talker.layers.``.
-    * **rename** — with ``strip_prefix=True`` the prefix is removed from
-      the written key (``talker.layers.0.*`` becomes ``layers.0.*``,
-      matching the flat ``MiniMindTalker`` layout). With
-      ``strip_prefix=False`` the prefix stays
-      (``model.layers.0.*`` stays ``model.layers.0.*``, matching the
-      nested ``MiniThinker.model`` backbone).
-
-    ``keep_prefix`` is always matched against the *stripped* name, so
-    both modes accept the same key set.
+    Keeps the ``model.`` prefix on the backbone keys: ``MiniMindThinker``
+    holds its backbone at ``self.model`` (the upstream ``MiniMindForCausalLM``
+    shape), so the fork loader looks up ``model.embed_tokens.weight`` /
+    ``model.layers.*`` / ``model.norm.weight``. The bare ``lm_head.weight``
+    stays bare because the thinker's head lives at ``self.lm_head``.
     """
     import glob
     import hashlib
@@ -156,8 +106,8 @@ def _filter_only_dir(
     src = os.path.abspath(src)
     # Include stage_prefix so the previous thinker cache (missing
     # top-level ``lm_head.weight``) is not reused.
-    cache_key = hashlib.sha1(f"{src}\0{stage_prefix}".encode()).hexdigest()[:12]
-    dst = os.path.join("/tmp", f"{dst_prefix}-{cache_key}")
+    cache_key = hashlib.sha1(f"{src}\0model.".encode()).hexdigest()[:12]
+    dst = os.path.join("/tmp", f"minimind-thinker-only-{cache_key}")
     target = os.path.join(dst, "model.safetensors")
 
     if os.path.isfile(target):
@@ -169,19 +119,17 @@ def _filter_only_dir(
             shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
 
     def _name(k: str) -> str | None:
-        if k.startswith(stage_prefix):
-            stripped = k[len(stage_prefix) :]
-            name = stripped if strip_prefix else stage_prefix + stripped
-            return _TALKER_RENAME.get(name, name)
-        # Top-level keys that already match keep_prefix, e.g.
-        # ``lm_head.weight`` in the HF MiniMind checkpoint.
-        if k.startswith(keep_prefix):
+        if k.startswith("model."):
+            return k
+        # Top-level keys the thinker also consumes, e.g. ``lm_head.weight``
+        # in the HF MiniMind checkpoint.
+        if k.startswith(_THINKER_KEEP_PREFIX):
             return k
         return None
 
     def _accept(name: str) -> bool:
-        stripped = name[len(stage_prefix) :] if name.startswith(stage_prefix) else name
-        return stripped.startswith(keep_prefix)
+        stripped = name[len("model.") :] if name.startswith("model.") else name
+        return stripped.startswith(_THINKER_KEEP_PREFIX)
 
     tensors: dict = {}
     seen: set = set()
@@ -221,37 +169,6 @@ def _filter_only_dir(
                 tensors[name] = v.contiguous()
     save_file(tensors, target)
     return dst
-
-
-def _thinker_only_dir(src: str) -> str:
-    """Build a sibling directory with only thinker-shaped weights.
-
-    Keeps the ``model.`` prefix on the backbone keys: ``MiniMindThinker``
-    holds its backbone at ``self.model`` (the upstream ``MiniMindForCausalLM``
-    shape), so the fork loader looks up ``model.embed_tokens.weight`` /
-    ``model.layers.*`` / ``model.norm.weight``. The bare ``lm_head.weight``
-    stays bare because the thinker's head lives at ``self.lm_head``.
-    """
-    return _filter_only_dir(
-        src,
-        "minimind-thinker-only",
-        _THINKER_KEEP_PREFIX,
-        "model.",
-        strip_prefix=False,
-    )
-
-
-def _talker_only_dir(src: str) -> str:
-    """Build a sibling directory with only talker-shaped weights.
-
-    Mirrors ``_thinker_only_dir`` but keeps the talker's keys
-    (``codec_proj.*``, ``embed_proj.*``, ``embed_tokens.*``,
-    ``layers.*``, ``norm.*``, ``lm_head.base.*``, ``lm_head.adapters.*``,
-    ``text_scale``, ``audio_scale``, ``spk_proj.*``). ``talker.``
-    prefix stripped; the bare ``lm_head.weight`` (thinker text head)
-    is filtered out by the prefix list.
-    """
-    return _filter_only_dir(src, "minimind-talker-only", _TALKER_KEEP_PREFIX, "talker.")
 
 
 def _load_tokenizer(model_path: str) -> Any:
@@ -336,7 +253,7 @@ class ThinkerStage(StageEngine):
         if stage_kwargs.get("dtype") is None:
             stage_kwargs["dtype"] = "float16"
         self.config = get_stage_config(
-            model_path=_resolve_model_path(args, stage="thinker"),
+            model_path=_resolve_model_path(args),
             **stage_kwargs,
         )
         self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
@@ -374,7 +291,7 @@ class ThinkerStage(StageEngine):
 
         from .stage_processors import ThinkerStageOutput
 
-        tokenizer = _load_tokenizer(_resolve_model_path(self.args, stage="thinker"))
+        tokenizer = _load_tokenizer(_resolve_model_path(self.args))
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is None:
             eos_id = self.config.eos
@@ -494,11 +411,10 @@ def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
 class TalkerStage(StageEngine):
     """Stage 1 — MiniMind talker decode on the vendor ``TalkerModule`` (full sequence per step)."""
 
-    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
+    def __init__(self, deploy: Any, args: Any) -> None:
         super().__init__()
         self.deploy = deploy
         self.args = args
-        self.model_class = model_class
         self._model: Any = None
         self._device: str | None = None
         self._config: Any = None
@@ -734,8 +650,14 @@ class TalkerStage(StageEngine):
         return TalkerOutput(audio_codes=audio_codes_tensor.cpu())
 
 
+def _talker_stage(deploy: Any, args: Any) -> Any:
+    """Stage 1 factory — the vendor talker, loaded from the full checkpoint."""
+    return TalkerStage(deploy, args)
+
+
 __all__ = [
-    "ThinkerStage",
-    "TalkerOutput",
     "TalkerStage",
+    "TalkerOutput",
+    "ThinkerStage",
+    "_talker_stage",
 ]

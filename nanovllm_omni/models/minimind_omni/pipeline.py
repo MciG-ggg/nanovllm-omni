@@ -1,7 +1,7 @@
 """MiniMind-O pipeline topology: thinker -> talker -> code2wav.
 
 The resolver selects the full or thinker-only topology from HF config;
-per-stage implementation lives in ``thinker.py`` / ``talker.py`` /
+per-stage implementation lives in ``thinker.py`` / ``stage.py`` /
 ``code2wav.py``. Public symbol: ``MINIMIND_OMNI_PIPELINE``.
 """
 
@@ -19,9 +19,8 @@ from nanovllm_omni.config.registry import (
 
 _MINIMIND_OMNI_FAMILY = "nanovllm_omni.models.minimind_omni"
 _THINKER_MODEL = "MiniMindThinker"
-_TALKER_MODEL = "MiniMindTalker"
 _THINKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".thinker", "_thinker_stage")
-_TALKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".talker", "_talker_stage")
+_TALKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".stage", "_talker_stage")
 _CODE2WAV_FACTORY = (_MINIMIND_OMNI_FAMILY + ".code2wav", "_code2wav_stage")
 _PROCESSOR_MODULE = _MINIMIND_OMNI_FAMILY + ".stage_processors"
 
@@ -42,7 +41,6 @@ MINIMIND_OMNI_PIPELINE = PipelineConfig(
             name="talker",
             kind=StageExecutionType.LLM_AR,
             stage_factory=_TALKER_FACTORY,
-            model_architecture=_TALKER_MODEL,
             process_input=(_PROCESSOR_MODULE, "thinker2talker"),
             input_sources=(0,),
         ),

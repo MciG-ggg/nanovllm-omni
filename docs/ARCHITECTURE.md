@@ -24,7 +24,7 @@ text-only Qwen3 model class, its `LLMEngine`/`Scheduler`, its
 `SamplingParams`, and the asyncio server shell — those are replaced by
 `PipelineRunner` and our own dataclasses. The fork's `register_model`
 registry is preserved so non-fork model classes (e.g. `MiniMindThinker`,
-`MiniMindTalker`, `SmolVLMForConditionalGeneration`) can plug in via
+`SmolVLMForConditionalGeneration`) can plug in via
 `ModelRunner(model_class=...)`.
 
 SmolVLA's `vlm` stage is **not** on the fork: it calls the lerobot
@@ -69,10 +69,9 @@ This is unrelated to performance — it's the fork-multi-runner adaptation.
 | `engine/stage_runner.py` | Fork-AR adapter (`StageRunner`, `get_stage_config`, `_ensure_dist`) — composes fork `ModelRunner` + `Sampler` and exposes the fork-attention lifecycle as discrete methods | New — fork has no local equivalent |
 | `models/minimind_omni/bundle.py` | Bundle loader: HF model + Mimi codec + tokenizer into one `MinimindBundle` | MiniMind-O only |
 | `models/minimind_omni/thinker.py` | `MiniMindThinker`: 12-layer AR stack on fork layers; bridge hidden state capture into a registered buffer | MiniMind-O only |
-| `models/minimind_omni/talker.py` | `MiniMindTalker`: 4-layer AR stack on fork layers; 8 codebook heads for audio frame generation | MiniMind-O only |
 | `models/minimind_omni/code2wav.py` | Mimi codec decode + WAV envelope | MiniMind-O only |
 | `models/minimind_omni/pipeline.py` | Three-stage `PipelineConfig` declaration | MiniMind-O only |
-| `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes invoked by the factory | MiniMind-O only |
+| `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes invoked by the factory; the talker runs the vendor `MiniMindOmni.talker` on the thinker bridge | MiniMind-O only |
 | `models/minimind_omni/stage_runner.py` | MiniMind-O decode recipe (`decode_minimind`, `recapture_bridge_minimind`) composed on `engine.stage_runner.StageRunner` | MiniMind-O only |
 | `models/minimind_omni/stage_processors.py` | `ThinkerStageOutput` / `TalkerInputPayload` / `Code2WavInputPayload` — frozen dataclasses + pure-function converters | MiniMind-O only |
 | `models/minimind_omni/hf_config.py` | `MiniMindOConfig` — the repo's own config class for `model_type: minimind-o`; registered so the hub's `auto_map` file never runs | MiniMind-O only |
@@ -170,7 +169,7 @@ time.
 3. `engine/stage_runner.py` — the fork-AR adapter
 4. `config/registry.py` and `config/params.py`
 5. `models/minimind_omni/pipeline.py`
-6. `models/minimind_omni/bundle.py`, `thinker.py`, `talker.py`, `code2wav.py`,
+6. `models/minimind_omni/bundle.py`, `thinker.py`, `code2wav.py`,
    `stage.py`, `stage_runner.py`, `stage_processors.py`, `hf_config.py`
 7. `models/sd_turbo/{stage,pipeline}.py` and `diffusion/{interface,runner}.py`
 8. `models/smolvlm/{smolvlm,stage,pipeline}.py`

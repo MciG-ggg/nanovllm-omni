@@ -1,6 +1,6 @@
 """MiniMind-Omni model package exports.
 
-MiniMindThinker / MiniMindTalker are lazy: they import nanovllm.layers
+MiniMindThinker is lazy: it imports nanovllm.layers
 which requires triton (Linux only). Access via module-level __getattr__.
 """
 
@@ -13,7 +13,6 @@ from .bundle import (
 )
 
 _LAZY_IMPORTS = {
-    "MiniMindTalker": (".talker", "MiniMindTalker"),
     "MiniMindThinker": (".thinker", "MiniMindThinker"),
 }
 
@@ -34,6 +33,5 @@ __all__ = [
     "MIMI_SAMPLE_RATE",
     "MinimindBundle",
     "MiniMindThinker",
-    "MiniMindTalker",
     "load_minimind_omni_bundle",
 ]

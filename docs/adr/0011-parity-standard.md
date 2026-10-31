@@ -90,7 +90,7 @@ top-k logprobs 内，不比较数值。vllm-omni 的 π0.5 parity 用 LeRobot �
   当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
   `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。
 - **MiniMind talker 实现**：生产路径用 vendor `MiniMindOmni.talker`（fp16），
-  fork `MiniMindTalker` 只留给测试；`content_len + 64` 的 bridge tail 覆盖
+  仓库里没有 fork talker 实现；`content_len + 64` 的 bridge tail 覆盖
   teacher-forced 实测的 56 帧。
 - **MiniMind 旧 profile 数字**：在 chat template / fp16 / 早停 / vendor talker
   之前测得，需重测。

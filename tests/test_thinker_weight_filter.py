@@ -54,22 +54,6 @@ def test_thinker_only_dir_keeps_toplevel_lm_head() -> None:
             shutil.rmtree(dst, ignore_errors=True)
 
 
-def test_talker_only_dir_drops_bare_lm_head() -> None:
-    from nanovllm_omni.models.minimind_omni.stage import _talker_only_dir
-
-    with tempfile.TemporaryDirectory() as d:
-        src = Path(d)
-        _fake_checkpoint(src)
-        dst = _talker_only_dir(str(src))
-        try:
-            keys = _safetensor_keys(dst)
-            assert "lm_head.weight" not in keys
-            assert "lm_head.base.weight" in keys
-            assert "layers.0.self_attn.q_proj.weight" in keys
-        finally:
-            shutil.rmtree(dst, ignore_errors=True)
-
-
 def test_thinker_only_dir_keys_match_thinker_parameters() -> None:
     """Every kept key must resolve to a parameter on MiniMindThinker.
 

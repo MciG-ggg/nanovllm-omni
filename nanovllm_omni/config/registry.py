@@ -73,7 +73,6 @@ class ModelRegistry:
 
 OMNI_MODELS: dict[str, ModelRegistration] = {
     "MiniMindThinker": ("minimind_omni", "thinker", "MiniMindThinker"),
-    "MiniMindTalker": ("minimind_omni", "talker", "MiniMindTalker"),
     "SmolVLMForConditionalGeneration": (
         "smolvlm",
         "smolvlm",

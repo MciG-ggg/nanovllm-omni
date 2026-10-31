@@ -58,8 +58,9 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
   (`.half()`); the checkpoint's `dtype: bfloat16` is the training dtype. The
   MiniMind stages default to fp16. Pass `dtype="bfloat16"` only for experiments.
 - **Talker.** Audio uses the vendor `MiniMindOmni.talker` (fp16) fed by the
-  thinker bridge; the fork talker is kept for tests only. The thinker stops its
-  post-EOS filler at `content_len + 64` so the vendor talker can reach its stop
-  token (56 frames / 4.48 s for the reference prompt).
+  thinker bridge. The thinker stops its post-EOS filler at `content_len + 64`
+  so the vendor talker can reach its stop token (55 frames / 4.40 s for the
+  reference prompt; the HF teacher-forced reference is 56 frames / 4.48 s).
 - **Latency.** With the default `max_tokens=512`, the thinker's early stop cuts
-  most of the post-EOS filler; the vendor talker now dominates the request.
+  the post-EOS filler: thinker ~0.44 s (19%), talker ~1.88 s (80%),
+  code2wav ~0.03 s, wall ~2.34 s.

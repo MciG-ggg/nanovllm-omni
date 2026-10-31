@@ -226,5 +226,30 @@ WAV          sha256 前缀 d8c35d04dd57540a，均为 215084 字节
 
 talker 占比从 80% 降到 70%。thinker 的 464.9 落在噪声范围内（改的是 talker）。
 
-剩余待做：采样侧的 8 次 host sync（隔离测量 278 ms），以及模型前向的
-CUDA graph。
+剩余待做：模型前向的 705 ms（隔离测量），要上 CUDA graph。
+
+### 否定的假设：采样侧的 host sync（2026-10-31）
+
+上面原本写着“下一笔是采样侧的 8 次 host sync”。实测不成立。
+
+把 8 个码本的 `.item()` 合并成步末一次 `.tolist()`（`multinomial` 仍是
+8 次独立调用，所以 RNG 序列不变），输出确实逐位相同：
+`torch.equal`、WAV sha 与改前一致。但速度没有收益。
+
+交替跑的 A/B（同一请求，每轮每版 5 次中位数，共 3 轮）：
+
+| 轮 | 仅常驻 buffer | + 合并 host 读 |
+|---|---:|---:|
+| 1 | 1372.3 ms | 1423.5 ms |
+| 2 | 1420.5 ms | 1421.2 ms |
+| 3 | 1418.1 ms | 1372.0 ms |
+
+两版落在同一噪声带内（±50 ms），无法区分。所以采样相 278 ms 里
+**不是** sync 占主导，而是每个码本的 8 个小 kernel（clone、温度除、
+3 次索引除、topk、softmax、multinomial）—— 8 码本 × ~8 kernel = 每步
+~64 个 launch。
+
+因为无收益且多一层间接（dict + sorted + stack + zip），该改动已回退。
+若要再碰采样，得把 8 个码本的 clone／温度除／topk／softmax 合成一个
+`[8, vocab]` 的批量运算（`multinomial` 仍保留 8 次调用以保 RNG 序列），
+预期上限只有 ~100 ms，且需要比墙钟更细的仪器才能证明。

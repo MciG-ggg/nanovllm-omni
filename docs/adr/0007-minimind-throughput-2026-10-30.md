@@ -136,6 +136,9 @@ thinker 阶段 2250 ms → 580 ms（3.9×）。
    `MiniMindThinker.forward` 写进 bridge 的是 MLP 增量（少了 `+ residual`）。
    用 seed 修复后的 A/B 显示它会让部分 prompt 变长、另一部分变 0 帧，
    **不是唯一根因**，因此本轮没有改它。
+   > **已于 2026-10-31 修复（commit `6d221a4`）**：bridge 现在取
+   > `mlp_out + residual`，实测帧数与幅值回到官方 teacher-forced 量级。
+   > 下面的「下一步」第 2 条随之关闭。
    如果这个 bug 修好、音频回到 112 帧，提前退出的收益会消失，wall 会回到
    接近改动前的量级——那时真正的杠杆是下一节的 talker 增量解码。
 3. `system_01` 出 0 帧时 `code2wav` 不执行，该行 wall 偏小（726 ms），
@@ -152,10 +155,15 @@ thinker 阶段 2250 ms → 580 ms（3.9×）。
    codebook 到齐才定型，最后 8 列在相邻步之间会被改写）。正确形态是缓存
    `[0, step-8)`、每步只重算最后 8 列，O(n²) → O(8n)。验收：同 seed 下
    `audio_codes` 逐位相同（播种已就位）。
+   > **本条已被下方「修正（2026-10-31）」取代**：实测单步成本对序列长度
+   > 几乎不变（T=1 是 12.20 ms，T≈54 也是 12.4 ms/步），不是 FLOP-bound，
+   > 降 FLOPs 换不来时间。
 2. **修 bridge 捕获点**，然后用同 seed 的 A/B 与 vendor 输出对齐；
    这是让"音频秒/秒"变得有意义的前提。
+   > **已完成于 2026-10-31（`6d221a4`）**。
 3. **thinker graph 转默认**：补一条 graph vs eager 的 token 逐位 parity 测试，
    再改 `deploy` 默认值并同步 ADR-0005。
+   > **已完成于 2026-10-30（`ad22c32`）**。
 
 ## 修正（2026-10-31）：talker 的成本不在 O(n²)
 
@@ -202,29 +210,37 @@ audio_codes  torch.equal = True，差异位置 0 个（56 帧 × 8 码本）
 WAV          sha256 前缀 d8c35d04dd57540a，均为 215084 字节
 ```
 
-速度（talker 墙钟，同一请求，2 次预热后 5 次中位数）：
+速度：**交替跑的 A/B**（每轮每版 5 次中位数，3 轮），配置为例子 prompt、
+seed 7、`max_tokens=64`、56 帧：
 
-| | median | min | max |
-|---|---:|---:|---:|
-| 改前（每步重建 buffer） | 2174.7 ms | 2123.2 | 2303.1 |
-| 改后（常驻 buffer，只写列） | 1379.4 ms | 1296.3 | 1399.7 |
+| 轮 | 改前（每步重建 buffer） | 改后（常驻 buffer，只写列） |
+|---|---:|---:|
+| 1 | 2127.3 ms | 1365.7 ms |
+| 2 | 2189.7 ms | 1376.1 ms |
+| 3 | 2224.8 ms | 1398.7 ms |
+| 中位数 | **2189.7 ms** | **1376.1 ms** |
 
-**-795.3 ms，即 -36.6%。** 比隔离测得的 buffer 构造 481 ms 更多，
-因为旧实现每步还要重新分配并填充整张 `[1,8,seq_len]` 张量（`torch.full`），
-那部分未算进隔离测量。
+**-813.6 ms，即 -37.2%。** 两版区间不重叠（改前最低 2040.0 ms，改后最高
+1514.6 ms），所以不是噪声。
 
-端到端复核（`python -m nanovllm_omni.bench time --pipeline full
---prompts short_01 --max-tokens 512 --runs 3 --warmup 1`，WSL / RTX 3050）：
+不要拿这个 -813.6 ms 去减上面的 buffer 相 481.6 ms：隔离分解是合成循环
+（55 步、随机 bridge），这里是真的 pipeline，配置不同，两个数不能相减。
+分解的用途是**排序**哪一相值得改，绝对收益只能从 A/B 读。
+
+端到端同会话 A/B（`python -m nanovllm_omni.bench time --pipeline full
+--prompts short_01 --max-tokens 512 --runs 3 --warmup 1`，WSL / RTX 3050，
+bench prompt `short_01` 即 "你好。"，两版都是 37 帧）：
 
 | | 改前 | 改后 |
 |---|---:|---:|
-| thinker | 442 ms | 464.9 ms |
-| talker | 1881 ms | 1166.1 ms |
-| code2wav | 33 ms | 34.5 ms |
-| wall | 2342 ms | 1665.5 ms |
-| 帧数 | — | 37 |
+| thinker | 484.5 ms | 473.2 ms |
+| talker（total - thinker - code2wav） | 1348.4 ms | 1039.4 ms |
+| code2wav | 25.9 ms | 26.8 ms |
+| wall | **1858.7 ms** | **1539.4 ms** |
 
-talker 占比从 80% 降到 70%。thinker 的 464.9 落在噪声范围内（改的是 talker）。
+同一会话内 wall -319.3 ms（-17.2%）。比 56 帧那组小，因为 buffer 重建是
+每步 O(step)、总代价随步数平方增长：37 帧约 5.5 千次列写，56 帧约 1.2 万次。
+**这两个百分比各自对应不同帧数，不能互相换算。**
 
 剩余待做：模型前向的 705 ms（隔离测量），要上 CUDA graph。
 

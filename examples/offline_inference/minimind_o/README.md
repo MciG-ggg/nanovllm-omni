@@ -62,10 +62,13 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
   so the vendor talker can reach its stop token (55 frames / 4.40 s for the
   reference prompt; the HF teacher-forced reference is 56 frames / 4.48 s).
 - **Latency.** With the default `max_tokens=512`, the thinker's early stop cuts
-  the post-EOS filler; the talker still dominates: thinker ~0.46 s (28%),
-  talker ~1.17 s (70%), code2wav ~0.03 s, wall ~1.67 s. Measured on WSL /
-  RTX 3050 with `python -m nanovllm_omni.bench time --pipeline full
-  --max-tokens 512`; see ADR 0007 for the breakdown and history.
+  the post-EOS filler and the talker still dominates the request. Numbers below
+  are bench prompt `short_01` ("你好。") on WSL / RTX 3050, 37 frames, from
+  `python -m nanovllm_omni.bench time --pipeline full --prompts short_01
+  --max-tokens 512 --runs 3 --warmup 1`: thinker ~0.47 s, talker ~1.04 s,
+  code2wav ~0.03 s, wall ~1.54 s. Do not compare these with the frame counts
+  above — the example prompt produces more frames. Breakdown and history in
+  ADR 0007.
 - **Bridge.** The fork's blocks keep the residual separate, so the talker
   condition (`bridge_states`) must be the full block output `mlp_out + residual`
   — what the vendor captures. Copying only `mlp_out` leaves the text correct

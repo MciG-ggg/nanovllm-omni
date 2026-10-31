@@ -15,8 +15,8 @@ only the MiniMind-O specific bits:
   - ``ThinkerStage`` and ``TalkerStage`` high-level stage classes
     invoked by ``PipelineRunner``'s ``_stage_factory``.
 
-Lazy load via factory: import this module only from inside
-``thinker._thinker_stage`` / ``stage._talker_stage`` — never at the top
+Lazy load via factory: import this module only from inside the stage factory
+functions in ``thinker.py`` — never at the top
 of a sibling module. ``ModelRunner.__init__`` (pulled in by
 ``ThinkerStage``) drags in ``triton`` / ``flash-attn``,
 which aren't available on CPU-only hosts.
@@ -104,8 +104,7 @@ def _thinker_only_dir(src: str) -> str:
     from safetensors.torch import save_file
 
     src = os.path.abspath(src)
-    # Include stage_prefix so the previous thinker cache (missing
-    # top-level ``lm_head.weight``) is not reused.
+    # Part of the cache key so a differently shaped checkpoint is not reused.
     cache_key = hashlib.sha1(f"{src}\0model.".encode()).hexdigest()[:12]
     dst = os.path.join("/tmp", f"minimind-thinker-only-{cache_key}")
     target = os.path.join(dst, "model.safetensors")

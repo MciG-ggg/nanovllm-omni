@@ -57,7 +57,7 @@ top-k logprobs 内，不比较数值。vllm-omni 的 π0.5 parity 用 LeRobot �
 | SD-Turbo | `tests/test_smoke_gpu_e2e.py::test_sdturbo_pipeline_matches_legacy` | P2 | `pytest -m smoke tests/test_smoke_gpu_e2e.py -k sdturbo` | 已记录：fp16，mean abs diff < 2/255；`seed` 未接 generator |
 | SmolVLM | `tests/test_parity_smolvlm.py` | P1 | `pytest -m smoke tests/test_parity_smolvlm.py` | 首次 WSL 运行待跑；greedy 文本对照 HF |
 | SmolVLA | `tests/test_parity_smolvla.py` | P2 | `pytest -m smoke tests/test_parity_smolvla.py` | 首次 WSL 运行待跑；`atol=1e-4` |
-| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ P2（bridge） | `PYTHONPATH=$REPO:$REPO/third_party/nano-vllm pytest -m smoke tests/test_parity_minimind.py` | **已跑通（2026-10-31）**：P1 greedy 文本 20/20 逐 token 相等；P2 bridge 47 行 cosine 1.00000000、mean relative 0.0517%。参照栈见 §4.1 |
+| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ P2（bridge） | `PYTHONPATH=<repo>:<repo>/third_party/nano-vllm pytest -m smoke tests/test_parity_minimind.py` | **已跑通（2026-10-31）**：P1 greedy 文本 20/20 逐 token 相等；P2 bridge 47 行 cosine 1.00000000、mean relative 0.0517%。参照栈见 §4.1 |
 
 首次运行之前，这些是待验证的闸门，不是已经通过的结论。跑完把命令、
 硬件、库版本和实测数字回填到本表。
@@ -74,15 +74,22 @@ temperature=0（greedy），`rp=1.0`，seed 42。
 |---|---|---|
 | P1 | greedy 文本 token | 20/20 相等，首个分歧点无 |
 | P2 | thinker 文本 logits（全 27 个位置） | max abs 0.03125，mean abs 0.00259（相对 0.097%），argmax 27/27 = 100%，ours argmax 全部落在 vendor top-1 |
-| P2 | bridge 行（layer 3 输出） | cosine 1.00000000，mean relative 0.05%，最大元素差 1.0（在 ~1004 量级上 = 1 个 fp16 ULP） |
+| P2 | bridge 行（layer 3 输出） | cosine 1.00000000，mean relative 0.05%，最大元素差 1.0（在 ~1004 量级上约 1 个 fp16 ULP） |
 | P2 | talker 码本 argmax（teacher-forced） | 124/124 = 100% |
 | P2 | talker 采样码（同 seed、teacher-forced） | 123/124 = 99.2%（唯一分歧是 124 个位置里的一次采样翻转，argmax 相同） |
 
 结论：fork thinker（paged attention + 融合 kernel + fp16）与 vendor 的 eager
-全序列实现在 fp16 舍入内等价。分歧只剩 RNG：vendor 用 `torch.multinomial`，
-fork 用 Gumbel-max，取数顺序不同，**采样路径下的 code 相同不是预期**。
+全序列实现在 fp16 舍入内等价。分歧只剩 RNG：两侧都调 `torch.multinomial`，
+但 vendor 在同一个循环里交替抽文本 token 和 8 个 codebook，而本仓库把 talker
+当成独立阶段跑（中间还会重新播种），两条路径消耗 RNG 流的位置不同，
+**采样路径下的 code 相同不是预期**。
 旧版闸门把两侧**采样后**的音频码逐位置比较（阈值 87.5%），实测 7.81%——
-那不是实现错误，是 RNG 交错。闸门已改成上面的 P1/P2，采样码只做信息输出。
+那不是实现错误，是 RNG 流的错位。闸门已改成上面的 P1/P2，采样码不做判定。
+
+本小节里：P1 与 P2 bridge 两行是**闸门脚本自己产出**的；P2 文本 logits
+和 §4.2 的 talker 两行来自一次性 `/tmp` harness，闸门不计算它们。
+所有数字来自同一个 prompt、seed 42、20 个生成 token：它是一条记录，
+不是跨 prompt 的统计结论。
 
 ### 4.2 talker 的 teacher-forced 对照（2026-10-31）
 
@@ -127,12 +134,15 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   默认 greedy；闸门显式传 `temperature=0`。
 - **SmolVLM greedy 近似**：stage 把 `temperature=0` 映射成 `1e-5` 的 Gumbel 采样，
   不是严格 argmax；logits 接近 tie 时可能和 HF 不同。
-- **MiniMind RNG 交错**：vendor 在同一循环里用 `torch.multinomial` 采样文本与
-  8 个 codebook；fork 用 Gumbel-max，取数顺序不同。即使 logits 一致，采样出的
-  code 也不会相同。因此音频码只做信息输出，不做闸门；P1 必须在 greedy 下比。
-- **MiniMind 参考 cache 模式**：闸门两侧都用 `use_cache=False` 全序列前向
-  （vendor `eval_omni.py` 默认 `use_cache=True`，带 KV cache 的 logits 有
-  数值差）。
+- **MiniMind RNG 交错**：两侧都调 `torch.multinomial`，但 vendor 在同一个
+  循环里交替抽文本 token 与 8 个 codebook，而本仓库把 talker 当独立阶段跑，
+  消耗 RNG 流的位置不同。即使 logits 一致，采样出的 code 也不会相同。
+  因此音频码只做信息输出，不做闸门；P1 必须在（近似）greedy 下比。
+- **MiniMind 参考 cache 模式**：vendor 侧用 `use_cache=False` 全序列前向
+  （官方 `eval_omni.py` 默认 `use_cache=True`，带 KV cache 的 logits 有
+  数值差）。**本仓库侧并不都是全序列**：bridge 行是 `recapture_bridge_minimind`
+  重跑一次全序列 prefill 得到的，而 P1 的文本 token 走的是 paged KV 增量
+  decode（`decode_minimind`）。两侧唯一共同的输入只有 token 序列。
 - **WSL 的 editable install 指向另一个 checkout**：`nanovllm-omni` 与
   `nano-vllm` 两个 editable 都指向 `/mnt/d/edge-inference/...`。不设
   `PYTHONPATH=$REPO:$REPO/third_party/nano-vllm` 就会跑那份旧代码（还带着
@@ -146,9 +156,9 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   teacher-forced 实测的 56 帧。
 - **MiniMind talker 没有自动闸门**：§4.2 的 teacher-forced 对照是一次性
   harness，未入库。ADR 只在 P1（文本）和 P2（bridge）上声称有闸门。
-- **MiniMind profile 数字**：已重测（2026-10-31，WSL / RTX 3050，`bench time
-  --pipeline full --max-tokens 512`）：wall 1665.5 ms、thinker 464.9、
-talker 1166.1、code2wav 34.5（37 帧）。详见 ADR 0007。
+- **MiniMind profile 数字**：已重测（2026-10-31，WSL / RTX 3050，bench prompt
+  `short_01`，`bench time --pipeline full --max-tokens 512`）：wall 1539.4 ms、
+  thinker 473.2、talker 1039.4、code2wav 26.8（37 帧）。详见 ADR 0007。
 - **SD-Turbo seed**：`SamplingParams.seed` 没有接到 generator，同 seed
   不保证复现。
 

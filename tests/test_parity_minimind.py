@@ -38,4 +38,4 @@ def test_minimind_matches_vendor() -> None:
     )
 
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
-    assert "PASS: parity ratio" in result.stdout, result.stdout[-4000:]
+    assert "PASS: parity (P1 text equal" in result.stdout, result.stdout[-4000:]

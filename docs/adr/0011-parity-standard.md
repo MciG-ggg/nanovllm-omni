@@ -57,10 +57,30 @@ top-k logprobs 内，不比较数值。vllm-omni 的 π0.5 parity 用 LeRobot �
 | SD-Turbo | `tests/test_smoke_gpu_e2e.py::test_sdturbo_pipeline_matches_legacy` | P2 | `pytest -m smoke tests/test_smoke_gpu_e2e.py -k sdturbo` | 已记录：fp16，mean abs diff < 2/255；`seed` 未接 generator |
 | SmolVLM | `tests/test_parity_smolvlm.py` | P1 | `pytest -m smoke tests/test_parity_smolvlm.py` | 首次 WSL 运行待跑；greedy 文本对照 HF |
 | SmolVLA | `tests/test_parity_smolvla.py` | P2 | `pytest -m smoke tests/test_parity_smolvla.py` | 首次 WSL 运行待跑；`atol=1e-4` |
-| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ 码本匹配率 | `pytest -m smoke tests/test_parity_minimind.py` | 首次 WSL 运行待跑；已对齐 `eval_omni.py` 的 chat template / fp16 / `top_p=0.85` / `rp=1.0`；thinker 在 `content_len + 64` 收停，talker 用 vendor `TalkerModule`，bridge 取完整 block 输出；音频是采样，码本位置 ≥ 7/8 |
+| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ P2（bridge） | `PYTHONPATH=$REPO:$REPO/third_party/nano-vllm pytest -m smoke tests/test_parity_minimind.py` | **已跑通（2026-10-31）**：P1 greedy 文本 20/20 逐 token 相等；P2 bridge 47 行 cosine 1.00000000、mean relative 0.0517%。参照栈见 §4.1 |
 
 首次运行之前，这些是待验证的闸门，不是已经通过的结论。跑完把命令、
 硬件、库版本和实测数字回填到本表。
+
+### 4.1 MiniMind-O 实测记录（2026-10-31）
+
+参照栈：RTX 3050 4GB Laptop / 驱动 591.86 / CUDA 13.0 / torch 2.11.0+cu130 /
+transformers 5.16.1 / Python 3.12.3 / fp16 / WSL。权重 `jingyaogong/minimind-3o`
+（`pytorch_model.bin`，195 tensor），Mimi `kyutai/mimi`。输入：chat-template
+后的 27 token prompt（`你好，请用一句话介绍你自己。`），`max_tokens=24`，
+temperature=0（greedy），`rp=1.0`，seed 42。
+
+| 层级 | 度量 | 结果 |
+|---|---|---|
+| P1 | greedy 文本 token | 20/20 相等，首个分歧点无 |
+| P2 | thinker 文本 logits（全 27 个位置） | max abs 0.03125，mean abs 0.00259（相对 0.097%），argmax 27/27 = 100%，ours argmax 全部落在 vendor top-1 |
+| P2 | bridge 行（layer 3 输出） | cosine 1.00000000，mean relative 0.05%，最大元素差 1.0（在 ~1004 量级上 = 1 个 fp16 ULP） |
+
+结论：fork thinker（paged attention + 融合 kernel + fp16）与 vendor 的 eager
+全序列实现在 fp16 舍入内等价。分歧只剩 RNG：vendor 用 `torch.multinomial`，
+fork 用 Gumbel-max，取数顺序不同，**采样路径下的 code 相同不是预期**。
+旧版闸门把两侧**采样后**的音频码逐位置比较（阈值 87.5%），实测 7.81%——
+那不是实现错误，是 RNG 交错。闸门已改成上面的 P1/P2，采样码只做信息输出。
 
 这些测试都带 `@pytest.mark.smoke`，CI 的 `-m "not smoke"` 不跑它们。
 它们在 WSL / RTX 3050 上手动执行，结果写回对应文档。
@@ -81,11 +101,17 @@ top-k logprobs 内，不比较数值。vllm-omni 的 π0.5 parity 用 LeRobot �
   默认 greedy；闸门显式传 `temperature=0`。
 - **SmolVLM greedy 近似**：stage 把 `temperature=0` 映射成 `1e-5` 的 Gumbel 采样，
   不是严格 argmax；logits 接近 tie 时可能和 HF 不同。
-- **MiniMind RNG 交错**：vendor 在同一循环里采样文本与 8 个 codebook；我们在
-  talker 前重新 seed，采样序列不同。音频码只能做匹配率，不做相等。
-- **MiniMind 参考 cache 模式**：`test_minimind_hf_parity.py` 用 `use_cache=False`
-  取全序列 bridge；官方 `eval_omni.py` 默认 `use_cache=True`。两者的 logits 有
-  数值差，别把脚本的匹配率当成官方音频的逐位对照。
+- **MiniMind RNG 交错**：vendor 在同一循环里用 `torch.multinomial` 采样文本与
+  8 个 codebook；fork 用 Gumbel-max，取数顺序不同。即使 logits 一致，采样出的
+  code 也不会相同。因此音频码只做信息输出，不做闸门；P1 必须在 greedy 下比。
+- **MiniMind 参考 cache 模式**：闸门两侧都用 `use_cache=False` 全序列前向
+  （vendor `eval_omni.py` 默认 `use_cache=True`，带 KV cache 的 logits 有
+  数值差）。
+- **WSL 的 editable install 指向另一个 checkout**：`nanovllm-omni` 与
+  `nano-vllm` 两个 editable 都指向 `/mnt/d/edge-inference/...`。不设
+  `PYTHONPATH=$REPO:$REPO/third_party/nano-vllm` 就会跑那份旧代码（还带着
+  已删的 `talker.py` 和未修的 bridge），且不会报错。闸门脚本会打印
+  `repo under test` 行，跑完先看这行对不对。
 - **MiniMind 音色条件**：`speaker_embedding` 从未被赋值，`ref_codes` 也不支持；
   当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
   `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。

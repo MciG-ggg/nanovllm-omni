@@ -22,6 +22,8 @@ Run alongside the engine wiring tests; the contract they lock is:
   so it survives CUDA-graph replay;
 - ``forward`` writes to ``_bridge_buffer`` at a fixed row (row 0 for
   decode, the seq_len prefix for prefill);
+- the bridge row is the full block output (``mlp_out + residual``), which
+  is what the vendor's ``MiniMindBlock`` returns;
 - ``get_bridge_hidden`` returns the buffer so the consumer
   (``decode_minimind``) can slice ``[:1]`` per step or
   ``[:seq_len]`` after prefill.
@@ -86,6 +88,22 @@ def test_forward_writes_to_bridge_buffer() -> None:
     assert (
         "_bridge_buffer[:seq_len]" in src or "_bridge_buffer[:hidden_states.size" in src
     ), "forward should write the bridge rows to _bridge_buffer[:seq_len]"
+
+
+def test_bridge_copy_includes_the_residual() -> None:
+    """The bridge row is the full block output, not just the MLP delta.
+
+    The fork's ``ThinkerBlock.forward`` returns ``(mlp_out, residual)`` —
+    the residual stays separate. The vendor's ``MiniMindBlock`` returns the
+    summed stream, so the talker condition has to be ``mlp_out + residual``.
+    Copying only ``mlp_out`` leaves the text correct (the final norm adds
+    the residual back) but the audio wrong: half amplitude, wrong length.
+    """
+    src = _read_source()
+    assert "copy_(hidden_states + residual)" in src, (
+        "thinker.py must copy the full block output into the bridge buffer; "
+        "the fork blocks keep the residual separate"
+    )
 
 
 def test_get_bridge_hidden_returns_buffer() -> None:

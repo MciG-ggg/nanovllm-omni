@@ -57,7 +57,7 @@ top-k logprobs 内，不比较数值。vllm-omni 的 π0.5 parity 用 LeRobot �
 | SD-Turbo | `tests/test_smoke_gpu_e2e.py::test_sdturbo_pipeline_matches_legacy` | P2 | `pytest -m smoke tests/test_smoke_gpu_e2e.py -k sdturbo` | 已记录：fp16，mean abs diff < 2/255；`seed` 未接 generator |
 | SmolVLM | `tests/test_parity_smolvlm.py` | P1 | `pytest -m smoke tests/test_parity_smolvlm.py` | 首次 WSL 运行待跑；greedy 文本对照 HF |
 | SmolVLA | `tests/test_parity_smolvla.py` | P2 | `pytest -m smoke tests/test_parity_smolvla.py` | 首次 WSL 运行待跑；`atol=1e-4` |
-| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ 码本匹配率 | `pytest -m smoke tests/test_parity_minimind.py` | 首次 WSL 运行待跑；已对齐 `eval_omni.py` 的 chat template / fp16 / `top_p=0.85` / `rp=1.0`；thinker 在 `content_len + 64` 收停，talker 用 vendor `TalkerModule`；音频是采样，码本位置 ≥ 7/8 |
+| MiniMind-O | `tests/test_parity_minimind.py` → `tests/test_minimind_hf_parity.py` | P1（文本）+ 码本匹配率 | `pytest -m smoke tests/test_parity_minimind.py` | 首次 WSL 运行待跑；已对齐 `eval_omni.py` 的 chat template / fp16 / `top_p=0.85` / `rp=1.0`；thinker 在 `content_len + 64` 收停，talker 用 vendor `TalkerModule`，bridge 取完整 block 输出；音频是采样，码本位置 ≥ 7/8 |
 
 首次运行之前，这些是待验证的闸门，不是已经通过的结论。跑完把命令、
 硬件、库版本和实测数字回填到本表。

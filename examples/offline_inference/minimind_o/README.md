@@ -64,3 +64,7 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 - **Latency.** With the default `max_tokens=512`, the thinker's early stop cuts
   the post-EOS filler: thinker ~0.44 s (19%), talker ~1.88 s (80%),
   code2wav ~0.03 s, wall ~2.34 s.
+- **Bridge.** The fork's blocks keep the residual separate, so the talker
+  condition (`bridge_states`) must be the full block output `mlp_out + residual`
+  — what the vendor captures. Copying only `mlp_out` leaves the text correct
+  but the audio wrong (half amplitude, wrong length).

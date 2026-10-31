@@ -332,7 +332,9 @@ class MiniMindThinker(nn.Module):
                 # token and decode writes one row per sequence. Both land at
                 # the same fixed address so a CUDA-graph replay can write it.
                 seq_len = hidden_states.size(0)
-                self._bridge_buffer[:seq_len].copy_(hidden_states)
+                # Fork blocks keep the residual separate; the vendor bridge is
+                # the full block output (mlp_out + residual).
+                self._bridge_buffer[:seq_len].copy_(hidden_states + residual)
         hidden_states, _ = self.model.norm(hidden_states, residual)
         return hidden_states
 

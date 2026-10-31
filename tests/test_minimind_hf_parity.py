@@ -14,20 +14,25 @@ this one.
 Measures the two layers that can be compared, and nothing else:
 
   P1  greedy text tokens — the fork thinker vs the vendor ``forward``.
-      Greedy on both sides, so no RNG is involved.
+      Both sides are near-greedy (``temperature=0`` becomes ``1e-5`` and the
+      distribution collapses to one-hot), so only near-ties can differ.
   P2  bridge rows — the tensor the talker consumes. Cosine + relative
       error against the vendor's ``bridge_states``.
 
-Sampled audio codes are printed as information only. The vendor samples with
-``torch.multinomial`` and the fork samples Gumbel-max, so the two consume the
-RNG in a different order: equal codes are not expected even when the logits
-match, and a mismatch is not evidence of a bug.
+Sampled audio codes are not compared. Both sides draw with
+``torch.multinomial``, but the vendor interleaves text and audio draws in one
+loop while this repo runs the talker as a separate stage, so the two consume
+the RNG stream in a different order: equal codes are not expected even when
+the logits match, and a mismatch is not evidence of a bug.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
 
 MODEL_DIR = os.environ.get("MINIMIND_PARITY_MODEL_DIR", "/home/mcig/models/minimind-3o")
 MIMI_DIR = os.environ.get("MINIMIND_PARITY_MIMI_DIR", "/home/mcig/mimi")
@@ -36,9 +41,9 @@ SEED = 42
 MAX_NEW_TOKENS = 24  # ~2 s of audio at 12.5 Hz
 PROMPT = "你好，请用一句话介绍你自己。"
 
-# P2 tolerances. Measured on RTX 3050 / fp16: cosine 1.0000001,
-# relative mean 0.05%. Anything an order of magnitude worse means a
-# real implementation drift, not fp16 rounding.
+# P2 tolerances. Measured on RTX 3050 / fp16: cosine 1.0000000,
+# relative mean 0.05%. ``MAX_RELATIVE_MEAN`` is ~2x that measured value;
+# a large multiple of it means real implementation drift, not fp16 rounding.
 MIN_COSINE = 0.9999
 MAX_RELATIVE_MEAN = 1e-3
 
@@ -138,6 +143,15 @@ def _ours_text_bridge_and_codes(torch, prompt: str):
     return generated, first.bridge_states, codes
 
 
+def _assert_under_repo(name: str, module_file: str) -> None:
+    resolved = Path(module_file).resolve()
+    assert REPO in resolved.parents, (
+        f"{name} resolved to {resolved}, which is not under {REPO}. "
+        "Set PYTHONPATH=$REPO:$REPO/third_party/nano-vllm so this checkout is measured."
+    )
+    print(f"{name}: {resolved}")
+
+
 def main() -> None:
     import torch
     from transformers import AutoTokenizer
@@ -148,7 +162,13 @@ def main() -> None:
 
     import nanovllm_omni
 
-    print(f"repo under test: {os.path.dirname(nanovllm_omni.__file__)}")
+    # The WSL venv's editable installs point at a second checkout of both
+    # packages. Importing that one runs stale code and reports plausible
+    # numbers, so fail closed instead of printing a hint nobody reads.
+    _assert_under_repo("nanovllm_omni", nanovllm_omni.__file__)
+    import nanovllm
+
+    _assert_under_repo("nanovllm", nanovllm.__file__)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
     formatted = tokenizer.apply_chat_template(
@@ -172,9 +192,17 @@ def main() -> None:
     print(f"\n[P1] greedy text tokens equal: {text_equal}")
 
     # ---- P2: bridge rows ----
-    overlap = min(vendor_bridge.shape[0], ours_bridge.shape[0])
-    ours_rows = ours_bridge[:overlap].float()
-    vendor_rows = vendor_bridge[:overlap].float()
+    # Our bridge covers prompt + generated + post-EOS filler, a superset of the
+    # vendor's prompt + generated, and row ``t`` depends only on tokens ``0..t``
+    # — so the vendor rows are a prefix of ours. A shorter ours would silently
+    # shrink the comparison, so assert the direction before slicing.
+    vendor_rows_count = vendor_bridge.shape[0]
+    assert ours_bridge.shape[0] >= vendor_rows_count, (
+        f"our bridge has {ours_bridge.shape[0]} rows but the vendor arm has "
+        f"{vendor_rows_count}; the P2 comparison would silently shrink"
+    )
+    ours_rows = ours_bridge[:vendor_rows_count].float()
+    vendor_rows = vendor_bridge.float()
     cosine = torch.nn.functional.cosine_similarity(
         ours_rows.flatten(), vendor_rows.flatten(), dim=0
     ).item()
@@ -183,12 +211,13 @@ def main() -> None:
     relative = mean_diff / mean_scale
     bridge_ok = cosine >= MIN_COSINE and relative <= MAX_RELATIVE_MEAN
     print(
-        f"[P2] bridge rows={overlap} cosine={cosine:.8f} "
-        f"relative_mean={relative:.4%} ({'PASS' if bridge_ok else 'FAIL'})"
+        f"[P2] bridge rows={vendor_rows_count} (ours={ours_bridge.shape[0]}) "
+        f"cosine={cosine:.8f} relative_mean={relative:.4%} "
+        f"({'PASS' if bridge_ok else 'FAIL'})"
     )
 
-    # ---- informational: sampled audio codes ----
-    print(f"\n[info] ours audio frames: {ours_codes.shape[0]}")
+    # ---- informational: the audio the talker actually drew ----
+    print(f"\n[info] ours audio frames: {ours_codes.shape[0]} (codes not compared)")
 
     if text_equal and bridge_ok:
         print("\nPASS: parity (P1 text equal, P2 bridge within tolerance)")

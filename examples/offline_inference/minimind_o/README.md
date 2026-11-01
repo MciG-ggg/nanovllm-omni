@@ -60,10 +60,13 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
 - **Talker.** Audio uses the vendor `MiniMindOmni.talker` (fp16) fed by the
   thinker bridge. The thinker stops its post-EOS filler at `content_len + 64`
   so the vendor talker can reach its stop token (55 frames / 4.40 s for the
-  reference prompt; the HF teacher-forced reference on the *same 16 tokens* is
-  56 frames / 4.48 s). The unmodified HF model on the same prompt produced
-  72 frames / 5.76 s, but it generated 18 tokens rather than 16 — a different
-  utterance, so do not read the 55 vs 72 gap as lost audio. ADR 0011 §5.
+  reference prompt; the HF teacher-forced reference on the *same tokens* is
+  56 frames / 4.48 s).
+- **Frame count is not a parity signal.** It only reflects which step the
+  audio stop token landed on, so it moves whenever the sampled codes move.
+  The broken pre-fix output and the official full model both happen to be
+  72 frames / 5.76 s while differing in every other respect. Compare logits
+  or argmax given the same input, not durations. ADR 0011 §4.2 and §5.
 - **Latency.** With the default `max_tokens=512`, the thinker's early stop cuts
   the post-EOS filler and the talker still dominates the request. Numbers below
   are bench prompt `short_01` ("你好。") on WSL / RTX 3050, 37 frames, from

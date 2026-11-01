@@ -151,14 +151,28 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
 - **MiniMind 音色条件**：`speaker_embedding` 从未被赋值，`ref_codes` 也不支持；
   当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
   `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。
-- **MiniMind 与官方全模型的帧数差距尚未定因**：同一 prompt 上，官方
-  `MiniMindOmni`（`use_cache=True`、官方采样）产出了 `minimind_hf_reference.wav`
-  72 帧 / 5.76 s、18 个生成 token；本仓库产出 55 帧 / 4.40 s、16 个 token。
-  这**不是**同一条语音：两边采样出的文本就不同，所以帧数不可直接相减。
-  同输入的唯一对照是 teacher-forced（同一 16 token）：官方 talker 56 帧、
-  我们 55 帧，差的 1 帧来自采样码不同导致的 stop token 位置差一步。
-  72 → 55 那 17 帧的完整解释（文本长度比例 18:16 只能解释一部分）未查清，
-  不要引用“我们和官方只差 1 帧”这种说法。
+- **MiniMind 帧数不能当 parity 指标**：同一 prompt 上四个产物的实测
+  （24000 Hz / 16-bit / 单声道，帧数 = 时长 × 12.5）：
+
+  | 产物 | 时长 | 帧数 | 判定 |
+  |---|---:|---:|---|
+  | `minimind_hf_reference.wav`（官方全模型） | 5.76 s | 72 | 好 |
+  | `minimind_fixed2.wav`（修 bridge **之前**） | 5.76 s | **72** | **坏** |
+  | `minimind_teacher_forced.wav`（官方 talker + 同一批 token） | 4.48 s | 56 | 好 |
+  | `minimind_bridgefix.wav`（修 bridge 之后） | 4.40 s | 55 | 好 |
+
+  坏的那个和官方一样是 72 帧，内容却不对（RMS 0.046 vs 0.093）。所以
+  **帧数区分不出好坏**，它只是采样码的间接后果：stop token 落在第几步，
+  就停在第几帧。一切跨输入的帧数对比都没有意义，只有一个有意义的比较：
+  给定相同输入，逐步 argmax 是否一致（§4.2：124/124）。
+- **72 帧很可能是被 `max_new_tokens` 截断，而不是自然停**（假设，未验证）：
+  帧数 ≈ step − 7，所以 72 帧对应约 79–80 个 talker step，这是个太整
+  的数。验证办法：用 `max_new_tokens=128` 重跑官方 `stream_generate`，
+  看帧数是否仍停在 72（截断会随预算变，自然停不会）；同时跑多个 seed
+  看官方自己的帧数散布，若它自己就在 50–80 之间跳，55 vs 72 就是采样
+  方差。脚本已备：`.scratch/frame_count.py`（gitignore，未入库），它同时
+  报告我们的循环是“门关闭”退出还是被 `_TALKER_TAIL` 截断。
+  WSL 实验机在 2026-10-31 处于 offline，这项尚未跑。
 - **MiniMind talker 实现**：生产路径用 vendor `MiniMindOmni.talker`（fp16），
   仓库里没有 fork talker 实现；`content_len + 64` 的 bridge tail 覆盖
   teacher-forced 实测的 56 帧。

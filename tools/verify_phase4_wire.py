@@ -4,8 +4,8 @@
 Not a MiniMindThinker.forward() smoke. Hits the same path as nanovllm's
 LLMEngine.step: Scheduler.schedule → ModelRunner.run → postprocess.
 
-Talker is out of scope: MiniMindTalker.forward(bridge, codes, positions)
-is not ModelRunner.forward(input_ids, positions).
+Talker is out of scope: the talker runs the vendor ``TalkerModule``
+directly, not ``ModelRunner.forward(input_ids, positions)``.
 """
 
 from __future__ import annotations
@@ -68,44 +68,16 @@ def _ensure_safetensors(model_path: str) -> None:
 
 
 def _thinker_only_dir(src: str) -> str:
-    """HF dump is MiniMindOmni (talker/vision/audio_proj + ``model.`` prefix).
+    """Build the thinker-only checkpoint dir the fork loader can read.
 
-    MiniMindThinker is flat (``layers`` / ``embed_tokens``) like a Qwen3Model,
-    not ``Qwen3ForCausalLM.model``. Fork ``load_model`` does not skip unknown
-    keys. Strip ``model.`` and drop non-thinker tensors into a sibling dir.
+    Delegates to the package implementation so this gate and the runtime
+    filter the checkpoint the same way. The thinker keeps the ``model.``
+    prefix: ``MiniMindThinker`` holds its backbone at ``self.model``.
     """
-    import shutil
+    from nanovllm_omni.models.minimind_omni.stage import _thinker_only_dir as _filter
 
-    from safetensors import safe_open
-    from safetensors.torch import save_file
-
-    dst = os.path.join("/tmp", "minimind-thinker-only")
-    os.makedirs(dst, exist_ok=True)
-    for name in os.listdir(src):
-        if name.endswith((".json", ".py", ".jinja")):
-            shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
-
-    out_st = os.path.join(dst, "model.safetensors")
-    keep_prefix = ("embed_tokens.", "layers.", "norm.", "lm_head.")
-    tensors: dict[str, torch.Tensor] = {}
-    seen: set[int] = set()
-    src_st = glob(os.path.join(src, "*.safetensors"))
-    if not src_st:
-        raise FileNotFoundError(f"no safetensors in {src}")
-    with safe_open(src_st[0], framework="pt", device="cpu") as f:
-        for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-            name = k[6:] if k.startswith("model.") else k
-            if not name.startswith(keep_prefix):
-                continue
-            v = f.get_tensor(k)
-            ptr = v.untyped_storage().data_ptr()
-            if ptr in seen:
-                v = v.clone()
-            else:
-                seen.add(ptr)
-            tensors[name] = v.contiguous()
-    save_file(tensors, out_st)
-    print(f"thinker-only {out_st} ({len(tensors)} tensors)")
+    dst = _filter(src)
+    print(f"thinker-only {dst}")
     return dst
 
 

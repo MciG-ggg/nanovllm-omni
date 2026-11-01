@@ -117,18 +117,14 @@ def _thinker_only_dir(src: str) -> str:
         if name.endswith((".json", ".py", ".jinja", ".md", ".txt")):
             shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
 
-    def _name(k: str) -> str | None:
-        if k.startswith("model."):
-            return k
-        # Top-level keys the thinker also consumes, e.g. ``lm_head.weight``
-        # in the HF MiniMind checkpoint.
-        if k.startswith(_THINKER_KEEP_PREFIX):
-            return k
-        return None
+    def _keep(k: str) -> str | None:
+        """The key to write, or None when the thinker does not consume it.
 
-    def _accept(name: str) -> bool:
-        stripped = name[len("model.") :] if name.startswith("model.") else name
-        return stripped.startswith(_THINKER_KEEP_PREFIX)
+        Keeps the ``model.`` backbone prefix on the way out; bare top-level
+        keys (``lm_head.weight`` in the HF MiniMind checkpoint) pass through.
+        """
+        stripped = k[len("model.") :] if k.startswith("model.") else k
+        return k if stripped.startswith(_THINKER_KEEP_PREFIX) else None
 
     tensors: dict = {}
     seen: set = set()
@@ -141,8 +137,8 @@ def _thinker_only_dir(src: str) -> str:
         for k, v in state.items():
             if not torch.is_tensor(v):
                 continue
-            name = _name(k)
-            if name is None or not _accept(name):
+            name = _keep(k)
+            if name is None:
                 continue
             ptr = v.untyped_storage().data_ptr()
             if ptr in seen:
@@ -156,8 +152,8 @@ def _thinker_only_dir(src: str) -> str:
     for src_file in src_files:
         with safe_open(src_file, framework="pt", device="cpu") as f:
             for k in f.keys():  # noqa: SIM118 - safe_open is not iterable
-                name = _name(k)
-                if name is None or not _accept(name):
+                name = _keep(k)
+                if name is None:
                     continue
                 v = f.get_tensor(k)
                 ptr = v.untyped_storage().data_ptr()

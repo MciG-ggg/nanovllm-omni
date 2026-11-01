@@ -151,6 +151,14 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
 - **MiniMind 音色条件**：`speaker_embedding` 从未被赋值，`ref_codes` 也不支持；
   当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
   `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。
+- **MiniMind 与官方全模型的帧数差距尚未定因**：同一 prompt 上，官方
+  `MiniMindOmni`（`use_cache=True`、官方采样）产出了 `minimind_hf_reference.wav`
+  72 帧 / 5.76 s、18 个生成 token；本仓库产出 55 帧 / 4.40 s、16 个 token。
+  这**不是**同一条语音：两边采样出的文本就不同，所以帧数不可直接相减。
+  同输入的唯一对照是 teacher-forced（同一 16 token）：官方 talker 56 帧、
+  我们 55 帧，差的 1 帧来自采样码不同导致的 stop token 位置差一步。
+  72 → 55 那 17 帧的完整解释（文本长度比例 18:16 只能解释一部分）未查清，
+  不要引用“我们和官方只差 1 帧”这种说法。
 - **MiniMind talker 实现**：生产路径用 vendor `MiniMindOmni.talker`（fp16），
   仓库里没有 fork talker 实现；`content_len + 64` 的 bridge tail 覆盖
   teacher-forced 实测的 56 帧。

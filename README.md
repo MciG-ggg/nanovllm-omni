@@ -239,7 +239,7 @@ docs/           # project notes and performance archives
 
 This repository intentionally excludes video generation, multi-model pipelines beyond the four listed, distributed execution, WebSockets, and FastAPI/uvicorn serving. The aligned HTTP seam, when available, uses the Python standard library HTTP server.
 
-### Single-card, single-process runtime
+### Single-process runtime
 
 One `Omni(...)` resolves a `PipelineConfig` and builds one
 `PipelineRunner` whose stages live in the same Python process. For
@@ -257,7 +257,7 @@ code2wav 1B, etc.). MiniMind-O's `thinker` and `talker` are
 submodules of one `AutoModelForCausalLM` that loads from a single
 safetensors file, so per-stage subprocess isolation would force
 every stage to re-load the full ~3 GB checkpoint — unaffordable on
-the 4 GB GPU we target and wasteful on anything bigger.
+the 4 GB card this started on and wasteful on anything bigger.
 `bundle.py` instead keeps everything in one process; inter-stage
 traffic (thinker hidden states → talker → code2wav) is Python
 tensor references with zero serialization and zero IPC.

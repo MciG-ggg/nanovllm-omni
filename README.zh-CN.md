@@ -217,11 +217,11 @@ docs/           # 项目笔记与性能归档
 
 本仓库明确**不**包含:视频生成、超出所列四类的多模型流水线、分布式执行、WebSocket、FastAPI/uvicorn 服务。对齐的 HTTP seam 在可用时使用 Python 标准库 HTTP server。
 
-### 单卡、单进程运行时
+### 单进程运行时
 
 一个 `Omni(...)` 解析出一个 `PipelineConfig`,构造一个 `PipelineRunner`,所有 stage 装在**一个** Python 进程里。MiniMind-O 的两个 AR stage 通过 `nanovllm_omni/models/minimind_omni/bundle.py` 共享同一份 checkpoint(bench 和 tools 使用);引擎本身只看到 stage 实例。没有 per-stage 子进程池、没有 `StageRuntime`、没有多卡 dispatch、也没有 tensor-parallel worker — 这是设计上有意的。
 
-这是与 vllm-omni 的有意分歧:vllm-omni 里每个 stage 跑在独立的 `StageEngineCoreProc` 子进程里,stage 可以绑定到不同的 GPU。vllm-omni 能这么做是因为每个 stage 都是独立的 HF checkpoint(thinker 30B、talker 2B、code2wav 1B 等)。MiniMind-O 的 `thinker` 和 `talker` 是同一个 `AutoModelForCausalLM` 的子模块,从同一个 safetensors 文件加载,所以 per-stage 子进程隔离会强制每个 stage 重新加载完整的 ~3 GB checkpoint — 在我们目标的 4 GB 卡上跑不动,在更大的卡上也是浪费。`bundle.py` 改成所有东西在一个进程里;stage 之间的通信(thinker hidden states → talker → code2wav)用 Python tensor 引用,零序列化、零 IPC。
+这是与 vllm-omni 的有意分歧:vllm-omni 里每个 stage 跑在独立的 `StageEngineCoreProc` 子进程里,stage 可以绑定到不同的 GPU。vllm-omni 能这么做是因为每个 stage 都是独立的 HF checkpoint(thinker 30B、talker 2B、code2wav 1B 等)。MiniMind-O 的 `thinker` 和 `talker` 是同一个 `AutoModelForCausalLM` 的子模块,从同一个 safetensors 文件加载,所以 per-stage 子进程隔离会强制每个 stage 重新加载完整的 ~3 GB checkpoint — 在这套东西起步时的 4 GB 卡上跑不动,在更大的卡上也是浪费。`bundle.py` 改成所有东西在一个进程里;stage 之间的通信(thinker hidden states → talker → code2wav)用 Python tensor 引用,零序列化、零 IPC。
 
 同卡上的请求级并行不在范围内:四个模型族共用同一个单进程 pipeline runner,每个请求走一次 pipeline 执行。
 

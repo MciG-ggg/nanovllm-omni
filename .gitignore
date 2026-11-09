@@ -115,3 +115,11 @@ Thumbs.db
 # Project skills: shared (ci-safe-delivery) tracked; local dev-loop stays ignored
 .agents/skills/nanovllm-omni-wsl-loop/
 .alma-snapshots
+
+# MLX kernel build artifacts (source is tracked, binaries are not)
+*.metallib
+*.air
+
+# Local test-run snapshots
+.baseline-pytest.txt
+.pytest-baseline.txt

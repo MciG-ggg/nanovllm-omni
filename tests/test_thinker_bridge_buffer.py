@@ -175,7 +175,10 @@ def test_recapture_bridge_returns_only_the_sequence_rows() -> None:
             return buffer
 
     class _StageRunner:
-        model_runner = type("_Runner", (), {"model": _Model()})()
+        model = _Model()
+
+        def bridge_hidden(self):
+            return buffer
 
         def set_context(self, **kwargs):
             self.context = kwargs

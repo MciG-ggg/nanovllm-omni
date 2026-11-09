@@ -37,13 +37,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from nanovllm_omni.backend import get_backend
 from nanovllm_omni.engine.stage_engine import StageEngine
-from nanovllm_omni.engine.stage_runner import (
-    StageRunner,
-    _ensure_dist,
-    get_stage_config,
-    stage_kwargs_from_args,
-)
+from nanovllm_omni.engine.stage_runner import _ensure_dist, stage_kwargs_from_args
 from nanovllm_omni.models.minimind_omni.hf_config import register_minimind_config
 from nanovllm_omni.models.minimind_omni.stage_runner import (
     decode_minimind,
@@ -247,14 +243,19 @@ class ThinkerStage(StageEngine):
         # Official eval_omni.py runs the released weights in fp16 (`.half()`).
         if stage_kwargs.get("dtype") is None:
             stage_kwargs["dtype"] = "float16"
-        self.config = get_stage_config(
+        backend = get_backend(
+            extra.get("backend", "torch"),
+            device=getattr(args, "device", None),
+            dtype=stage_kwargs["dtype"],
+        )
+        self.config = backend.make_config(
             model_path=_resolve_model_path(args),
             **stage_kwargs,
         )
         self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
         # Ensure NCCL process group exists before ModelRunner tries to init.
         _ensure_dist()
-        self.stage_runner = StageRunner(
+        self.stage_runner = backend.make_stage_runner(
             model_class=self.model_class,
             config=self.config,
         )

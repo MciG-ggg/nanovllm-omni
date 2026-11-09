@@ -45,10 +45,9 @@ class SmolVLMStage(StageEngine):
         super().__init__()
         from transformers import AutoConfig, AutoProcessor
 
+        from nanovllm_omni.backend import get_backend
         from nanovllm_omni.engine.stage_runner import (
-            StageRunner,
             _ensure_dist,
-            get_stage_config,
             stage_kwargs_from_args,
         )
 
@@ -102,8 +101,13 @@ class SmolVLMStage(StageEngine):
             model_dir = snapshot_download(model_id, local_files_only=not allow_hf)
         except Exception:  # pragma: no cover - rely on load_model to fail loud
             model_dir = model_id
-        config = get_stage_config(
-            model_dir,
+        backend = get_backend(
+            extra.get("backend", "torch"),
+            device=self.device,
+            dtype=dtype_str,
+        )
+        config = backend.make_config(
+            model_path=model_dir,
             **stage_kwargs_from_args(args),
         )
         config.enforce_eager = not extra.get("use_cuda_graph", True)
@@ -115,12 +119,11 @@ class SmolVLMStage(StageEngine):
         # the fork default (512) sends every image decode step to the
         # eager path. 2048 covers one image plus 512 generated tokens.
         config.graph_max_seq_len = 2048
-        self.stage_runner = StageRunner(
+        self.stage_runner = backend.make_stage_runner(
             model_class=model_class or SmolVLMForConditionalGeneration,
             config=config,
-            rank=0,
         )
-        self.model = self.stage_runner.model_runner.model
+        self.model = self.stage_runner.model
         self.model.eval()
 
         # 2) Processor + image-token metadata
@@ -244,8 +247,8 @@ class SmolVLMStage(StageEngine):
             merged_embeds = self._build_merged_embeddings(input_ids, pixel_values)
 
             # Fork scheduler path — mirrors minimind decode_minimind shape.
-            runner = self.stage_runner.model_runner
-            config = self.stage_runner.config
+            stage_runner = self.stage_runner
+            config = stage_runner.config
             # Fork SamplingParams forbids temperature=0 (assert > 1e-10).
             # Map greedy (temperature=0 from omni params) to the fork's
             # argmax path: pass temperature=1e-5 so the assert passes but
@@ -265,32 +268,32 @@ class SmolVLMStage(StageEngine):
 
             # Prefill step (one shot)
             seqs, is_prefill = scheduler.schedule()
-            prefill_ids, prefill_positions = runner.prepare_prefill(seqs)
-            temperatures = runner.prepare_sample(seqs)
+            prefill_ids, prefill_positions = stage_runner.prepare_prefill(seqs)
+            temperatures = stage_runner.prepare_sample(seqs)
             if merged_embeds is not None:
-                logits = runner.run_model(
+                logits = stage_runner.forward(
                     prefill_ids,
                     prefill_positions,
                     is_prefill,
                     inputs_embeds=merged_embeds,
                 )
             else:
-                logits = runner.run_model(prefill_ids, prefill_positions, is_prefill)
-            token_ids = runner.sampler(logits, temperatures).tolist()
+                logits = stage_runner.forward(prefill_ids, prefill_positions, is_prefill)
+            token_ids = stage_runner.sample(logits, temperatures).tolist()
             scheduler.postprocess(seqs, token_ids, is_prefill)
-            self.stage_runner.reset_context()
+            stage_runner.reset_context()
             generated: list[int] = list(token_ids)
 
         with profile_range(":vlm-decode"):
             # AR decode loop
             while not scheduler.is_finished():
                 seqs, is_prefill = scheduler.schedule()
-                decode_ids, decode_positions = runner.prepare_decode(seqs)
-                temperatures = runner.prepare_sample(seqs)
-                logits = runner.run_model(decode_ids, decode_positions, is_prefill)
-                token_ids = runner.sampler(logits, temperatures).tolist()
+                decode_ids, decode_positions = stage_runner.prepare_decode(seqs)
+                temperatures = stage_runner.prepare_sample(seqs)
+                logits = stage_runner.forward(decode_ids, decode_positions, is_prefill)
+                token_ids = stage_runner.sample(logits, temperatures).tolist()
                 scheduler.postprocess(seqs, token_ids, is_prefill)
-                self.stage_runner.reset_context()
+                stage_runner.reset_context()
                 generated.extend(token_ids)
                 if not ignore_eos and generated[-1] == self.eos_token_id:
                     break

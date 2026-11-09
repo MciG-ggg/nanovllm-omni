@@ -1,0 +1,114 @@
+# ADR 0013: stage 层的 backend 接缝（torch / MLX）
+
+- Status: Proposed
+- Date: 2026-11-09
+- 关联: ADR 0004（模型与引擎边界）、ADR 0005（图策略在 stage）、0010（并发不是杠杆）、
+  0012（请求生命周期与批处理）
+
+## 问题
+
+stage 层隐式绑在 torch + CUDA 上，而且这个绑定比看上去深：
+
+- `third_party/nano-vllm/nanovllm/layers/attention.py` 在**模块顶层** `import triton`。
+  triton 3.9.0 在 PyPI 上的 wheel 只有 `manylinux x86_64` 与 `manylinux aarch64`，
+  **没有 macOS / arm64**。所以 fork 的 attention 在 Mac 上连 import 都不成立。
+- `models/minimind_omni/stage_runner.py::decode_minimind` 与
+  `models/smolvlm/stage.py` 直接摸 `stage_runner.model_runner`，
+  调 fork 的 `prepare_prefill` / `prepare_decode` / `prepare_sample` / `run_model`，
+  并就地替换 `model_runner.sampler`。
+
+目标机器是 Mac（M2 Air 16 GB 统一内存）。要让它跑起来，得先把"框架相关"的部分
+圈出来。
+
+## 关键事实（实测）
+
+| 事实 | 证据 |
+|---|---|
+| **调度层与框架无关** | fork 的 `engine/scheduler.py`、`engine/sequence.py`、`engine/block_manager.py`、`sampling_params.py` **torch 命中全部为 0**。批的形成、slot 复用、抢占、chunked prefill 都在纯 Python 里 |
+| **本仓库的调度层也与框架无关** | `engine/stage_engine.py` / `engine/runner.py` / `engine/executor.py` **torch 命中全部为 0** |
+| **模型层深度绑定 fork** | `models/minimind_omni/thinker.py` 的 `MiniMindThinker` 用 fork 的 `VocabParallelEmbedding`、带 `packed_modules_mapping` 的 `ThinkerAttention`、fork 的 `RMSNorm` |
+| **另两个族是第三方库** | `sd_turbo` 用 diffusers，`smolvla` 用 lerobot；两者都没有 MLX 等价物 |
+| **MLX 有 graph 等价物** | `mx.compile` 存在，实测 4.91×（512×512、20 轮算子链：eager 0.108 ms/iter → 0.022 ms/iter） |
+| **MLX 没有 varlen** | `mx.fast.scaled_dot_product_attention(q, k, v, *, scale, mask=None\|str\|array, sinks, force_fused, stream)` 有 mask、没有 `cu_seqlens`。上游 `vllm-metal` 为此自己写了 Metal kernel，其 benchmark 显示 padded 路径在 ragged 批上 +143% |
+| **MPS 与 MLX 看到同一个内存池** | `torch.mps.recommended_max_memory()` = `mx.device_info()["max_recommended_working_set_size"]` = 12713115648（11.84 GiB） |
+
+## 决定：接缝画在「一步执行」，不画在 tensor API
+
+抽象层有两条常见的画法：
+
+1. **tensor API 层**——把 `torch.xxx` 换成 `backend.xxx`，一套 stage 代码跑两个后端。
+2. **模型实现层**——框架无关的调度 + 框架相关的模型执行。
+
+选 **2**。理由：MLX 不是 torch 的方言。`torch.nn.functional.scaled_dot_product_attention`
+与 `mx.fast.scaled_dot_product_attention` 的 mask 语义、RoPE 的写法、KV cache 的生命周期
+都不一致；真按第 1 种画，最后每个 stage 里都会长出 `if backend is mlx:` 的分支，
+比第 2 种更贵。
+
+这也正是上游 `vllm-metal` 的做法：upstream vLLM 供调度器 / paged KV / 前端，
+`mlx_lm` 供 token-wise 的模型层，插件只补 request-aware 的那一层。
+
+### 接口
+
+`nanovllm_omni/backend/base.py` 定义两个协议：
+
+- `StageRunner`——一步 AR 执行：`prepare_prefill` / `prepare_decode` / `prepare_sample` /
+  `forward` / `sample` / `bridge_hidden`。进出边界上的 `Sequence` 是 fork 的纯 Python 对象，
+  跨边界的只有 batch 张量与 logits。
+- `Backend`——`name` / `device` / `dtype` / `capabilities`，加 `make_config` 与
+  `make_stage_runner`。
+
+`BackendCapabilities` 三项：`varlen`（能否一个 forward 承载 ragged 序列）、
+`graph`（有没有 graph capture 等价物）、`max_batch`。
+
+### 实现
+
+| backend | 状态 | 说明 |
+|---|---|---|
+| `torch` | 可用，行为不变 | 转发 fork 的 `ModelRunner` / `Sampler`；`varlen=True`、`graph=True` |
+| `mlx` | 骨架，**一次一序列** | 用 `mlx_lm.utils.load` 加载；`varlen=False`、`graph=True`、`max_batch=1` |
+
+`nanovllm_omni/backend/__init__.py` 是注册表（`get_backend` / `register_backend` /
+`available_backends`）。默认是 `torch`，且选中它必须让 pipeline 与接缝之前逐位相同。
+
+## 工作量评估
+
+| 工作项 | 行数 | 难度 | 说明 |
+|---|---:|---|---|
+| `backend/base.py`（协议 + 能力 + 注册表） | ~130 | 低 | 已落地 |
+| `backend/torch_backend.py`（转发） | ~60 | 低 | 已落地，零行为变化 |
+| `backend/mlx_backend.py`（骨架） | ~150 | 低 | 已落地，一次一序列 |
+| `engine/stage_runner.py` 补 4 个转发方法 + `sample(sampler=)` | ~40 | 低 | 已落地 |
+| `decode_minimind` 去 fork 耦合（7 处直接访问） | ~30 改 | 低 | 已完成：全部改走协议，vendor sampler 按调用传入 |
+| `smolvlm/stage.py` 去 fork 耦合 | ~20 改 | 低 | 已完成 |
+| `ThinkerStage` / `SmolVLMStage` 走 backend（默认 torch） | ~40 改 | 低 | 已完成；`extra["backend"]` 选后端，默认路径与接线前一致 |
+| **MLX backend：paged KV + 批 decode** | ~400 | 中 | 未做；`mlx_lm.generate.BatchGenerator` 自带增量批处理，可作参照 |
+| **MLX varlen attention（Metal kernel）** | — | **高** | 未做；`vllm-metal` 的整个插件就为了这个 |
+| 测试 + 文档同步 | ~250 | 低 | 已落地：`tests/test_backend_wiring.py` 锁注册表、懒加载、协议一致性与 stage 不再摸 `model_runner` |
+
+**结论：接缝本身很便宜（约 300 行），成本 90% 在 varlen attention kernel 上。**
+而那个 kernel `vllm-metal` 已经写了（license 待查）——能复用就从"写 kernel"降到"接 kernel"。
+
+## 边界（明确没做到的）
+
+- **MLX backend 一次只跑一个序列**：`prepare_prefill` / `prepare_decode` 遇到多于一个
+  sequence 直接 `NotImplementedError`。接口允许批，实现还没有。
+- **MLX backend 没有 bridge hidden**：MiniMind-O 的 thinker → talker 桥在 MLX 侧不存在。
+- **MLX backend 未经实测**：本机没装 `mlx-lm`，模型权重也不在 Mac 上。
+  代码按 `mlx_lm 0.32.2` 的实际 API 写（`utils.load`、`models.cache.make_prompt_cache`、
+  `models.cache.BatchKVCache`、`generate.BatchGenerator`），**但没有跑过**。
+- **MLX 还不能驱动这两个 stage**：`ThinkerStage` / `SmolVLMStage` 仍会往 config 上写
+  `enforce_eager` / `max_capture_bs` / `graph_max_seq_len`，而 `MlxConfig` 是 frozen
+  dataclass；decode 循环也直接构造 fork `Scheduler` 并读 fork `Config` 字段。
+  `extra["backend"]` 当前只有 `torch` 能走通。
+- **torch backend 在 Mac 上跑不了**：triton 无 macOS wheel（见上）。本仓库的 Mac 路线
+  只能是 MLX backend。
+- `mlx_lm.generate.BatchGenerator` 自带一套增量批处理（`PromptProcessingBatch`
+  支持 extend / filter / split）。本 backend 不用它——nanovllm-omni 自己的调度器才是
+  被讲的东西。这是另一个值得比的实现，不是现成答案。
+
+## 未验证
+
+- MLX backend 的任何数字（本机没跑过模型）。
+- `vllm-metal` 的 Metal kernel 是否可复用、license 是否兼容（未查）。
+- `mx.compile` 在真实模型上的收益（本机只测了 20 轮小算子链，4.91× 是这个量级的数，
+  不是模型级的数）。

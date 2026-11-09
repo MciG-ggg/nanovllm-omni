@@ -12,7 +12,22 @@
 - 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码。约 177 ms(`--use-thinker-cuda-graph`)与约 483 ms(eager)中位来自 fork 之前的 bench 栈(2026-09 在 `8f6d522` 上测得);当前代码走 fork 的 CUDA graph,当前代码上没有复现这两个数字的运行,所以它们是出处记录,不是当前测量值。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
-一个小型、本地的参考实现,在单卡上跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。
+一个小型、本地的参考实现,跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。
+
+## 两条轨
+
+引擎有两个后端,按 stage 选([ADR 0013](docs/adr/0013-backend-abstraction.md)):
+
+| 轨 | 后端 | 能拿到什么 | 拿不到什么 |
+|---|---|---|---|
+| **CUDA** | `nano-vllm` fork(torch) | varlen attention、paged KV、CUDA Graph | 要 NVIDIA 卡;fork 的 attention 顶层 `import triton`,而 triton 没有 macOS wheel |
+| **MLX** | `mlx`(Apple Silicon) | 能在 Mac 上跑、`mx.compile` 做图捕获 | 还没有 varlen attention——MLX 的 SDPA 有 `mask` 但没有 `cu_seqlens` |
+
+两条轨都在范围内,都要各自出数字([ADR 0014](docs/adr/0014-dual-track-targets.md))。
+**数字不跨机相减**——RTX 3050 的数和 Mac 的数不可比,每份结果文档都写明是哪台机器产的。
+
+serving 本身就是教材,不是附属功能([ADR 0016](docs/adr/0016-serving-is-a-teaching-subject.md))。
+入口是[文档地图](docs/README.md),里面有三条阅读路线。
 
 ![RTX 3050 上的 SD-Turbo 单步图像生成(512×512)](docs/images/sd_turbo_sample.png)
 
@@ -24,7 +39,7 @@
 
 | 项目 | 模态 | 目标 |
 |---|---|---|
-| `nanovllm-omni`(本仓库) | 音频 / 图像 / 动作 / 文本 | 与 vllm-omni 消费侧 API 对齐的 omni-模态运行时,跑在单张 4 GB 卡上 |
+| `nanovllm-omni`(本仓库) | 音频 / 图像 / 动作 / 文本 | 与 vllm-omni 消费侧 API 对齐的 omni-模态运行时,CUDA 与 Apple Silicon 都能跑 |
 | [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) | 仅文本 | 最小化教学用 vLLM 文本路径重写 |
 | [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) | 仅文本 | 另一个教学用 vLLM 文本路径重写 |
 

@@ -114,3 +114,4 @@ Thumbs.db
 
 # Project skills: shared (ci-safe-delivery) tracked; local dev-loop stays ignored
 .agents/skills/nanovllm-omni-wsl-loop/
+.alma-snapshots

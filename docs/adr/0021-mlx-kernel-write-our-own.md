@@ -67,6 +67,9 @@ Exact 层的逐位一致只在**同一后端内部**成立（重写版 vs vendor
 | 上游 CUDA 代码的移植保真 | `tests/test_kv_offload_cuda_parity.py` | 比对 `compute_sub_block_ptrs` 的**纯指针算术**，不是输出 |
 | 跨厂商输出质量 | SiliconBench（arXiv 2609.19169） | **分类任务** vs NVIDIA 参考 → 任务级 fidelity |
 
+> **这一节里提到的路径都在 `vllm-project/vllm-metal` 仓库里，不是本仓库的。**
+> 本仓库要实现同一套判据（尚未开工），落点在 `nanovllm_omni/backend/` 与 `tools/`。
+
 SiliconBench 原文："We use a **classification task to check for quality regressions against
 an NVIDIA reference**."——**没有任何一处是拿 Apple Silicon 的输出和 NVIDIA 的 token
 逐个对齐的**。

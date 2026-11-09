@@ -12,7 +12,25 @@
 - 🔧 **Thinker-decode bench primitive (for regression, not the production path)** — `bench time` (default) measures the single-thinker decode stage only. The ~177 ms (`--use-thinker-cuda-graph`) and ~483 ms (eager) medians come from the pre-fork bench stack (measured at `8f6d522`, 2026-09). The current tree runs the fork CUDA graph, and no run on the current tree reproduces those numbers, so read them as provenance, not as a current measurement. That number does **not** include the talker/MTP/Mimi stages and must not be quoted as end-to-end latency.
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
-A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
+A small, local reference implementation that exercises vllm-omni's stage-based serving architecture. This project does not claim to implement vllm-omni's full feature set.
+
+## Two tracks
+
+The engine runs on two backends, chosen per stage
+([ADR 0013](docs/adr/0013-backend-abstraction.md)):
+
+| Track | Backend | What it gives | What it cannot do |
+|---|---|---|---|
+| **CUDA** | the `nano-vllm` fork (torch) | varlen attention, paged KV, CUDA Graph | needs an NVIDIA card; the fork's attention imports `triton`, which has no macOS wheel |
+| **MLX** | `mlx` (Apple Silicon) | runs on a Mac, `mx.compile` for graph capture | no varlen attention yet — MLX's SDPA has a `mask` but no `cu_seqlens` |
+
+Both tracks are in scope and both must produce their own numbers
+([ADR 0014](docs/adr/0014-dual-track-targets.md)). **Numbers never cross machines** — a
+figure from the RTX 3050 and a figure from the Mac are not comparable, and every
+result document says which machine produced it.
+
+Serving is the subject, not a side feature ([ADR 0016](docs/adr/0016-serving-is-a-teaching-subject.md)).
+Start with the [document map](docs/README.md) — it has three reading routes.
 
 ![SD-Turbo single-step image generation on RTX 3050 (512×512)](docs/images/sd_turbo_sample.png)
 
@@ -25,7 +43,7 @@ There are two other Python projects with `nano-vllm`-style names; they are
 
 | Project | Modalities | Goal |
 |---|---|---|
-| `nanovllm-omni` (this repo) | audio / image / action / text | aligned omni-modal runtime that mirrors vllm-omni's consumer-visible API on a single 4 GB card |
+| `nanovllm-omni` (this repo) | audio / image / action / text | aligned omni-modal runtime that mirrors vllm-omni's consumer-visible API, on CUDA and on Apple Silicon |
 | [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) | text only | minimal educational re-implementation of vLLM's text path |
 | [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) | text only | another educational text-only vLLM reimplementation |
 

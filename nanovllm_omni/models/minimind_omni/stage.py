@@ -418,6 +418,13 @@ class TalkerStage(StageEngine):
         # vendor class is the P1/P2 reference arm, not the default.
         extra = getattr(args, "extra", None) or {}
         self._impl = str(extra.get("talker_impl", "rewritten"))
+        # ADR 0017 windowed KV stays opt-in until its parity gate is green on
+        # CUDA (ADR 0022); the dense path is the one with a measured baseline.
+        self._kv = str(extra.get("talker_kv", "dense"))
+        if self._kv not in ("dense", "windowed"):
+            raise ValueError(f"unknown talker_kv {self._kv!r}; expected 'dense' or 'windowed'")
+        if self._kv == "windowed" and self._impl != "rewritten":
+            raise ValueError("talker_kv='windowed' requires talker_impl='rewritten'")
 
     def _ensure_model(self) -> Any:
         """Load the talker selected by ``extra["talker_impl"]``."""
@@ -475,12 +482,12 @@ class TalkerStage(StageEngine):
         self._device = "cuda"
         return talker
 
-    def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any) -> Any:
-        """Return the talker's 8 logit tensors for the current sequence."""
+    def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any, cache: Any = None) -> Any:
+        """Return the talker's 8 logit tensors for the given columns."""
         import torch
 
         if self._impl == "rewritten":
-            return self._model(bridge, audio_codes, spk_emb)
+            return self._model(bridge, audio_codes, spk_emb, cache)
 
         talker = self._model
         embeds = talker.embed_tokens(audio_codes)
@@ -603,6 +610,12 @@ class TalkerStage(StageEngine):
             device=device,
         )
 
+        cache = None
+        if self._kv == "windowed":
+            from .talker import TalkerKVCache
+
+            cache = TalkerKVCache(len(self._model.layers))
+
         with torch.no_grad():
             for step in range(num_steps):
                 audio_step = step - 1
@@ -621,11 +634,14 @@ class TalkerStage(StageEngine):
                             device=device,
                         )
 
-                # Vendor recomputes the full sequence every step
-                # (``use_cache=False`` on the parity path), so the talker
-                # sees the whole prefix, not a sliding window.
+                # The dense path recomputes the whole prefix every step
+                # (``use_cache=False`` on the parity path). The windowed path
+                # recomputes only the newest columns and reads the settled
+                # prefix from the cache, whose length is also the absolute
+                # RoPE offset (ADR 0022).
+                lo = cache.length if cache is not None else 0
                 logits_list = self._talker_logits(
-                    bridge[:, :seq_len, :], buf[:, :, :seq_len], spk_emb
+                    bridge[:, lo:seq_len, :], buf[:, :, lo:seq_len], spk_emb, cache
                 )
 
                 # Sample one code per codebook. HF ``model_omni.py``

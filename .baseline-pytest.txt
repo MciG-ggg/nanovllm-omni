@@ -1,0 +1,507 @@
+........................................................................ [ 24%]
+...............................................................F........ [ 48%]
+...ss............FFF.................s.s................................ [ 72%]
+...............................FFF..........F........................... [ 96%]
+..........                                                               [100%]
+=================================== FAILURES ===================================
+_______________________ test_thinker_graph_matches_eager _______________________
+
+    @pytest.mark.smoke
+    def test_thinker_graph_matches_eager() -> None:
+>       eager = _run("eager")
+                ^^^^^^^^^^^^^
+
+tests/test_minimind_graph_parity.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cell = 'eager'
+
+    def _run(cell: str) -> list:
+        result = subprocess.run(
+            [sys.executable, "-c", _CHILD, cell],
+            capture_output=True,
+            text=True,
+        )
+    
+>       assert result.returncode == 0, result.stderr[-2000:]
+E       AssertionError: ocked
+E           File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+E           File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+E           File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/minimind_omni/thinker.py", line 27, in <module>
+E             from nanovllm.layers.attention import Attention
+E           File "/Users/mcig/Projects/nanovllm-omni/third_party/nano-vllm/nanovllm/layers/attention.py", line 3, in <module>
+E             import triton
+E         ModuleNotFoundError: No module named 'triton'
+E         
+E         The above exception was the direct cause of the following exception:
+E         
+E         Traceback (most recent call last):
+E           File "<string>", line 19, in <module>
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/entrypoints/omni.py", line 138, in generate
+E             results = self._ensure_executor().run_many(
+E                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/executor.py", line 79, in run_many
+E             request_ids.append(self._runner.add_request(prompt, sampling))
+E                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 218, in add_request
+E             self._submit(0, request, prompt)
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 178, in _submit
+E             self._ensure_stages()[stage_index].add_request(
+E             ^^^^^^^^^^^^^^^^^^^^^
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 120, in _ensure_stages
+E             factory = resolve_stage_factory(stage.stage_factory)
+E                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/config/registry.py", line 117, in resolve_stage_factory
+E             raise ImportError(f"stage registration {registration!r}: cannot import module") from e
+E         ImportError: stage registration ('nanovllm_omni.models.minimind_omni.thinker', '_thinker_stage'): cannot import module
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/Users/mcig/Projects/nanovllm-omni/.venv/bin/python', '-c', '\nimport hashlib\nimport json\nim...rror: stage registration (\'nanovllm_omni.models.minimind_omni.thinker\', \'_thinker_stage\'): cannot import module\n').returncode
+
+tests/test_minimind_graph_parity.py:61: AssertionError
+____________________________ test_seed_determinism _____________________________
+
+    @pytest.mark.smoke
+    def test_seed_determinism():
+        """Two ``run_one`` calls with the same ``(prompt, seed)`` produce identical audio bytes."""
+        from nanovllm_omni.bench import BenchPrompt, run_one
+        from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
+    
+>       bundle = load_minimind_omni_bundle(
+            model_id="/home/mcig/minimind-3o",
+            mimi_model_id="/home/mcig/mimi",
+            device="cuda",
+        )
+
+tests/test_optim_bench.py:491: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+nanovllm_omni/models/minimind_omni/bundle.py:111: in load_minimind_omni_bundle
+    snapshot_dir = _resolve_snapshot(model_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/models/minimind_omni/bundle.py:54: in _resolve_snapshot
+    return snapshot_download(model_id, local_files_only=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:84: in _inner_fn
+    validate_repo_id(arg_value)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+repo_id = '/home/mcig/minimind-3o'
+
+    def validate_repo_id(repo_id: str | None) -> None:
+        """Validate `repo_id` is valid.
+    
+        This is not meant to replace the proper validation made on the Hub but rather to
+        avoid local inconsistencies whenever possible (example: passing `repo_type` in the
+        `repo_id` is forbidden).
+    
+        Rules:
+        - Between 1 and 96 characters.
+        - Either "repo_name" or "namespace/repo_name"
+        - [a-zA-Z0-9] or "-", "_", "."
+        - "--" and ".." are forbidden
+    
+        Valid: `"foo"`, `"foo/bar"`, `"123"`, `"Foo-BAR_foo.bar123"`
+    
+        Not valid: `"datasets/foo/bar"`, `".repo_id"`, `"foo--bar"`, `"foo.git"`
+    
+        Example:
+        ```py
+        >>> from huggingface_hub.utils import validate_repo_id
+        >>> validate_repo_id(repo_id="valid_repo_id")
+        >>> validate_repo_id(repo_id="other..repo..id")
+        huggingface_hub.utils._validators.HFValidationError: Cannot have -- or .. in repo_id: 'other..repo..id'.
+        ```
+    
+        Discussed in https://github.com/huggingface/huggingface_hub/issues/1008.
+        In moon-landing (internal repository):
+        - https://github.com/huggingface/moon-landing/blob/main/server/lib/Names.ts#L27
+        - https://github.com/huggingface/moon-landing/blob/main/server/views/components/NewRepoForm/NewRepoForm.svelte#L138
+        """
+        if repo_id is None:
+            # Repo id is not always required
+            return
+    
+        if not isinstance(repo_id, str):
+            # Typically, a Path is not a repo_id
+            raise HFValidationError(f"Repo id must be a string, not {type(repo_id)}: '{repo_id}'.")
+    
+        if repo_id.count("/") > 1:
+>           raise HFValidationError(
+                "Repo id must be in the form 'repo_name' or 'namespace/repo_name':"
+                f" '{repo_id}'. Use `repo_type` argument if needed."
+            )
+E           huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:132: HFValidationError
+____________________________ test_prompts_complete _____________________________
+
+    @pytest.mark.smoke
+    def test_prompts_complete():
+        """All six ``BENCH_PROMPTS`` complete one ``run_one`` without raising."""
+        from nanovllm_omni.bench import BENCH_PROMPTS, run_one
+        from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
+    
+>       bundle = load_minimind_omni_bundle(
+            model_id="/home/mcig/minimind-3o",
+            mimi_model_id="/home/mcig/mimi",
+            device="cuda",
+        )
+
+tests/test_optim_bench.py:509: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+nanovllm_omni/models/minimind_omni/bundle.py:111: in load_minimind_omni_bundle
+    snapshot_dir = _resolve_snapshot(model_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/models/minimind_omni/bundle.py:54: in _resolve_snapshot
+    return snapshot_download(model_id, local_files_only=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:84: in _inner_fn
+    validate_repo_id(arg_value)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+repo_id = '/home/mcig/minimind-3o'
+
+    def validate_repo_id(repo_id: str | None) -> None:
+        """Validate `repo_id` is valid.
+    
+        This is not meant to replace the proper validation made on the Hub but rather to
+        avoid local inconsistencies whenever possible (example: passing `repo_type` in the
+        `repo_id` is forbidden).
+    
+        Rules:
+        - Between 1 and 96 characters.
+        - Either "repo_name" or "namespace/repo_name"
+        - [a-zA-Z0-9] or "-", "_", "."
+        - "--" and ".." are forbidden
+    
+        Valid: `"foo"`, `"foo/bar"`, `"123"`, `"Foo-BAR_foo.bar123"`
+    
+        Not valid: `"datasets/foo/bar"`, `".repo_id"`, `"foo--bar"`, `"foo.git"`
+    
+        Example:
+        ```py
+        >>> from huggingface_hub.utils import validate_repo_id
+        >>> validate_repo_id(repo_id="valid_repo_id")
+        >>> validate_repo_id(repo_id="other..repo..id")
+        huggingface_hub.utils._validators.HFValidationError: Cannot have -- or .. in repo_id: 'other..repo..id'.
+        ```
+    
+        Discussed in https://github.com/huggingface/huggingface_hub/issues/1008.
+        In moon-landing (internal repository):
+        - https://github.com/huggingface/moon-landing/blob/main/server/lib/Names.ts#L27
+        - https://github.com/huggingface/moon-landing/blob/main/server/views/components/NewRepoForm/NewRepoForm.svelte#L138
+        """
+        if repo_id is None:
+            # Repo id is not always required
+            return
+    
+        if not isinstance(repo_id, str):
+            # Typically, a Path is not a repo_id
+            raise HFValidationError(f"Repo id must be a string, not {type(repo_id)}: '{repo_id}'.")
+    
+        if repo_id.count("/") > 1:
+>           raise HFValidationError(
+                "Repo id must be in the form 'repo_name' or 'namespace/repo_name':"
+                f" '{repo_id}'. Use `repo_type` argument if needed."
+            )
+E           huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:132: HFValidationError
+_____________________________ test_timer_envelope ______________________________
+
+    @pytest.mark.smoke
+    def test_timer_envelope():
+        """Sum of stage timers is within 5% of a single ``perf_counter`` envelope."""
+        from nanovllm_omni.bench import BenchPrompt, run_one
+        from nanovllm_omni.models.minimind_omni import load_minimind_omni_bundle
+    
+>       bundle = load_minimind_omni_bundle(
+            model_id="/home/mcig/minimind-3o",
+            mimi_model_id="/home/mcig/mimi",
+            device="cuda",
+        )
+
+tests/test_optim_bench.py:526: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+nanovllm_omni/models/minimind_omni/bundle.py:111: in load_minimind_omni_bundle
+    snapshot_dir = _resolve_snapshot(model_id)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/models/minimind_omni/bundle.py:54: in _resolve_snapshot
+    return snapshot_download(model_id, local_files_only=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:84: in _inner_fn
+    validate_repo_id(arg_value)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+repo_id = '/home/mcig/minimind-3o'
+
+    def validate_repo_id(repo_id: str | None) -> None:
+        """Validate `repo_id` is valid.
+    
+        This is not meant to replace the proper validation made on the Hub but rather to
+        avoid local inconsistencies whenever possible (example: passing `repo_type` in the
+        `repo_id` is forbidden).
+    
+        Rules:
+        - Between 1 and 96 characters.
+        - Either "repo_name" or "namespace/repo_name"
+        - [a-zA-Z0-9] or "-", "_", "."
+        - "--" and ".." are forbidden
+    
+        Valid: `"foo"`, `"foo/bar"`, `"123"`, `"Foo-BAR_foo.bar123"`
+    
+        Not valid: `"datasets/foo/bar"`, `".repo_id"`, `"foo--bar"`, `"foo.git"`
+    
+        Example:
+        ```py
+        >>> from huggingface_hub.utils import validate_repo_id
+        >>> validate_repo_id(repo_id="valid_repo_id")
+        >>> validate_repo_id(repo_id="other..repo..id")
+        huggingface_hub.utils._validators.HFValidationError: Cannot have -- or .. in repo_id: 'other..repo..id'.
+        ```
+    
+        Discussed in https://github.com/huggingface/huggingface_hub/issues/1008.
+        In moon-landing (internal repository):
+        - https://github.com/huggingface/moon-landing/blob/main/server/lib/Names.ts#L27
+        - https://github.com/huggingface/moon-landing/blob/main/server/views/components/NewRepoForm/NewRepoForm.svelte#L138
+        """
+        if repo_id is None:
+            # Repo id is not always required
+            return
+    
+        if not isinstance(repo_id, str):
+            # Typically, a Path is not a repo_id
+            raise HFValidationError(f"Repo id must be a string, not {type(repo_id)}: '{repo_id}'.")
+    
+        if repo_id.count("/") > 1:
+>           raise HFValidationError(
+                "Repo id must be in the form 'repo_name' or 'namespace/repo_name':"
+                f" '{repo_id}'. Use `repo_type` argument if needed."
+            )
+E           huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+
+.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py:132: HFValidationError
+______________________ test_sdturbo_pipeline_real_weights ______________________
+
+    @pytest.mark.smoke
+    def test_sdturbo_pipeline_real_weights():
+        """Load real sd-turbo, run prepare_encode → denoise_step → post_decode."""
+>       from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
+E       ModuleNotFoundError: No module named 'diffusers'
+
+tests/test_smoke_gpu_e2e.py:30: ModuleNotFoundError
+_____________________ test_sdturbo_pipeline_matches_legacy _____________________
+
+    @pytest.mark.smoke
+    def test_sdturbo_pipeline_matches_legacy():
+        """SD-Turbo via DiffusionRunner vs legacy StableDiffusionPipeline.
+    
+        The gate is mean |Δ| < 2/255; exact equality is not claimed until the
+        seed is wired to a generator (docs/adr/0011-parity-standard.md).
+        """
+>       from diffusers import (
+            AutoencoderKL,
+            EulerDiscreteScheduler,
+            StableDiffusionPipeline,
+            UNet2DConditionModel,
+        )
+E       ModuleNotFoundError: No module named 'diffusers'
+
+tests/test_smoke_gpu_e2e.py:113: ModuleNotFoundError
+__________________________ test_smolvla_two_stage_e2e __________________________
+
+    @pytest.mark.smoke
+    def test_smolvla_two_stage_e2e():
+        """Run the two-stage smolvla pipeline through PipelineRunner.
+        Uses real SmolVLM backbone + real DiffusionRunner action stage.
+        """
+        from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+        from nanovllm_omni.config.registry import (
+            DeployConfig,
+            PipelineConfig,
+            StageConfig,
+            StageExecutionType,
+        )
+        from nanovllm_omni.engine.runner import PipelineRunner
+    
+        _smolvla_family = "nanovllm_omni.models.smolvla"
+    
+        # Build a two-stage pipeline config.
+        pipeline = PipelineConfig(
+            name="smolvla_test",
+            stages=(
+                StageConfig(
+                    stage_id=0,
+                    name="vlm",
+                    kind=StageExecutionType.LLM_AR,
+                    stage_factory=(_smolvla_family + ".vlm_stage", "_vlm_stage"),
+                    process_input=None,
+                    input_sources=(),
+                    is_terminal=False,
+                ),
+                StageConfig(
+                    stage_id=1,
+                    name="action",
+                    kind=StageExecutionType.DIFFUSION,
+                    stage_factory=(_smolvla_family + ".action_stage", "_action_stage"),
+                    process_input=(_smolvla_family + ".stage_processors", "vlm2action"),
+                    input_sources=(0,),
+                    is_terminal=True,
+                    final_output_type="actions",
+                ),
+            ),
+            default_deploy_config_name="smolvla.yaml",
+        )
+    
+        deploy = DeployConfig()
+        args = OmniEngineArgs(
+            model=SMOLVLM_MODEL,
+            dtype="bfloat16",
+            device="cuda",
+            extra={"allow_hf_download": False},
+        )
+    
+        # Add image + state to sampling params (synthetic demo path).
+        sampling = SamplingParams(
+            extra={
+                "image": torch.randn(3, 224, 224).byte(),  # fake HWC image
+                "state": torch.randn(7).float().numpy(),
+                "chunk_len": 10,
+                "action_dim": 7,
+            },
+        )
+    
+        runner = PipelineRunner(pipeline, deploy, args)
+>       result = runner.run_payload("pick up the red block", sampling)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_smoke_gpu_e2e.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+nanovllm_omni/engine/runner.py:307: in run_payload
+    payload, _ = self.run(prompt, sampling)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/engine/runner.py:298: in run
+    request_id = self.add_request(prompt, sampling)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/engine/runner.py:218: in add_request
+    self._submit(0, request, prompt)
+nanovllm_omni/engine/runner.py:178: in _submit
+    self._ensure_stages()[stage_index].add_request(
+    ^^^^^^^^^^^^^^^^^^^^^
+nanovllm_omni/engine/runner.py:124: in _ensure_stages
+    instance = factory(
+nanovllm_omni/models/smolvla/vlm_stage.py:38: in _vlm_stage
+    return SmolVLAVlmStage(deploy, args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <nanovllm_omni.models.smolvla.vlm_stage.SmolVLAVlmStage object at 0x12baf4590>
+deploy = DeployConfig(stages=())
+args = OmniEngineArgs(model='HuggingFaceTB/SmolVLM-500M-Instruct', gpu_memory_utilization=0.9, max_num_seqs=None, max_num_bat...e, dtype='bfloat16', tensor_parallel_size=1, trust_remote_code=True, device='cuda', extra={'allow_hf_download': False})
+
+    def __init__(self, deploy: Any, args: Any) -> None:
+        super().__init__()
+>       from lerobot.policies import make_pre_post_processors
+E       ModuleNotFoundError: No module named 'lerobot'
+
+nanovllm_omni/models/smolvla/vlm_stage.py:51: ModuleNotFoundError
+_____________ test_compiled_flow_step_drifts_within_recorded_bound _____________
+
+    @pytest.mark.smoke
+    def test_compiled_flow_step_drifts_within_recorded_bound() -> None:
+        import numpy as np
+    
+>       eager = _run("eager")
+                ^^^^^^^^^^^^^
+
+tests/test_smolvla_compile_parity.py:110: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cell = 'eager'
+
+    def _run(cell: str) -> dict:
+        result = subprocess.run(
+            [sys.executable, "-c", _CHILD, cell],
+            capture_output=True,
+            text=True,
+        )
+    
+>       assert result.returncode == 0, result.stderr[-2000:]
+E       AssertionError: Traceback (most recent call last):
+E           File "<string>", line 19, in <module>
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/smolvla/vlm_stage.py", line 38, in _vlm_stage
+E             return SmolVLAVlmStage(deploy, args)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/smolvla/vlm_stage.py", line 51, in __init__
+E             from lerobot.policies import make_pre_post_processors
+E         ModuleNotFoundError: No module named 'lerobot'
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/Users/mcig/Projects/nanovllm-omni/.venv/bin/python', '-c', '\nimport json\nimport sys\nimport...init__\n    from lerobot.policies import make_pre_post_processors\nModuleNotFoundError: No module named \'lerobot\'\n').returncode
+
+tests/test_smolvla_compile_parity.py:101: AssertionError
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_parity_smolvla.py:10: could not import 'lerobot': No module named 'lerobot'
+SKIPPED [1] tests/test_parity_smolvlm.py:11: could not import 'PIL.Image': No module named 'PIL'
+SKIPPED [1] tests/test_minimind_talker_parity.py:197: CUDA-only parity gate. Run it on the WSL box where the RTX 3050 baseline lives (ADR 0014: do not compare across machines):
+  ssh mcigs-wsl && cd ~/Projects/nanovllm-omni
+  export PYTHONPATH=$PWD:$PWD/third_party/nano-vllm KMP_DUPLICATE_LIB_OK=TRUE
+  uv run python -m pytest tests/test_minimind_talker_parity.py -m smoke -v
+SKIPPED [1] tests/test_minimind_talker_parity.py:211: CUDA-only parity gate. Run it on the WSL box where the RTX 3050 baseline lives (ADR 0014: do not compare across machines):
+  ssh mcigs-wsl && cd ~/Projects/nanovllm-omni
+  export PYTHONPATH=$PWD:$PWD/third_party/nano-vllm KMP_DUPLICATE_LIB_OK=TRUE
+  uv run python -m pytest tests/test_minimind_talker_parity.py -m smoke -v
+SKIPPED [1] tests/test_outputs.py:217: could not import 'PIL': No module named 'PIL'
+SKIPPED [1] tests/test_parity_minimind.py:22: CUDA required
+FAILED tests/test_minimind_graph_parity.py::test_thinker_graph_matches_eager - AssertionError: ocked
+    File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+    File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+    File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/minimind_omni/thinker.py", line 27, in <module>
+      from nanovllm.layers.attention import Attention
+    File "/Users/mcig/Projects/nanovllm-omni/third_party/nano-vllm/nanovllm/layers/attention.py", line 3, in <module>
+      import triton
+  ModuleNotFoundError: No module named 'triton'
+  
+  The above exception was the direct cause of the following exception:
+  
+  Traceback (most recent call last):
+    File "<string>", line 19, in <module>
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/entrypoints/omni.py", line 138, in generate
+      results = self._ensure_executor().run_many(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/executor.py", line 79, in run_many
+      request_ids.append(self._runner.add_request(prompt, sampling))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 218, in add_request
+      self._submit(0, request, prompt)
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 178, in _submit
+      self._ensure_stages()[stage_index].add_request(
+      ^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/engine/runner.py", line 120, in _ensure_stages
+      factory = resolve_stage_factory(stage.stage_factory)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/config/registry.py", line 117, in resolve_stage_factory
+      raise ImportError(f"stage registration {registration!r}: cannot import module") from e
+  ImportError: stage registration ('nanovllm_omni.models.minimind_omni.thinker', '_thinker_stage'): cannot import module
+  
+assert 1 == 0
+ +  where 1 = CompletedProcess(args=['/Users/mcig/Projects/nanovllm-omni/.venv/bin/python', '-c', '\nimport hashlib\nimport json\nim...rror: stage registration (\'nanovllm_omni.models.minimind_omni.thinker\', \'_thinker_stage\'): cannot import module\n').returncode
+FAILED tests/test_optim_bench.py::test_seed_determinism - huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+FAILED tests/test_optim_bench.py::test_prompts_complete - huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+FAILED tests/test_optim_bench.py::test_timer_envelope - huggingface_hub.errors.HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/mcig/minimind-3o'. Use `repo_type` argument if needed.
+FAILED tests/test_smoke_gpu_e2e.py::test_sdturbo_pipeline_real_weights - ModuleNotFoundError: No module named 'diffusers'
+FAILED tests/test_smoke_gpu_e2e.py::test_sdturbo_pipeline_matches_legacy - ModuleNotFoundError: No module named 'diffusers'
+FAILED tests/test_smoke_gpu_e2e.py::test_smolvla_two_stage_e2e - ModuleNotFoundError: No module named 'lerobot'
+FAILED tests/test_smolvla_compile_parity.py::test_compiled_flow_step_drifts_within_recorded_bound - AssertionError: Traceback (most recent call last):
+    File "<string>", line 19, in <module>
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/smolvla/vlm_stage.py", line 38, in _vlm_stage
+      return SmolVLAVlmStage(deploy, args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/mcig/Projects/nanovllm-omni/nanovllm_omni/models/smolvla/vlm_stage.py", line 51, in __init__
+      from lerobot.policies import make_pre_post_processors
+  ModuleNotFoundError: No module named 'lerobot'
+  
+assert 1 == 0
+ +  where 1 = CompletedProcess(args=['/Users/mcig/Projects/nanovllm-omni/.venv/bin/python', '-c', '\nimport json\nimport sys\nimport...init__\n    from lerobot.policies import make_pre_post_processors\nModuleNotFoundError: No module named \'lerobot\'\n').returncode

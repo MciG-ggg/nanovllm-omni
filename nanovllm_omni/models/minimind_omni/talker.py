@@ -67,6 +67,54 @@ def _rope_tables(
     return freqs_cos, freqs_sin
 
 
+class _LayerKVCache:
+    """One layer's settled keys/values, ``[B, length, num_key_value_heads, head_dim]``."""
+
+    def __init__(self) -> None:
+        self.key: torch.Tensor | None = None
+        self.value: torch.Tensor | None = None
+
+
+class TalkerKVCache:
+    """Windowed KV cache for one request (ADR 0022)."""
+
+    def __init__(self, num_layers: int) -> None:
+        self.layers = [_LayerKVCache() for _ in range(num_layers)]
+
+    @property
+    def length(self) -> int:
+        """Settled columns, which is also the absolute RoPE offset of the next window."""
+        first = self.layers[0].key
+        return 0 if first is None else first.shape[1]
+
+
+def _append_to_cache(
+    cache: _LayerKVCache, key: torch.Tensor, value: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge this step's columns into ``cache`` and keep only the settled ones.
+
+    The window carries the newest columns, which a later step recomputes, so
+    the trailing ``NUM_CODEBOOKS - 1`` columns stay out of the cache.
+    """
+    if cache.key is not None:
+        key = torch.cat([cache.key, key], dim=1)
+        value = torch.cat([cache.value, value], dim=1)
+    keep = max(0, key.shape[1] - (NUM_CODEBOOKS - 1))
+    cache.key = key[:, :keep].contiguous()
+    cache.value = value[:, :keep].contiguous()
+    return key, value
+
+
+def _window_attention_mask(window_len: int, key_len: int, device: torch.device) -> torch.Tensor:
+    """Causal inside the window; all cached columns are visible to all of it.
+
+    ``[window_len, key_len]``, True where a query may attend.
+    """
+    first_cached = key_len - window_len
+    queries = first_cached + torch.arange(window_len, device=device)[:, None]
+    return torch.arange(key_len, device=device)[None, :] <= queries
+
+
 class TalkerAttention(nn.Module):
     """Grouped-query attention with per-head RMSNorm and RoPE, dense full sequence."""
 
@@ -91,7 +139,13 @@ class TalkerAttention(nn.Module):
         self.q_norm = RMSNorm(config.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(config.head_dim, eps=config.rms_norm_eps)
 
-    def forward(self, hidden: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cache: _LayerKVCache | None = None,
+    ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden.shape
         query = self.q_proj(hidden).view(batch_size, seq_len, self.num_heads, self.head_dim)
         key = self.k_proj(hidden).view(batch_size, seq_len, self.num_key_value_heads, self.head_dim)
@@ -102,16 +156,25 @@ class TalkerAttention(nn.Module):
         key = self.k_norm(key)
         query, key = _apply_rotary(query, key, cos, sin)
         query = query.transpose(1, 2)
-        key = _repeat_key_value(key, self.num_key_value_groups).transpose(1, 2)
-        value = _repeat_key_value(value, self.num_key_value_groups).transpose(1, 2)
-        if seq_len > 1:
-            output = functional.scaled_dot_product_attention(query, key, value, is_causal=True)
+        if cache is None:
+            key = _repeat_key_value(key, self.num_key_value_groups).transpose(1, 2)
+            value = _repeat_key_value(value, self.num_key_value_groups).transpose(1, 2)
+            if seq_len > 1:
+                output = functional.scaled_dot_product_attention(query, key, value, is_causal=True)
+            else:
+                # Vendor takes its explicit path when the fused kernel does not
+                # apply; at one query the causal mask is empty, so a plain
+                # fp32 softmax reproduces it.
+                scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
+                output = functional.softmax(scores.float(), dim=-1).type_as(query) @ value
         else:
-            # Vendor takes its explicit path when the fused kernel does not
-            # apply; at one query the causal mask is empty, so a plain
-            # fp32 softmax reproduces it.
-            scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
-            output = functional.softmax(scores.float(), dim=-1).type_as(query) @ value
+            key, value = _append_to_cache(cache, key, value)
+            key = _repeat_key_value(key, self.num_key_value_groups).transpose(1, 2)
+            value = _repeat_key_value(value, self.num_key_value_groups).transpose(1, 2)
+            # The fused causal path assumes column 0 is the window's first query.
+            # Here the window sits at the end of the cache, so the mask is explicit.
+            mask = _window_attention_mask(seq_len, key.shape[2], hidden.device)
+            output = functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
         output = output.transpose(1, 2).reshape(batch_size, seq_len, -1)
         return self.o_proj(output)
 
@@ -139,8 +202,14 @@ class TalkerBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.talker_hidden_size, eps=config.rms_norm_eps)
         self.mlp = TalkerMLP(config)
 
-    def forward(self, hidden: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        hidden = hidden + self.self_attn(self.input_layernorm(hidden), cos, sin)
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cache: _LayerKVCache | None = None,
+    ) -> torch.Tensor:
+        hidden = hidden + self.self_attn(self.input_layernorm(hidden), cos, sin, cache)
         return hidden + self.mlp(self.post_attention_layernorm(hidden))
 
 
@@ -264,8 +333,13 @@ class MiniMindTalker(nn.Module):
         bridge: torch.Tensor,
         audio_codes: torch.Tensor,
         spk_emb: torch.Tensor | None = None,
+        cache: TalkerKVCache | None = None,
     ) -> list[torch.Tensor]:
-        """Return the eight codebook logits for the last sequence position."""
+        """Return the eight codebook logits for the last sequence position.
+
+        With ``cache`` the inputs are only the newest window and the cache
+        holds everything before it; without one they are the whole sequence.
+        """
         embeds = self.embed_tokens(audio_codes)
         if spk_emb is not None:
             if spk_emb.dim() == 1:
@@ -275,11 +349,15 @@ class MiniMindTalker(nn.Module):
         hidden = (
             self.embed_proj(bridge) * self.text_scale + self.codec_proj(embeds) * self.audio_scale
         )
+        # The window's absolute start is the cache length, so RoPE is indexed
+        # by position rather than from zero (ADR 0022).
+        start = 0 if cache is None else cache.length
         seq_len = hidden.shape[1]
-        cos = self.freqs_cos[:seq_len]
-        sin = self.freqs_sin[:seq_len]
-        for layer in self.layers:
-            hidden = layer(hidden, cos, sin)
+        cos = self.freqs_cos[start : start + seq_len]
+        sin = self.freqs_sin[start : start + seq_len]
+        layer_caches = cache.layers if cache is not None else [None] * len(self.layers)
+        for layer, layer_cache in zip(self.layers, layer_caches, strict=True):
+            hidden = layer(hidden, cos, sin, layer_cache)
         # The driver samples only ``logits[0, -1, :]`` (ADR 0022: a P2-level
         # shape change, not a bitwise one).
         return self.lm_head(self.norm(hidden[:, -1:, :]))
@@ -307,5 +385,6 @@ def load_talker(
 __all__ = [
     "MiniMindTalker",
     "TalkerConfig",
+    "TalkerKVCache",
     "load_talker",
 ]

@@ -104,3 +104,122 @@ an NVIDIA reference**."——**没有任何一处是拿 Apple Silicon 的输出�
   不是"速度等价"。
 - 本 ADR **不**处理 M5 NAX 路径（M2 Air 没有 tensor 单元）。
 - 本 ADR **不**改 ADR 0014 的双轨结论，也不改 ADR 0019 的分工。
+
+## 实施记录（2026-11-09）：三档判据落地，同 MLX 生态内的实测结论
+
+`tools/parity_check.py` 把上面第二节的三档判据做成可跑的工具。**参考臂是 `mlx-lm`
+自己的 AR 循环**（`mlx_lm.generate.generate_step` + `greedy_sampler`），被测臂是本仓库的
+`MlxStageRunner`。两个臂各加载一份权重，互不共享状态。
+
+### 环境与口径
+
+| 项 | 值 |
+|---|---|
+| 机器 | Apple Silicon M2 Air / 16 GB |
+| 版本 | mlx 0.32.4、mlx-lm 0.32.2、Metal toolchain `32023.921` |
+| 权重 | `~/models/minimind-3o/mlx-thinker`（8 层、hidden 768、8 heads、4 kv heads、head_dim 96、vocab 6400、`tie_word_embeddings=true`、`rope_theta` 1e6） |
+| dtype | `float16`（`float32` 也跑过，结论相同） |
+| 采样 | greedy：`temperature=0.0` / `top_p=1.0` / `top_k=0`，无随机流 |
+| 输入 | `nanovllm_omni/bench/prompts.py` 的 6 条 `BENCH_PROMPTS`，`open_thinking=False` |
+| `max_tokens` | 64 |
+| top-k | 5 |
+
+`logprobs` 两臂都拿得到，**没有退化**：参考臂直接收 `generate_step` 每步 yield 的
+`logprobs`（`[vocab]`，已做 log-softmax）；被测臂从 `runner.forward()` 返回的 logits
+自己算 `log_softmax`（fp32，避免 fp16 舍入自己决定排序）。工具在任一侧拿不到
+`logprobs` 时会退化成只报 `EXACT` / `FAIL` 并把原因写进 `reason`，这次没有触发。
+
+### 结论：`TOP_K_MATCH`，分歧位 `system_01@17`
+
+6 条 prompt 里 **5 条 `EXACT`**（`short_01` / `short_02` / `short_03` / `medium_01` /
+`medium_02`），1 条 `TOP_K_MATCH`：
+
+```
+prompt system_01 (67-token prompt, 64 generated)
+  verdict: TOP_K_MATCH at token 17
+    reference picked 2205, top-k 2205:-1.6172 2210:-1.6172 3648:-1.8672 697:-2.5312 607:-2.5391
+    candidate picked 2210, top-k 2210:-1.6158 2205:-1.6236 3648:-1.8736 607:-2.5377 697:-2.5377
+```
+
+一个 token 之差，且双方都落在对方的 top-2 里（参考臂的 2205/2210 在 fp16 下**连 logprob
+都打平**，都是 `-1.6172`）。按判据这是 `TOP_K_MATCH`，不是 `FAIL`。
+
+### 分歧的根因：prefill 形状，不是 decode 数学
+
+不是 kernel 或采样器算错，是**两份代码喂给 `mx.fast.scaled_dot_product_attention` 的
+prompt 长度不同**：
+
+- `mlx_lm.generate.generate_step` 分块 prefill：先跑 `prompt[:-1]`，再把最后一个 token
+  当一步 decode（`prefill_step_size=2048` 时 67 token 的 prompt 走 `66 + 1`）。
+- `MlxStageRunner.prepare_prefill` 一次跑完 67 个 token。
+
+同一份权重、同一个模型对象，只改 prefill 形状，**raw logits 就不再逐位相同**：
+
+| dtype | 67 一次 prefill vs 66+1 | 首步 `max|diff|` |
+|---|---|---|
+| float32 | 不完全相同 | 1.29e-05 |
+| float16 | 不完全相同 | 7.81e-03 |
+
+逐层对比最后一位置（fp16），差异从第 0 层就出现并逐层放大，**embedding 行完全相同**，
+所以差异全部来自 attention 与 MLP 在**不同序列长度**下的归约顺序，不是权重或 RoPE：
+
+```
+embed        max|diff|=0            identical=True
+layer0-out   max|diff|=0.00195312   identical=False
+layer2-out   max|diff|=0.0078125    identical=False
+layer5-out   max|diff|=0.125        identical=False
+layer7-out   max|diff|=0.0625       identical=False
+```
+
+反向验证：把被测臂的 prefill 也切成 `66 + 1`（`--split-prefill`），**6 条全是 `EXACT`**。
+所以这一档分歧的完整归因是「prefill 分块形状 → fp16 归约顺序 → 一个 token」，
+跟 MLX backend 的 kernel 正确性无关。
+
+### 复现
+
+```bash
+PYTHONPATH=$PWD:$PWD/third_party/nano-vllm \
+    uv run --no-project --with mlx --with mlx-lm --python 3.12 \
+    python tools/parity_check.py --max-tokens 64
+# 全 EXACT 的对照：
+PYTHONPATH=$PWD:$PWD/third_party/nano-vllm \
+    uv run --no-project --with mlx --with mlx-lm --python 3.12 \
+    python tools/parity_check.py --max-tokens 64 --split-prefill
+```
+
+### 实测到的 API 签名（写在报告里，避免下次再猜）
+
+```python
+mlx_lm.utils.load(path_or_hf_repo, tokenizer_config=None, model_config=None,
+                  adapter_path=None, lazy=False, return_config=False,
+                  revision=None, trust_remote_code=False) -> (model, tokenizer)
+mlx_lm.generate.generate_step(prompt: mx.array, model, stream=..., *, max_tokens=256,
+                              sampler=None, logits_processors=None, max_kv_size=None,
+                              prompt_cache=None, prefill_step_size=2048, kv_bits=None,
+                              kv_group_size=64, quantized_kv_start=5000,
+                              prompt_progress_callback=None, input_embeddings=None
+                              ) -> Generator[tuple[mx.array, mx.array]]  # (token, logprobs)
+mlx_lm.generate.generate(model, tokenizer, prompt, verbose=False, **kwargs) -> str
+mlx_lm.sample_utils.greedy_sampler(logprobs) -> mx.argmax(logprobs, axis=-1)
+mlx_lm.sample_utils.make_sampler(temp=0.0, top_p=0.0, min_p=0.0, min_tokens_to_keep=1,
+                                 top_k=0, xtc_probability=0.0, xtc_threshold=0.1,
+                                 xtc_special_tokens=None) -> Sampler
+qwen3.Model.__call__(self, inputs, cache=None, input_embeddings=None)
+```
+
+`mlx_lm.generate` 是**模块**不是函数，`from mlx_lm import generate` 拿到的是
+`mlx_lm.generate` 函数本身（`mlx_lm/__init__.py` re-export），要拿 `generate_step`
+必须 `importlib.import_module("mlx_lm.generate")` 或 `from mlx_lm.generate import ...`。
+
+`load` 默认给 `bfloat16`（checkpoint 存的），两个臂都显式 `set_dtype(mx.float16)`
+才能保证比的是同一份数值。
+
+### 这一轮没做的
+
+- **没有 CUDA 轨的对照**：按 ADR 0014 / 任务约束，CUDA 基线要等 WSL。
+- **没跑 `float32` 的全套 prompt**：只在 `system_01` 上验证了根因与 dtype 无关，
+  没有把 6 条都跑一遍 fp32 拿 `EXACT`。
+- **被测臂走的是 `MlxStageRunner` 的公开入口**（`prepare_prefill` / `forward` /
+  `prepare_decode`），**不是自研 paged kernel 那条路**。ADR 0023 的
+  `mlx_kernel/` 没有接进这条 parity 链，所以这个结论**不能**当作自研 kernel 的验收。
+

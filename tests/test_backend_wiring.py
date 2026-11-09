@@ -36,7 +36,7 @@ def test_mlx_capabilities() -> None:
 
     assert caps.varlen is False
     assert caps.graph is True
-    assert caps.max_batch == 1
+    assert caps.max_batch is None
 
 
 def test_unknown_backend_is_rejected() -> None:

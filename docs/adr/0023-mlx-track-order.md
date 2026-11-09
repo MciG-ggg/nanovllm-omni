@@ -190,6 +190,63 @@ block table 非连续且带 `-1` 洞）：
   （`float16_t` / `simd_sum` / `metal::max` 都来自 `mlx/backend/metal/kernels/utils.h`）。
 - **`verbose` 的打印走 fd 1**，绕过 `sys.stdout`；pytest 捕获下必须 `os.dup(1)`。
 
+### KV 池跨 step 存活的真实成本（2026-11-09 补，修正上一版的担忧）
+
+上一版担心「池必须跨 step 存活 → 每层整池拷贝 → 64 blocks 要 3.7 ms/step」。
+**实测把这个担忧消掉了**：测法是 8 个独立层池，每步 `pool = store_kv(..., pool)`
+**重绑定**（等价于「请求持有新数组、旧数组释放」= 跨 step 存活的真实形态），
+一次 `mx.eval` 收尾。
+
+| 池（每层 k+v，8 层合计） | eager 8 层/step | compiled 8 层/step |
+|---|---:|---:|
+| 4 blocks（12.6 MB） | 0.358 ms | 0.241 ms |
+| 16 blocks（50.3 MB） | 0.443 ms | 0.430 ms |
+| **64 blocks（201 MB）** | **1.156 ms** | **1.043 ms** |
+
+对照「每层单独 eval」（不跨层流水）是 2.05 / 3.48 / 8.38 ms——**一次 eval 收尾这个
+流水形态本身就把存储成本摊掉了**。
+
+三条结论：
+
+1. **跨 step 存活的 rebind 链是快的**：64 blocks、8 层、一步全部写完 **1.04–1.16 ms**，
+   不是担心的 3.7 ms。
+2. **`mx.compile` 在这里只买到 0–6%**，与上一版记的「约 2%」同量级。
+   **没有 donation 红利可拿**——`mx.compile(outputs=[pool])` 那条路复测依旧不成立。
+3. **池上限 64 blocks 的理由要换**：不再是「store 贵」，而是 **decode attention 的
+   O(context) 扫描**——单池 decode attention 在 64 blocks 时 **7.48 ms**
+   （1 block 0.32 ms，近似线性于 context_len）。**store 便宜，attention 贵。**
+   结论（64）碰巧仍然合理，依据要改。
+
+峰值内存：8 池 × 2 × 0.4 MiB 常驻 = 6.0 MiB，跑 20 步后 active 14.3 MiB，
+**没有随步数增长**（rebind 链确实在复用 buffer）。
+
+### 接线还没做完（未提交的半成品留在草稿区）
+
+`backend/paged_kv.py` 与 `backend/paged_attention.py` 已写完但**没有验证跑通**，
+`mlx_backend.py` 的接线改到一半是坏的（`DEFAULT_MAX_BLOCKS` 的 import 缺失导致 NameError；
+`PagedContext` 的所有权错：`prepare_*` 里整体替换了对象，但各层仍指向旧的那份）。
+**这三样都没有进版本库**——代码留在 `docs/dev/paged-kv-draft/`（本地草稿），
+接线的两个 bug 位置记在这里，供下一轮接手：
+
+1. `MlxConfig` 引用 `DEFAULT_MAX_BLOCKS` 但 import 被删 → 必须放在函数内或用字面量 64
+   （模块顶层 import 会让 `backend` 包在无 mlx 时炸，`test_registry_import_does_not_load_a_framework`
+   会失败）。
+2. **`PagedContext` 必须原地 mutate**（`self._paged.update(...)`），不能整体替换——
+   `wrap_model()` 把 ctx 注入了每个 `PagedAttention`，替换对象后各层还指着旧的。
+3. `PagedAttention.__call__` 的 decode 分支假定 `ctx.requests[row]` 与 batch 行一一对应，
+   `fresh = slice(length - len(slots), length)` 在 prefill 多 token 时正确、decode 时恒为 `[-1:]`，
+   **未测**。
+
+另外记下这一轮新测到的两条 MLX 事实：
+
+- **`mx.fast.rope` 的 `offset` 最多一维**（`[B]`）；标量 int 或 `[B]` 都行，
+  `[B,1]` / `[B,1,L,1]` / `[B,L]` 全部 `ValueError`。
+  **负起点可用**：`left_padding=[3,0,5]` → `offset=[-3,0,-5]` 时，三行各自的真实列与
+  `rope(offset=0)` **完全一致（diff 0.00e+00）**——这是 paged prefill 左补齐能复用
+  同一套 RoPE 的依据。
+- **用 `nn.Module` 子类包住 `mlx_lm` 的 `Attention` 并替换 `block.self_attn` 是可行的**：
+  `parameters()` 键集合不变、`set_dtype()` 仍能穿透、logits **逐位相同**。
+
 ### 未做
 
 - **kernel 还没接进 `MlxStageRunner`**（本轮刻意不碰 `mlx_backend.py`，避免和另一个

@@ -383,25 +383,9 @@ class TalkerOutput:
 
 
 # Vendor constant — single channel of the audio-buffer pad (model_omni.py).
-_AUDIO_PAD_TOKEN = 2049
-_AUDIO_STOP_TOKEN = 2050
-_AUDIO_SPK_TOKEN = 2051
-_AUDIO_VENDOR_TEMPERATURE = 0.2
-_AUDIO_REPETITION_PENALTY = 1.05
 # The vendor talker needs post-EOS filler rows to reach its own stop token;
 # 64 covers the 56 frames measured for the teacher-forced reference.
 _TALKER_TAIL = 64
-
-
-def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
-    """Whether the emission gate opens at ``step`` or at any later step.
-
-    The gate needs all eight codebooks active, ``idx[i] = step - 7 + i``.
-    ``idx`` only grows, so a codebook that stays inactive now stays inactive
-    forever: a closed gate is permanent, which is what lets the decode loop
-    stop early without changing the emitted frames.
-    """
-    return all(stop_positions[i] is None or step - 7 + i < stop_positions[i] for i in range(8))
 
 
 class TalkerStage(StageEngine):
@@ -411,9 +395,7 @@ class TalkerStage(StageEngine):
         super().__init__()
         self.deploy = deploy
         self.args = args
-        self._model: Any = None
-        self._device: str | None = None
-        self._config: Any = None
+        self._runner: Any = None
         # ADR 0020: the checkpoint stays as weights + parity reference. The
         # vendor class is the P1/P2 reference arm, not the default.
         extra = getattr(args, "extra", None) or {}
@@ -426,91 +408,25 @@ class TalkerStage(StageEngine):
         if self._kv == "windowed" and self._impl != "rewritten":
             raise ValueError("talker_kv='windowed' requires talker_impl='rewritten'")
 
-    def _ensure_model(self) -> Any:
-        """Load the talker selected by ``extra["talker_impl"]``."""
-        if self._model is not None:
-            return self._model
+    def _ensure_runner(self) -> Any:
+        """Build the talker runner for the selected backend."""
+        if self._runner is not None:
+            return self._runner
 
-        import os
+        from .bundle import _resolve_snapshot
 
-        import torch
-
-        from .bundle import _pick_device, _resolve_snapshot
-
-        model_dir = _resolve_snapshot(getattr(self.args, "model", None))
-        if self._impl == "rewritten":
-            from .talker import load_talker
-
-            device = _pick_device(getattr(self.args, "device", None))
-            self._model = load_talker(model_dir, device=device)
-            self._device = device
-            return self._model
-        if self._impl != "vendor":
-            raise ValueError(
-                f"unknown talker_impl {self._impl!r}; expected 'rewritten' or 'vendor'"
-            )
-
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
-        config_cls = get_class_from_dynamic_module("model_omni.OmniConfig", model_dir)
-        talker_cls = get_class_from_dynamic_module("model_omni.TalkerModule", model_dir)
-        config = config_cls.from_pretrained(model_dir)
-
-        talker = talker_cls(config).eval()
-        weights = os.path.join(model_dir, "pytorch_model.bin")
-        if os.path.isfile(weights):
-            state = torch.load(weights, map_location="cpu", weights_only=True)
-        else:
-            from safetensors.torch import load_file
-
-            state = {}
-            for name in sorted(os.listdir(model_dir)):
-                if name.endswith(".safetensors"):
-                    state.update(load_file(os.path.join(model_dir, name)))
-        talker.load_state_dict(
-            {
-                key[len("talker.") :]: value
-                for key, value in state.items()
-                if key.startswith("talker.")
-            },
-            strict=True,
+        extra = getattr(self.args, "extra", None) or {}
+        backend = get_backend(
+            extra.get("backend", "torch"),
+            device=getattr(self.args, "device", None),
+            dtype=getattr(self.args, "dtype", None),
         )
-        talker = talker.half().to("cuda")
-
-        self._model = talker
-        self._config = talker.talker_config
-        self._device = "cuda"
-        return talker
-
-    def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any, cache: Any = None) -> Any:
-        """Return the talker's 8 logit tensors for the given columns."""
-        import torch
-
-        if self._impl == "rewritten":
-            return self._model(bridge, audio_codes, spk_emb, cache)
-
-        talker = self._model
-        embeds = talker.embed_tokens(audio_codes)
-        if spk_emb is not None:
-            if spk_emb.dim() == 1:
-                spk_emb = spk_emb.unsqueeze(0)
-            mask = (audio_codes[:, 0, :] == _AUDIO_SPK_TOKEN).unsqueeze(-1)
-            embeds = torch.where(mask, talker.spk_proj(spk_emb).unsqueeze(1), embeds)
-        hidden = (
-            talker.embed_proj(bridge) * talker.text_scale
-            + talker.codec_proj(embeds) * talker.audio_scale
+        self._runner = backend.make_talker_runner(
+            _resolve_snapshot(getattr(self.args, "model", None)),
+            impl=self._impl,
+            kv=self._kv,
         )
-        seq_len = hidden.shape[1]
-        position_embeddings = (talker.freqs_cos[:seq_len], talker.freqs_sin[:seq_len])
-        for layer in talker.layers:
-            hidden, _ = layer(
-                hidden,
-                position_embeddings,
-                past_key_value=None,
-                use_cache=False,
-            )
-        hidden = talker.norm(hidden)
-        return talker.lm_head(hidden)
+        return self._runner
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Run the Talker: AR decode audio codes from bridge hidden states.
@@ -531,12 +447,14 @@ class TalkerStage(StageEngine):
         """
         import torch
 
+        from ...backend.base import TalkerRequest
+        from ...backend.talker_recipe import (
+            AUDIO_REPETITION_PENALTY,
+            AUDIO_VENDOR_TEMPERATURE,
+            NUM_CODEBOOKS,
+        )
         from .stage_processors import TalkerInputPayload
 
-        model = self._ensure_model()
-        device = self._device
-
-        # ---- Extract & validate inputs ----
         if not isinstance(payload, TalkerInputPayload):
             raise TypeError(
                 f"TalkerStage expected TalkerInputPayload, got {type(payload).__name__}"
@@ -549,33 +467,23 @@ class TalkerStage(StageEngine):
             raise ValueError("TalkerStage received empty text_token_ids")
 
         extra = getattr(sampling, "extra", None) or {}
-        # Seed here as well as in the thinker: the talker's own sampling is
-        # the last RNG consumer, and the first request in a process also
-        # consumes RNG building the talker weights (``_ensure_model`` above).
-        # Without this, the same (prompt, seed) yields different audio
-        # depending on how many requests the process served before.
-        # Mirrors ``models/smolvlm/stage.py``.
         seed = getattr(sampling, "seed", None)
-        if seed is not None:
-            torch.manual_seed(int(seed))
+        # Audio temperature is taken from the vendor default (0.2); the
+        # text ``sampling.temperature`` is for the thinker stage.
+        temperature = float(extra.get("audio_temperature", AUDIO_VENDOR_TEMPERATURE))
+        if temperature <= 1e-10:
+            temperature = 1e-5
         # ``watchdog_limit`` caps the number of talker decode steps the
         # way upstream's ``talker_max_steps_after_last_thinker_token``
         # does; unset means "replay every generated thinker row".
         watchdog_limit = int(extra["watchdog_limit"]) if extra.get("watchdog_limit") else None
-        # Audio temperature is taken from the vendor default (0.2); the
-        # text ``sampling.temperature`` is for the thinker stage.
-        temperature = float(extra.get("audio_temperature", _AUDIO_VENDOR_TEMPERATURE))
-        if temperature <= 1e-10:
-            temperature = 1e-5
 
-        bridge = bridge.unsqueeze(0).to(device=device, dtype=model.embed_proj[0].weight.dtype)
-        spk_emb = payload.speaker_embedding
         # ``start_pos``/``num_steps`` arrive precomputed from thinker2talker
         # (prompt length / generated-row count); no second split here.
         from collections.abc import Mapping as _Mapping
 
         meta = dict(payload.metadata) if isinstance(payload.metadata, _Mapping) else {}
-        bridge_len = bridge.shape[1]
+        bridge_len = bridge.shape[-2]
         start_pos = int(meta.get("start_pos", len(payload.prompt_token_ids)))
         num_steps = int(meta.get("num_steps", bridge_len - start_pos))
         if start_pos >= bridge_len:
@@ -586,117 +494,26 @@ class TalkerStage(StageEngine):
         if watchdog_limit is not None:
             num_steps = min(num_steps, watchdog_limit)
 
-        # ---- Staggered decode loop (mirrors vendor stream_generate) ----
-        # Vendor ``step`` is the count of generated tokens BEFORE this
-        # iteration's append, so the first iteration has ``step = 0`` and
-        # ``audio_step = -1`` (every codebook pads). Codebook ``i`` starts
-        # sampling real codes once ``audio_step >= i``.
-        audio_codes: list[list[int]] = [[] for _ in range(8)]
-        audio_stop_pos: list[int | None] = [None] * 8
-        emitted_frames: list[list[int]] = []
-
-        # Audio buffer: prompt columns stay pad; generated column
-        # ``start_pos + p`` holds ``audio_codes[i][p]`` for ``i < min(p, 8)``
-        # (vendor's diagonal backfill). Column ``start_pos + p`` is final as
-        # soon as codebook ``p - 1`` has sampled step ``p``, and
-        # ``audio_codes[i][p]`` never changes after it is appended — so each
-        # step writes only the column that just became final instead of
-        # rebuilding the whole buffer. Same values either way; ADR 0007 has
-        # the timings that motivated this.
-        buf = torch.full(
-            (1, 8, start_pos + num_steps),
-            _AUDIO_PAD_TOKEN,
-            dtype=torch.long,
-            device=device,
+        runner = self._ensure_runner()
+        frames = runner.generate(
+            TalkerRequest(
+                bridge=bridge,
+                num_steps=num_steps,
+                start_pos=start_pos,
+                temperature=temperature,
+                seed=seed,
+                speaker_embedding=payload.speaker_embedding,
+                repetition_penalty=AUDIO_REPETITION_PENALTY,
+            )
         )
 
-        cache = None
-        if self._kv == "windowed":
-            from .talker import TalkerKVCache
-
-            cache = TalkerKVCache(len(self._model.layers))
-
-        with torch.no_grad():
-            for step in range(num_steps):
-                audio_step = step - 1
-                # Vendor's forward sees ``audio_buffer`` BEFORE this
-                # iteration's append, so the sequence length is
-                # ``start_pos + step`` — the very first forward covers
-                # exactly the prompt.
-                seq_len = start_pos + step
-                column = step - 1
-                if column >= 0:
-                    filled = min(column, 8)
-                    if filled:
-                        buf[0, :filled, start_pos + column] = torch.tensor(
-                            [audio_codes[i][column] for i in range(filled)],
-                            dtype=torch.long,
-                            device=device,
-                        )
-
-                # The dense path recomputes the whole prefix every step
-                # (``use_cache=False`` on the parity path). The windowed path
-                # recomputes only the newest columns and reads the settled
-                # prefix from the cache, whose length is also the absolute
-                # RoPE offset (ADR 0022).
-                lo = cache.length if cache is not None else 0
-                logits_list = self._talker_logits(
-                    bridge[:, lo:seq_len, :], buf[:, :, lo:seq_len], spk_emb, cache
-                )
-
-                # Sample one code per codebook. HF ``model_omni.py``
-                # stream_generate: ``logits_i = al[0,-1,:] / 0.2``, then
-                # ``for prev in audio_codes[i][-3:]: logits_i[prev] /= 1.05``
-                # (last-3 of THAT layer only), then ``topk(50)`` +
-                # multinomial. The penalty is real in the HF reference —
-                # it is only absent from the vLLM refactor.
-                for i, logits in enumerate(logits_list):
-                    if audio_step < i:
-                        audio_codes[i].append(_AUDIO_PAD_TOKEN)
-                        continue
-                    # Match vendor exactly: keep the model dtype through
-                    # temperature scaling and top-k, then draw with
-                    # torch.multinomial from the 50-token softmax. Using the
-                    # generic Gumbel sampler consumes a different RNG path;
-                    # one different code recursively changes every later
-                    # audio-buffer column.
-                    logits_i = logits[0, -1, :].clone() / temperature
-                    for previous_code in audio_codes[i][-3:]:
-                        logits_i[previous_code] /= _AUDIO_REPETITION_PENALTY
-                    top_value, top_index = logits_i.topk(50)
-                    sampled = torch.multinomial(torch.softmax(top_value, dim=-1), 1)
-                    code = top_index[sampled].item()
-                    audio_codes[i].append(code)
-                    if audio_stop_pos[i] is None and code >= 2048:
-                        audio_stop_pos[i] = len(audio_codes[i]) - 1
-
-                # Vendor break check runs BEFORE the append/emission.
-                if audio_codes[7] and audio_codes[7][-1] == _AUDIO_STOP_TOKEN:
-                    break
-
-                # HF emission gate: ``audio_step >= 7`` with the diagonal
-                # ``frame[i] = audio_codes[i][step - 7 + i]`` and the
-                # active-layer filter ``stop_pos[i] is None or
-                # step - 7 + i < stop_pos[i]`` over all 8 layers.
-                if audio_step >= 7:
-                    if _can_emit_frame(audio_stop_pos, step):
-                        idx = [step - 7 + i for i in range(8)]
-                        emitted_frames.append([audio_codes[i][idx[i]] for i in range(8)])
-                    else:
-                        # A closed gate never reopens, so every remaining step
-                        # would be a full-sequence forward with no observable
-                        # effect. Stopping here keeps the frames byte-identical.
-                        break
-
-        # ---- Pack output ----
-        # ``emitted_frames`` mirrors the vendor: one row per emitted
-        # frame, each row is the diagonal ``audio_codes[i][step - 7 + i]``.
-        # Truncation is no longer needed because we only ever appended
-        # full 8-code rows.
-        if not emitted_frames:
-            audio_codes_tensor = torch.zeros(0, 8, dtype=torch.long)
+        # ``frames`` mirrors the vendor: one row per emitted frame, each row
+        # is the diagonal ``audio_codes[i][step - 7 + i]``. Truncation is
+        # not needed because only full 8-code rows are ever appended.
+        if not frames:
+            audio_codes_tensor = torch.zeros(0, NUM_CODEBOOKS, dtype=torch.long)
         else:
-            audio_codes_tensor = torch.tensor(emitted_frames, dtype=torch.long)
+            audio_codes_tensor = torch.tensor(frames, dtype=torch.long)
         return TalkerOutput(audio_codes=audio_codes_tensor.cpu())
 
 

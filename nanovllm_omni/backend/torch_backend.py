@@ -22,9 +22,21 @@ from .base import BackendCapabilities
 class TorchBackend:
     """Torch + CUDA (or any device the fork accepts)."""
 
-    device: str = "cuda"
-    dtype: str = "float16"
+    device: str | None = None
+    """The torch device; ``None`` means the local one (cuda, else mps, else cpu)."""
+
+    dtype: str | None = None
+    """The torch dtype; ``None`` means float16, the dtype the released weights ship in."""
+
     name: str = "torch"
+
+    def __post_init__(self) -> None:
+        if self.device is None:
+            from .device import default_torch_device
+
+            object.__setattr__(self, "device", default_torch_device())
+        if self.dtype is None:
+            object.__setattr__(self, "dtype", "float16")
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -48,6 +60,17 @@ class TorchBackend:
         from ..engine.stage_runner import StageRunner
 
         return StageRunner(model_class=model_class, config=config)
+
+    def make_talker_runner(self, model_path: str, **kwargs: Any) -> Any:
+        """Build the torch talker runner."""
+        from .torch_talker import TorchTalkerRunner
+
+        return TorchTalkerRunner(
+            model_path,
+            device=kwargs.pop("device", None) or self.device,
+            dtype=kwargs.pop("dtype", None) or self.dtype,
+            **kwargs,
+        )
 
 
 __all__ = ["TorchBackend"]

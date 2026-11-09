@@ -129,6 +129,40 @@ class StageRunner(Protocol):
         """
 
 
+@dataclass(frozen=True)
+class TalkerRequest:
+    """One talker decode: the thinker's bridge rows in, audio codes out."""
+
+    bridge: Any
+    """Bridge hidden states, ``[T, hidden]`` -- one row per thinker position."""
+
+    num_steps: int
+    """How many decode steps to run; the emission gate opens at step 8."""
+
+    start_pos: int
+    """Where the generated rows start; the prompt occupies everything before."""
+
+    temperature: float = 0.2
+    """Audio temperature. The vendor default is 0.2, not the text one."""
+
+    seed: int | None = None
+    """Seed for the audio draw; ``None`` leaves the device's own stream."""
+
+    speaker_embedding: Any | None = None
+    """Optional speaker embedding, used at the speaker-token positions."""
+
+    repetition_penalty: float = 1.05
+    """Vendor's last-3 penalty, applied per codebook."""
+
+
+@runtime_checkable
+class TalkerRunner(Protocol):
+    """Decodes one talker request on one device."""
+
+    def generate(self, request: TalkerRequest) -> list[list[int]]:
+        """Return the emitted frames; one list of eight codes per frame."""
+
+
 @runtime_checkable
 class Backend(Protocol):
     """A device plus the way AR steps run on it."""
@@ -149,5 +183,14 @@ class Backend(Protocol):
     def make_stage_runner(self, model_class: type, config: Any) -> StageRunner:
         """Build the runner that executes AR steps for one stage."""
 
+    def make_talker_runner(self, model_path: str, **kwargs: Any) -> TalkerRunner:
+        """Build the runner that decodes talker audio codes.
 
-__all__ = ["Backend", "BackendCapabilities", "StageRunner"]
+        A talker is not an AR text step: it reads the thinker's bridge
+        rows, emits eight codebook logits per step, and samples them on a
+        staggered schedule. That is its own contract, so it gets its own
+        runner rather than being squeezed into ``StageRunner``.
+        """
+
+
+__all__ = ["Backend", "BackendCapabilities", "StageRunner", "TalkerRequest", "TalkerRunner"]

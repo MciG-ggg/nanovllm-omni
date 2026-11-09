@@ -5,7 +5,7 @@ still active. ``idx[i] = step - 7 + i`` only grows, so a closed gate never
 reopens; that permanence is what makes the early exit output-identical.
 """
 
-from nanovllm_omni.models.minimind_omni.stage import _can_emit_frame
+from nanovllm_omni.backend.talker_recipe import can_emit_frame as _can_emit_frame
 
 
 def test_gate_closes_when_a_stopped_codebook_is_reached() -> None:

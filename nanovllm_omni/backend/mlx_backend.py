@@ -42,10 +42,9 @@ from .base import BackendCapabilities
 class MlxConfig:
     """Per-stage config for the MLX backend.
 
-    The three graph knobs are CUDA-fork specific: MLX has no
-    ``enforce_eager`` / graph-capture split, and ``mx.compile`` decides
-    for itself. Stages write them unconditionally, so the fields have to
-    exist.
+    ``enforce_eager=False`` asks for ``mx.compile`` on the decode step;
+    ``graph_max_seq_len`` is then the fixed KV capacity the graph is built
+    over, since a reallocated cache changes shapes and re-traces.
     """
 
     model_path: str

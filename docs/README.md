@@ -86,6 +86,8 @@
 
 ## 实施文档（`docs/dev/`）
 
+> **注意**：`docs/dev/` 整个目录在 `.gitignore` 里（`.gitignore:103`），**这些是本机的工作文档，不进版本库**。ADR 0002 / 0005 / 0013 / 0023 引用的 `docs/dev/*.md` 在新 clone 上会缺。`docs/perf/` 相反：README 与 `aligned/` 是被跟踪的。
+
 | 文件 | 内容 |
 |---|---|
 | [`mlx-track.md`](dev/mlx-track.md) | Mac 轨怎么装 mlx / mlx-lm、怎么跑、怎么装 Metal Toolchain |

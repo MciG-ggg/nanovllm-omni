@@ -136,6 +136,68 @@ MLX 的 `mx.fast.rope` 存在（`offset` 接受 int 或 array），ADR 0021 说�
 传 array 会 `ValueError: Slice indices must be integers or None`
 → **paged 路径不能用 `KVCache` 承载 offset**，dense 对照臂要用 `BatchKVCache`。
 
+### Metal paged decode kernel 的实施结果（2026-11-09）
+
+kernel 本体可用。数值对照（3 条不等长序列 `context_lens=[600, 257, 300]`，
+block table 非连续且带 `-1` 洞）：
+
+| 对照 | max abs diff | 相对差 |
+|---|---:|---:|
+| paged decode vs `BatchKVCache` dense + SDPA（fp16） | 6.10e-05（ref 幅值 0.415） | 1.5e-04 |
+| paged decode vs numpy fp32 独立参考 | 1.13e-04 | 1.86e-03 |
+
+`store_kv` 的 `-1` 处理：有效的两个 slot 正确落位，`-1` 那一行的值在整池里出现
+**0 次**，池里其他行原样保留，**传入的原池数组未被修改**（再次确认 kernel 不能原地写）。
+
+**池大小上限定为 64 blocks**（block_size 256 → 16k token，约 12 MB/池），
+依据是上面那张表里 64 blocks 那一行：单层写入 0.46 ms，×8 层 = 3.7 ms，已经顶到
+整个 decode step（2.3–4.0 ms）的上沿，再大就是纯倒退。
+
+### 上一版写的第三条修正**不成立**，按实测改口
+
+`docs/dev/mlx-varlen-kernel-interface.md` 原来写「把 store 放进 `mx.compile` 图里 →
+12 MB 池 2.40 ms 降到 0.60 ms」。**复现不出来**：
+
+| 形态（12 MB 池，8 层 × k/v） | wall |
+|---|---:|
+| 同一 compiled graph，池作为参数传入传出 | 5.234 ms |
+| 同一 graph 的 eager 版 | 5.344 ms |
+| 同一 graph 去掉 store（对照） | 0.027 ms |
+
+**编译只买到约 2%。** 原因是 `mx.compile(outputs=[pool])`、以及池作为参数传入传出，
+**都不产生 donation** —— 调用方仍持有池的引用，MLX 只能分配新 buffer，于是每层把
+12 MB 池整个拷一遍。
+
+测到的 0.024 ms/step 是**单池 rebind 链**（调用方丢掉引用，`pool = store(pool, ...)`
+逐步重绑定）的情形，**与"池要跨 step 存活"不是一回事**——原来那条结论把两件事混成了一条。
+**本轮最大的测量缺口**：8 个独立池各自 rebind 的正确测量没有做。
+在补上这个测量之前，不能说"store 进编译图"是可行方案。
+
+### MLX 0.32.4 的 gotcha（写 kernel 才会撞到）
+
+- **`grid=` 是总线程数，不是 threadgroup 数。** `grid=(8,1,1), threadgroup=(32,1,1)`
+  只起 8 个线程、1 个 threadgroup，不是 8 组。早期几个探针因此全是"一个线程在跑"，
+  得到过假的等价结论。
+- **template 只接受 `Dtype` / `int` / `bool`，不接受 float。** 传 `("SCALE", 0.25)`
+  直接 `ValueError: Invalid template argument` → 标量（如 scale）必须走 buffer。
+- **只有 `input_names` 会变成 buffer**，没有别的通道传一个标量参数。
+- 注入的线程属性是 `uint3`，必须 `.x`，不能当标量用。
+- **`atomic_outputs=True` 编译不过**（`_atomic` 在 device 地址空间上不可赋值）。
+- 单输出也返回 list（长度 1）。
+- **MLX 0.32.4 没有任何 `metallib` 加载 API**（`mx.fast.precompiled_cuda_kernel` 有 CUDA
+  兄弟，Metal 没有）→ 只能 JIT from source。构建脚本的作用是"在 JIT 之前先失败"。
+- **`verbose=True` 打出来的源码不是完整 translation unit** —— 缺 MLX 自己的 prelude
+  （`float16_t` / `simd_sum` / `metal::max` 都来自 `mlx/backend/metal/kernels/utils.h`）。
+- **`verbose` 的打印走 fd 1**，绕过 `sys.stdout`；pytest 捕获下必须 `os.dup(1)`。
+
+### 未做
+
+- **kernel 还没接进 `MlxStageRunner`**（本轮刻意不碰 `mlx_backend.py`，避免和另一个
+  subagent 撞文件）。接线是下一轮。
+- prefill 的 varlen kernel 没写（本轮只做 decode）。
+- 上面说的「8 池各自 rebind」的测量没做。
+- trace 次数没测。
+
 ## 边界
 
 - 本 ADR **不**承诺 MLX 轨能跑完整 omni 管线。MiniMind-O 的完整管线需要 talker，

@@ -58,6 +58,23 @@ class StageRunner(Protocol):
     logits and token ids on the way out.
     """
 
+    config: Any
+    """The backend's per-stage config object.
+
+    Stages write their graph-choice knobs onto it before the runner is
+    built, so it has to be a mutable object on every backend.
+    """
+
+    def set_context(self, is_prefill: bool, **kwargs: Any) -> None:
+        """Install whatever per-step state the backend's attention reads.
+
+        The fork keeps this in module-level globals; MLX keeps it in the
+        cache object. Either way the stage does not know which.
+        """
+
+    def reset_context(self) -> None:
+        """Clear the per-step state installed by ``set_context``."""
+
     def prepare_prefill(self, seqs: list[Any]) -> tuple[Any, Any]:
         """Build the batch tensors for a prefill step."""
 

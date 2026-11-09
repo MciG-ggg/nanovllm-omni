@@ -1,6 +1,6 @@
 # ADR 0013: stage 层的 backend 接缝（torch / MLX）
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 - 关联: ADR 0004（模型与引擎边界）、ADR 0005（图策略在 stage）、0010（并发不是杠杆）、
   0012（请求生命周期与批处理）
@@ -52,10 +52,18 @@ stage 层隐式绑在 torch + CUDA 上，而且这个绑定比看上去深：
 `nanovllm_omni/backend/base.py` 定义两个协议：
 
 - `StageRunner`——一步 AR 执行：`prepare_prefill` / `prepare_decode` / `prepare_sample` /
-  `forward` / `sample` / `bridge_hidden`。进出边界上的 `Sequence` 是 fork 的纯 Python 对象，
+  `forward` / `sample` / `bridge_hidden` / `model` / `config`，加 `set_context` /
+  `reset_context`。进出边界上的 `Sequence` 是 fork 的纯 Python 对象，
   跨边界的只有 batch 张量与 logits。
 - `Backend`——`name` / `device` / `dtype` / `capabilities`，加 `make_config` 与
   `make_stage_runner`。
+
+`set_context` / `reset_context` 在协议里，是因为 stage 会调：fork 把每步的状态放在
+模块级全局里，MLX 放在 cache 对象里。stage 不该知道是哪一种。
+
+`config` 也在协议里：stage 在建 runner **之前**往 config 上写 graph 相关的旋钮
+（`enforce_eager` / `max_capture_bs` / `graph_max_seq_len`），所以每个 backend 的
+config 都得是可写的普通对象。
 
 `BackendCapabilities` 三项：`varlen`（能否一个 forward 承载 ragged 序列）、
 `graph`（有没有 graph capture 等价物）、`max_batch`。
@@ -96,9 +104,9 @@ stage 层隐式绑在 torch + CUDA 上，而且这个绑定比看上去深：
 - **MLX backend 未经实测**：本机没装 `mlx-lm`，模型权重也不在 Mac 上。
   代码按 `mlx_lm 0.32.2` 的实际 API 写（`utils.load`、`models.cache.make_prompt_cache`、
   `models.cache.BatchKVCache`、`generate.BatchGenerator`），**但没有跑过**。
-- **MLX 还不能驱动这两个 stage**：`ThinkerStage` / `SmolVLMStage` 仍会往 config 上写
-  `enforce_eager` / `max_capture_bs` / `graph_max_seq_len`，而 `MlxConfig` 是 frozen
-  dataclass；decode 循环也直接构造 fork `Scheduler` 并读 fork `Config` 字段。
+- **MLX 还不能驱动这两个 stage**：decode 循环直接构造 fork `Scheduler`（这部分与框架无关，
+  所以能复用），但 `decode_minimind` 仍按 fork `Config` 的字段走。`MlxConfig` 已改成
+  可写 dataclass，三个 graph 旋钮存在但 MLX 不读（`mx.compile` 自己决定）。
   `extra["backend"]` 当前只有 `torch` 能走通。
 - **torch backend 在 Mac 上跑不了**：triton 无 macOS wheel（见上）。本仓库的 Mac 路线
   只能是 MLX backend。
@@ -108,6 +116,12 @@ stage 层隐式绑在 torch + CUDA 上，而且这个绑定比看上去深：
 
 ## 未验证
 
+- **torch 路径的输出是否逐位不变**：本机没有 GPU，跑不了真实解码。
+  依据是代码级等价：`_sampler_with_rp` 的调用参数、次序、次数不变；
+  `stage_runner.forward` 内部仍是 `model_runner.run_model`；
+  `bridge_hidden()` 内部仍是 `model.get_bridge_hidden()`；
+  `torch.cuda.synchronize()` 的位置没动，stage_ms 口径不变。
+  **需要在 WSL 上跑一次真实 MiniMind 解码确认。**
 - MLX backend 的任何数字（本机没跑过模型）。
 - `vllm-metal` 的 Metal kernel 是否可复用、license 是否兼容（未查）。
 - `mx.compile` 在真实模型上的收益（本机只测了 20 轮小算子链，4.91× 是这个量级的数，

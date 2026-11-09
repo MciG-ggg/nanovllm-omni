@@ -28,13 +28,22 @@ from typing import Any
 from .base import BackendCapabilities
 
 
-@dataclass(frozen=True)
+@dataclass
 class MlxConfig:
-    """Per-stage config for the MLX backend."""
+    """Per-stage config for the MLX backend.
+
+    The three graph knobs are CUDA-fork specific: MLX has no
+    ``enforce_eager`` / graph-capture split, and ``mx.compile`` decides
+    for itself. Stages write them unconditionally, so the fields have to
+    exist.
+    """
 
     model_path: str
     dtype: str = "float16"
     device: str = "gpu"
+    enforce_eager: bool = True
+    max_capture_bs: int = 1
+    graph_max_seq_len: int = 2048
 
 
 class MlxStageRunner:
@@ -53,7 +62,8 @@ class MlxStageRunner:
         self._mx = mx
         self.config = config
         self._model, self.tokenizer = mlx_load(config.model_path)
-        self._caches: dict[Any, Any] = {}
+        self._cache: Any = None
+        self._is_prefill = False
 
     # -- batch preparation -------------------------------------------------
 
@@ -89,15 +99,20 @@ class MlxStageRunner:
         inputs_embeds: Any | None = None,
     ) -> Any:
         """Run the model for one step; returns logits."""
-        cache = self._caches.get(id(input_ids))
-        if cache is None:
+        if is_prefill or self._cache is None:
             from mlx_lm.models.cache import make_prompt_cache
 
-            cache = make_prompt_cache(self._model)
-            self._caches[id(input_ids)] = cache
-        out = self._model(input_ids, cache=cache)
+            self._cache = make_prompt_cache(self._model)
+        out = self._model(input_ids, cache=self._cache)
         logits = out.logits if hasattr(out, "logits") else out
         return logits[:, -1, :]
+
+    def set_context(self, is_prefill: bool, **kwargs: Any) -> None:
+        """MLX keeps the per-step state in the cache object, not in globals."""
+        self._is_prefill = is_prefill
+
+    def reset_context(self) -> None:
+        """MLX keeps the per-step state in the cache object, not in globals."""
 
     def sample(self, logits: Any, temperatures: Any, sampler: Any = None) -> Any:
         """Draw one token per sequence."""

@@ -43,6 +43,70 @@ CUDA 轨的 `audio_codes` / token 序列比（ADR 0021 的 token 级一致）。
 - **采样配置必须严格对齐**才能拿到 token 级一致（ADR 0021）：
   temperature / top-k / top-p / seed / max_tokens 一个都不能差。
 
+## 实施记录（2026-11-09）
+
+### 已落地
+
+- **权重**：`jingyaogong/minimind-3o` 下载到 `~/models/minimind-3o`（不进 git）。
+  `scripts/convert_minimind_thinker_mlx.py` 把 `model.*` + 可选 `lm_head.weight`
+  转成 `mlx_lm` 的 qwen3 目录 `~/models/minimind-3o/mlx-thinker`，丢掉
+  `talker.*`。转换不需要 mlx，只用项目 venv 的 torch + safetensors。
+  同一 checkpoint 转两次的 `model.safetensors` sha256 相同。
+- **模型复用**：`mlx_lm.models.qwen3` 的布局与 checkpoint 一致（separate
+  q/k/v/o、per-head `q_norm`/`k_norm`、swiglu），不需要重映射 key。配置取
+  `intermediate_size=2432`、`head_dim=96`、`rope_theta=1e6`、8 层。
+  `lm_head` 与 `embed_tokens` 逐位相同，故置 `tie_word_embeddings=true` 并
+  不写 `lm_head.weight`。
+- **backend**：`MlxStageRunner` 走完整 AR 循环（prefill → 采样 → 逐 token
+  decode）。单序列用 `KVCache`；多序列左补齐后用 `BatchKVCache`（逐行 RoPE
+  offset + pad 列 mask）。`capabilities.max_batch` 从 1 改为 `None`。
+  `bridge_hidden()` 返回 `None`——milestone 1 没有 talker，`bridge_layer`
+  的位置留在模型侧，未接线。
+- **采样**：对齐 CUDA 的
+  `models/minimind_omni/stage_runner.py::_sampler_with_rp`：temperature 下限
+  1e-5、full-history repetition penalty（默认 1.05）、top-p、每序列独立
+  seed、`max_tokens`。`top_k` 不生效：vendor 文本路径本来就不用它，只有音频
+  codebook 用。
+- **dense batch**：`generate_mlx_batch` 是静态批，补齐到最长成员，整批跑到
+  最慢成员结束。这是 ADR 0015 拒绝的过渡形态，只用于在 varlen kernel 之前
+  拿到 MLX 轨的批数字。
+
+### 实测（单机，不与 CUDA 相减）
+
+硬件为 MacBook Air M2（16 GB，11.84 GiB 工作集），mlx 0.32.4 / mlx-lm 0.32.2，
+代码 `698856c`，fp16，`temperature=0`（钳 1e-5）、`top_p=1`、rp 1.05、
+`max_tokens=32`、seed 42，warmup 2 / runs 5：
+
+| 形态 | TTFT p50 | decode p50 | 峰值内存 |
+|---|---:|---:|---:|
+| 单序列，45 token prompt | 6.06 ms | 4.33 ms/step | 145.5 MiB |
+| 4 序列 dense batch，补齐到 53 | 20.77 ms | 6.63 ms/step | 214.5 MiB |
+
+完整条件、输出 token 与限制见
+`docs/perf/minimind-thinker-mlx-2026-11-09.md`。
+
+### 验证
+
+- 同一组 token `[1, 80, 301, 108, 80, 916]`，MLX（bf16）与 vendor
+  `MiniMindOmni`（CPU fp32）的 argmax/top-5 相同。
+- dense batch 与单序列在相同采样配置下逐 token 相同（2 条 prompt × 8 token）。
+  这个检查抓到并修掉了一个批路径 bug：prefill 后没把首个采样 token 写回
+  `Sequence.last_token`，导致后续输出整体错一位。
+- top-p 分支实际执行过（`--top-p 0.9 --temperature 0.7`）。
+- `pytest tests/`：8 failed / 286 passed / 6 skipped。8 个失败与改动前一致，
+  全部是缺 `diffusers` / `lerobot` / `triton` 的既有失败。
+
+### 未完成
+
+- **没有 varlen / paged KV / Metal kernel**。ADR 0021 的 kernel 路线只做到
+  接口设计：`docs/dev/mlx-varlen-kernel-interface.md`。Metal Toolchain 已装好，
+  `mx.fast.metal_kernel` 可用，但 kernel 源码与接线未写。
+- **ADR 0021 的 token 级一致未验证**：本机没有 CUDA 基线。另外两边 RNG 流
+  不同（`torch.multinomial` vs `mx.random.categorical`），相同 seed 只对齐
+  参数，不对齐随机流；真要对 token，需要先统一采样器。
+- **bridge_layer / talker / code2wav 未接**。thinker-only 不需要 bridge 行。
+- **`mx.compile` 未测**：本 backend 声明 `graph=True`，但这批数字是 eager。
+
 ## 边界
 
 - 本 ADR **不**承诺 MLX 轨能跑完整 omni 管线。MiniMind-O 的完整管线需要 talker，

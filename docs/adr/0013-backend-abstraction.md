@@ -73,7 +73,7 @@ config 都得是可写的普通对象。
 | backend | 状态 | 说明 |
 |---|---|---|
 | `torch` | 可用，行为不变 | 转发 fork 的 `ModelRunner` / `Sampler`；`varlen=True`、`graph=True` |
-| `mlx` | 骨架，**一次一序列** | 用 `mlx_lm.utils.load` 加载；`varlen=False`、`graph=True`、`max_batch=1` |
+| `mlx` | 可用（thinker-only）；单序列 + dense batch | 用 `mlx_lm.utils.load` 加载；`varlen=False`、`graph=True`（`mx.compile` 未用）、`max_batch=None`（多序列左补齐）。数字见 ADR 0023 |
 
 `nanovllm_omni/backend/__init__.py` 是注册表（`get_backend` / `register_backend` /
 `available_backends`）。默认是 `torch`，且选中它必须让 pipeline 与接缝之前逐位相同。
@@ -98,16 +98,18 @@ config 都得是可写的普通对象。
 
 ## 边界（明确没做到的）
 
-- **MLX backend 一次只跑一个序列**：`prepare_prefill` / `prepare_decode` 遇到多于一个
-  sequence 直接 `NotImplementedError`。接口允许批，实现还没有。
+- **MLX backend 没有 varlen**：多序列走左补齐 + `BatchKVCache`，补齐按最长成员
+  付费，整批跑到最慢成员结束。这是 ADR 0015 拒绝的过渡形态；真 CB 要等
+  `docs/dev/mlx-varlen-kernel-interface.md` 的 kernel 落地。
 - **MLX backend 没有 bridge hidden**：MiniMind-O 的 thinker → talker 桥在 MLX 侧不存在。
-- **MLX backend 未经实测**：本机没装 `mlx-lm`，模型权重也不在 Mac 上。
-  代码按 `mlx_lm 0.32.2` 的实际 API 写（`utils.load`、`models.cache.make_prompt_cache`、
-  `models.cache.BatchKVCache`、`generate.BatchGenerator`），**但没有跑过**。
-- **MLX 还不能驱动这两个 stage**：decode 循环直接构造 fork `Scheduler`（这部分与框架无关，
-  所以能复用），但 `decode_minimind` 仍按 fork `Config` 的字段走。`MlxConfig` 已改成
-  可写 dataclass，三个 graph 旋钮存在但 MLX 不读（`mx.compile` 自己决定）。
-  `extra["backend"]` 当前只有 `torch` 能走通。
+- **MLX backend 已在本机实测 thinker-only**：权重转换、单序列 AR 循环与
+  4 序列 dense batch 都跑通；数字与限制见 ADR 0023 与
+  `docs/perf/minimind-thinker-mlx-2026-11-09.md`。未测 `mx.compile`，也未取得
+  CUDA 基线做 token 级一致。
+- **MLX 还不能驱动完整 pipeline**：decode 循环直接构造 fork `Scheduler`（这部分与
+  框架无关，所以能复用），但 `decode_minimind` 仍按 fork `Config` 的字段走；
+  `extra["backend"]` 当前只有 `torch` 能走完整 stage。MLX 的 thinker 目前由
+  `tools/bench_mlx_thinker.py` 驱动。
 - **torch backend 在 Mac 上跑不了**：triton 无 macOS wheel（见上）。本仓库的 Mac 路线
   只能是 MLX backend。
 - `mlx_lm.generate.BatchGenerator` 自带一套增量批处理（`PromptProcessingBatch`
@@ -122,7 +124,8 @@ config 都得是可写的普通对象。
   `bridge_hidden()` 内部仍是 `model.get_bridge_hidden()`；
   `torch.cuda.synchronize()` 的位置没动，stage_ms 口径不变。
   **需要在 WSL 上跑一次真实 MiniMind 解码确认。**
-- MLX backend 的任何数字（本机没跑过模型）。
+- **MLX 与 CUDA 的 token 级一致**（ADR 0021）：本机没有 CUDA 基线，且两边
+  RNG 流不同。MLX 侧自己的单序列 / dense batch 数字已实测，见 ADR 0023。
 - `vllm-metal` 的 Metal kernel 是否可复用、license 是否兼容（未查）。
 - `mx.compile` 在真实模型上的收益（本机只测了 20 轮小算子链，4.91× 是这个量级的数，
   不是模型级的数）。

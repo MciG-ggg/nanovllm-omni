@@ -19,6 +19,7 @@
 | **slot_mapping** | 一步里每个 token 的 KV 该写到哪个 KV slot 的扁平映射 | fork `model_runner.prepare_prefill/prepare_decode` |
 | **static batch / 静态批** | 批在开始时固定，跑完才结束。本仓库当前的批就是静态批 | ADR 0012 |
 | **unified memory / 统一内存** | CPU 与 GPU 共享同一块物理 DRAM。Apple Silicon 全系如此，没有独立显存 | ADR 0014 附注；`mx.device_info()["max_recommended_working_set_size"]` |
+| **EXACT / TOP_K_MATCH / FAIL** | 跨实现一致性判定三档：`EXACT` = token 序列全同且长度都到 `max_tokens`；`TOP_K_MATCH` = 第一个分歧位上双方 token 都在对方 top-k logprobs 里；`FAIL` = 其它。vLLM 自己的跨实现标准（`check_logprobs_close`：token 不同时只要求落在对方 top-k 内，不比较数值）| `vllm-metal` 的 `tools/parity_utils.py::parity_report`；ADR 0011 §2、ADR 0021 |
 | **vendor code / vendor layer** | 模型作者自己写的代码，**不在本仓库**，躺在 checkpoint 目录里，由 `transformers` 的 `get_class_from_dynamic_module` 动态加载 | talker 默认走本仓库重写版（`models/minimind_omni/talker.py`）；vendor `TalkerModule` 只作 P1/P2 参照臂，由 `extra["talker_impl"]="vendor"` 选用（ADR 0022）。thinker 反过来明写 "No vendor code"（`thinker.py:234`） |
 | **varlen / variable-length attention** | 一次 attention 调用处理长度不一的若干段，靠 `cu_seqlens` 划界，不补齐 | fork 已用（flash_attn）；MLX 没有；MPS 没有（`aten::_flash_attention_forward` 未实现） |
 | **窗口化 KV（windowed KV）** | talker 侧只缓存 `[0, step-8)`，每步只重算最后 8 列。FLOPs 从 O(n²) 降到 O(8n)；更重要的作用是让每步的 query 维度定长，从而可 varlen、可上 graph | ADR 0007 当年因「不省时间」否掉，ADR 0017 重新成立并落到 talker 重写里 |

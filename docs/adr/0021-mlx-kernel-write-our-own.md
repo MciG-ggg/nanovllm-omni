@@ -39,10 +39,16 @@ ADR 0015 定了"MLX 必须有 varlen"，并把路线写成"移植 `vllm-metal` �
 **逐位一致做不到**：Metal 与 CUDA 的浮点归约顺序不同，fp16/bf16 的舍入也不同，
 kernel 的分块策略还不同。同一份权重、同一 seed，两边生成**不同的 token** 是可能的。
 
-可执行的标准定为：
+可执行的标准定为（2026-11-09 修订，见「上游怎么做」一节）：
 
-> **token 级一致**：相同权重、相同 seed、相同采样配置下，MLX 与 CUDA 生成的
-> token 序列**相同**；数值差异在事先声明的容差内。
+> **三档判据 + greedy 优先**
+>
+> - **greedy（`temperature=0`）是首选的比较方式**：没有随机流，token 完全可比。
+> - 判据分三档，照 vLLM 自己的跨实现标准（ADR 0011 引的 `check_logprobs_close`）：
+>   - `EXACT`：token 序列完全相同，且长度都到 `max_tokens`。
+>   - `TOP_K_MATCH`：在**第一个分歧位**上，双方的 token 都在对方的 top-k logprobs 里。
+>   - `FAIL`：其它。
+> - 需要采样随机性时（同 seed 同 token），才需要统一采样器实现。
 
 这落在 ADR 0011 的 **Compatible** 层（任务效用与安全不劣化），不是 Exact 层。
 Exact 层的逐位一致只在**同一后端内部**成立（重写版 vs vendor，ADR 0017）。
@@ -50,6 +56,32 @@ Exact 层的逐位一致只在**同一后端内部**成立（重写版 vs vendor
 **这不是妥协，这正是要教的东西**：跨后端 serving 的一致性只能到 token 级，
 比同后端低一档。想守住这一档，靠的是采样参数与停止条件的精确对齐，
 而不是指望两边浮点一样。
+
+### 上游怎么做（2026-11-09 查证 `vllm-metal`）
+
+`vllm-metal`（Apache-2.0）的"一致"分三层，**跨厂商那层最粗**：
+
+| 层 | 手段 | 判据 |
+|---|---|---|
+| 同 MLX 生态内的实现对齐 | `tools/parity_utils.py::parity_report` | `EXACT` / `TOP_K_MATCH` / `FAIL` |
+| 上游 CUDA 代码的移植保真 | `tests/test_kv_offload_cuda_parity.py` | 比对 `compute_sub_block_ptrs` 的**纯指针算术**，不是输出 |
+| 跨厂商输出质量 | SiliconBench（arXiv 2609.19169） | **分类任务** vs NVIDIA 参考 → 任务级 fidelity |
+
+SiliconBench 原文："We use a **classification task to check for quality regressions against
+an NVIDIA reference**."——**没有任何一处是拿 Apple Silicon 的输出和 NVIDIA 的 token
+逐个对齐的**。
+
+两条可直接抄的东西：
+
+1. **三档判据就是 vLLM 自己的标准**。`TOP_K_MATCH` 让失败有可操作的信息
+   （分歧位上双方各自的 top-k 是什么），比"token 不一样"有用得多。
+   证据用 OpenAI API 的 `logprobs` 取 top-k 候选。
+2. **他们绕开 RNG 流问题的办法是 greedy**：`tools/dspark_parity.py` 与
+   `tools/check_parity.py` 都写死 `temperature=0.0` / `top_p=1.0` / `top_k=0`。
+
+**本 ADR 的修订就是从这两条来的**：先前写的"相同 seed、相同采样配置下 token 序列相同"
+把 greedy 排除在外，等于把"统一采样器"当成前置条件；实际上 greedy 就能比，
+统一采样器只在"同 seed 同 token"这个更强的诉求下才需要。
 
 ## 后果
 

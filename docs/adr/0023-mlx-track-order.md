@@ -105,7 +105,36 @@ CUDA 轨的 `audio_codes` / token 序列比（ADR 0021 的 token 级一致）。
   不同（`torch.multinomial` vs `mx.random.categorical`），相同 seed 只对齐
   参数，不对齐随机流；真要对 token，需要先统一采样器。
 - **bridge_layer / talker / code2wav 未接**。thinker-only 不需要 bridge 行。
-- **`mx.compile` 未测**：本 backend 声明 `graph=True`，但这批数字是 eager。
+
+### `mx.compile` 的实测（2026-11-09 补）
+
+上一版写"`mx.compile` 未测"。测了，结论是**有微小收益，但依赖一个非显然前提**：
+
+| 形态 | eager p50 | compiled p50 | trace 次数 |
+|---|---:|---:|---:|
+| 单序列 decode | 2.64 ms | 2.39 ms | 1 |
+| 2 行 batch decode | 4.00 ms | 3.70 ms | 1 |
+| 固定 offset（不递增） | 2.29 ms | 2.32 ms | 1 |
+
+真实 32 步 AR 循环，fp16，同一 prompt 45 token，warmup 2 轮。**收益约 7–10%**，
+与 ADR 0007 记的 CUDA Graph 3.8× 不是一个量级。
+
+三个前提，缺一个就跑不起来或更慢：
+
+1. **编译函数不能收 `KVCache` 对象**——必须把 cache 摊平成 `(keys, values, offset)`
+   显式数组（摊平后数值逐位相同）。
+2. **`shapeless=True` 在这个模型上直接报错**（`Slice cannot infer output shapes`）。
+3. **致命的一条：`offset` 必须是 `mx.array`**。传 Python `int` 会让每一步都重新
+   trace——32 步 decode → `traces=32`，每个新 offset 首次调用 35–45 ms，
+   **比 eager 还慢**。`BatchKVCache` 的 offset 本来就是 array。
+
+所以 `BackendCapabilities.graph = True` 的含义是"**这个后端有 graph 机制**"，
+不是"当前路径就在用它"。MLX 侧目前的数字**全是 eager**。
+
+MLX 的 `mx.fast.rope` 存在（`offset` 接受 int 或 array），ADR 0021 说的
+"优先用自带 RoPE"成立。但 `KVCache` 用 offset 做切片（`self.keys[..., prev:self.offset, :]`），
+传 array 会 `ValueError: Slice indices must be integers or None`
+→ **paged 路径不能用 `KVCache` 承载 offset**，dense 对照臂要用 `BatchKVCache`。
 
 ## 边界
 

@@ -42,6 +42,11 @@ class BackendCapabilities:
     CUDA Graph on CUDA, ``mx.compile`` on MLX. False means every step
     re-dispatches its ops, which is the dominant cost on the small models
     this project runs (ADR-0007).
+
+    True means the mechanism exists, not that the current path uses it.
+    On MLX the measured benefit is 7-10% and it only holds when the cache
+    offset is an ``mx.array``; a Python ``int`` offset makes every step
+    retrace (ADR 0023).
     """
 
     max_batch: int | None = None

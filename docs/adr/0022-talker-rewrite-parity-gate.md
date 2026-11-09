@@ -155,6 +155,31 @@ prompt `你好，请用一句话介绍你自己。` / `max_tokens=24` / seed 42�
 发射门 / 早退。`lm_head` 尾位置这一轮已经做完，下一轮也不再改。所以返工量仍是
 「一个 attention 子层 + 一套 cache 管理 + 三处调用点」，不是重写第二遍。
 
+### 窗口化的实施记录（2026-11-09）
+
+窗口化 KV 已实现并接上驱动，默认仍走 dense：
+
+| 位置 | 做了什么 |
+|---|---|
+| `talker.py` | `_LayerKVCache` / `TalkerKVCache`（每请求一份）；`_append_to_cache` 并入本步 k/v 后丢掉尾部 7 列；`_window_attention_mask` 显式掩码（窗口在 cache 末尾，`is_causal=True` 会挡掉缓存列）；`MiniMindTalker.forward` 的 RoPE 按 cache 长度取绝对偏移 |
+| `stage.py` | `extra["talker_kv"] = dense \| windowed`，**默认 dense**；windowed 与 vendor 实现互斥；`__call__` 按 `cache.length` 切窗口 |
+| `tests/test_minimind_talker_windowed.py` | 模型级闸门（CPU fp32，逐窗口比对最后一位置的 8 个头的 logits）；cache 前缀长度的性质测试 |
+
+**实测**：fp32 CPU 上，每一步、每一层，窗口版与 dense 版在**同一个绝对列**上的
+偏差 < 1e-4。
+
+两条要记住的教训：
+
+1. **对照必须按绝对列对齐。** dense 每步的列数（`start_pos + step`）与窗口的
+   列数（8）不同，拿 `dense[:, 0]` 对 `window[:, 0]` 会把绝对列 1 和 0 比在一起——
+   第一次跑就是这么得到 8.36 的假偏差。正确的对照是 `dense[:, lo:lo+n]` 对
+   `window[:, :n]`，其中 `lo = cache.length`。
+2. **dense 也要逐步增长前缀**，不能一次喂满整条——真实驱动每步只多一列。
+   一次喂满 vs 逐步喂满不是同一件事（后者才是 stage 的形状）。
+
+**仍未验证**：stage 级（`audio_codes` 逐位相同）在 CUDA 上验；窗口版的 P1/P2 parity；
+窗口化后的吞吐数字（需要 WSL）。
+
 ### 下一轮的起点：cache 的语义已经想清楚（2026-11-09 补记）
 
 窗口化的实现试到一半被中断（未提交，已回退）。留下的唯一有价值的东西是 cache 的

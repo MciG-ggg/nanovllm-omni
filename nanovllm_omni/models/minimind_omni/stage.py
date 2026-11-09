@@ -405,7 +405,7 @@ def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
 
 
 class TalkerStage(StageEngine):
-    """Stage 1 — MiniMind talker decode on the vendor ``TalkerModule`` (full sequence per step)."""
+    """Stage 1 — MiniMind talker decode; dense rewrite by default, vendor arm selectable."""
 
     def __init__(self, deploy: Any, args: Any) -> None:
         super().__init__()
@@ -414,20 +414,37 @@ class TalkerStage(StageEngine):
         self._model: Any = None
         self._device: str | None = None
         self._config: Any = None
+        # ADR 0020: the checkpoint stays as weights + parity reference. The
+        # vendor class is the P1/P2 reference arm, not the default.
+        extra = getattr(args, "extra", None) or {}
+        self._impl = str(extra.get("talker_impl", "rewritten"))
 
     def _ensure_model(self) -> Any:
-        """Load the vendor talker from the original checkpoint."""
+        """Load the talker selected by ``extra["talker_impl"]``."""
         if self._model is not None:
             return self._model
 
         import os
 
         import torch
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-        from .bundle import _resolve_snapshot
+        from .bundle import _pick_device, _resolve_snapshot
 
         model_dir = _resolve_snapshot(getattr(self.args, "model", None))
+        if self._impl == "rewritten":
+            from .talker import load_talker
+
+            device = _pick_device(getattr(self.args, "device", None))
+            self._model = load_talker(model_dir, device=device)
+            self._device = device
+            return self._model
+        if self._impl != "vendor":
+            raise ValueError(
+                f"unknown talker_impl {self._impl!r}; expected 'rewritten' or 'vendor'"
+            )
+
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
         config_cls = get_class_from_dynamic_module("model_omni.OmniConfig", model_dir)
         talker_cls = get_class_from_dynamic_module("model_omni.TalkerModule", model_dir)
         config = config_cls.from_pretrained(model_dir)
@@ -459,8 +476,11 @@ class TalkerStage(StageEngine):
         return talker
 
     def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any) -> Any:
-        """Run the vendor talker over the full sequence; return its 8 logit tensors."""
+        """Return the talker's 8 logit tensors for the current sequence."""
         import torch
+
+        if self._impl == "rewritten":
+            return self._model(bridge, audio_codes, spk_emb)
 
         talker = self._model
         embeds = talker.embed_tokens(audio_codes)
@@ -665,7 +685,7 @@ class TalkerStage(StageEngine):
 
 
 def _talker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory — the vendor talker, loaded from the full checkpoint."""
+    """Stage 1 factory — the talker selected by ``extra["talker_impl"]``."""
     return TalkerStage(deploy, args)
 
 

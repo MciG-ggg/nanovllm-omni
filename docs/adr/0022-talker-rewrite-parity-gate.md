@@ -78,3 +78,89 @@ ADR 0017 说"重写时窗口化 KV 一步到位，不做分桶过渡"。这一�
 - 本 ADR **不**决定重写代码的具体结构（类划分、张量布局），那是实现细节，
   按 AGENTS.md 的可读性要求写。
 - 本 ADR **不**承诺这一轮结束 talker 的瓶颈——它只是把 talker 变成可改的代码。
+
+## 实施记录（2026-11-09）
+
+### 做了什么
+
+| 文件 | 内容 |
+|---|---|
+| `nanovllm_omni/models/minimind_omni/talker.py` | dense 等价重写：`RMSNorm` / `TalkerAttention` / `TalkerMLP` / `TalkerBlock` / `TalkerEmbedding` / `TalkerHead` / `MiniMindTalker`；`load_talker` 从 `pytorch_model.bin` 取 `talker.*`，去前缀后 `strict=True` 加载 |
+| `nanovllm_omni/models/minimind_omni/stage.py` | `TalkerStage` 默认 `talker_impl="rewritten"`；`extra["talker_impl"]="vendor"` 切回参照臂。驱动循环（采样、交错调度、repetition penalty、发射门、常驻 buffer）未改 |
+| `tests/test_minimind_talker_parity.py` | P0（自洽）、P1（vendor vs rewritten 的 `audio_codes`）、P2（teacher-forced logits）三层常驻闸门 |
+
+重写逐行对照的 vendor 部件：
+
+- `TalkerModule.__init__`：layers / norm / lm_head / embed_tokens / codec_proj /
+  embed_proj / text_scale / audio_scale / spk_proj / freqs 表。
+- `TalkerEmbedding.forward`：8 个码本的 `base + adapter` 取平均。
+- `TalkerHead.forward`：共享 base 加 8 个 rank-256 adapter。
+- `MiniMindBlock.forward`：pre-norm、attention residual、MLP residual。
+- `Attention.forward`：q/k 的 head-wise RMSNorm、RoPE 广播方式、
+  `repeat_kv`、`seq_len > 1` 走 SDPA causal、`seq_len == 1` 走显式 softmax。
+- `RMSNorm.forward`：fp32 归一化 + 乘 weight，再转回输入 dtype。
+- `precompute_freqs_cis`：非 YaRN 分支（该 checkpoint `inference_rope_scaling: false`）。
+- `MiniMindOmni.forward` 的 talker 段：`embed_proj(bridge)*text_scale +
+  codec_proj(embeds)*audio_scale`，以及 `spk_emb` 的 codebook-0 mask。
+- `stream_generate` 只取 `al[0, -1, :]`、`/0.2`、last-3 repetition penalty、
+  `topk(50)` + `multinomial`：这些留在 `stage.py` 驱动里，未重写。
+
+有意的语义差异：
+
+- `lm_head` 只算最后一个位置（ADR 0022 正文已把它归为 P2 层，不是 bitwise）。
+- talker 的架构参数从 `config.json` 读；vendor 用 `MiniMindConfig(hidden_size=...)`
+  的默认值重建。该 checkpoint 上两者相等（8 heads / 4 kv heads / head_dim 96 /
+  intermediate 2432 / eps 1e-6 / rope_theta 1e6 / max_position 32768）。
+- 不实现 YaRN 分支、不建 dropout 模块（`dropout: 0.0`，eval 下无作用）。
+- 重写版不保留 `past_key_value` / `use_cache` / `attention_mask` 参数：驱动只用
+  `use_cache=False` 且无 mask，其余分支属于假想输入。
+
+### parity 实测
+
+| 层 | 结果 |
+|---|---|
+| P0 | **MPS 通过**：同 payload + seed 42 跑两次，`audio_codes` 逐位相同，24 帧；WAV sha256 相同。**MPS 数字不是 parity 结论**（ADR 0014） |
+| P1 | **未跑**：WSL 仍 offline（本 ADR「验证环境」的阻塞条件），命令见测试 skip 信息 |
+| P2 | **未跑**：同上 |
+
+P2 容差写死为 `max abs diff <= 0.125`、`mean abs diff <= 0.01`，即 ADR 0011 §4.2
+实测值（0.0625 / 0.0047）的 2 倍；该实测含 0.05% 的 bridge 输入差，本闸门两臂输入
+完全相同，只剩 lm_head 的 GEMM 形状差（ADR 0022 正文）。
+
+本机（MPS，仅冒烟、不是闸门）的旁证：
+
+- 修正一处 `RMSNorm` 返回 dtype 的 bug 后，重建版与 vendor 在相同输入上逐层输出
+  完全相等（embed / embed_proj / codec_proj / 4 层 / norm）。
+- 公开 `forward` 因 lm_head 尾位置差：max 0.0156 / mean 1.9e-5（一次随机输入）。
+- 用生产驱动做 teacher-forced 回放：对比 220 个真实采样位置，max 0.03125 /
+  mean 1.3e-5，argmax 全部一致。
+
+WSL 上首次运行需回填的参照栈（ADR 0011 §3）：RTX 3050 4GB Laptop /
+驱动 591.86 / CUDA 13.0 / torch 2.11.0+cu130 / transformers 5.16.1 /
+Python 3.12.3 / fp16 / SDPA / `jingyaogong/minimind-3o` 本地目录 /
+prompt `你好，请用一句话介绍你自己。` / `max_tokens=24` / seed 42。
+
+### 返工量复核（对照 §「与 ADR 0017 的关系」）
+
+对照表说下一轮只改「attention 一个子层 + cache 管理」。写完后这个估计**基本准确，
+但少列了三处接线**：
+
+1. `MiniMindTalker.forward` 的 RoPE 切片要从 `[:seq_len]` 改成按绝对位置
+   `[start_pos:start_pos+len]`（窗口版每步 query 只有 8 列）。
+2. `TalkerStage.__call__` 现在每步传 `bridge[:, :seq_len]` / `buf[:, :, :seq_len]`；
+   窗口版要改成传 cache + 最后 8 列 + 当前位置。
+3. cache 的生命周期要挂在 `TalkerStage` 上（每请求一份，请求结束释放）。
+
+不动的部分与对照表一致：embed / 两个 proj / 层内 RMSNorm、MLP、residual / 采样 /
+发射门 / 早退。`lm_head` 尾位置这一轮已经做完，下一轮也不再改。所以返工量仍是
+「一个 attention 子层 + 一套 cache 管理 + 三处调用点」，不是重写第二遍。
+
+### 未做 / 已知问题
+
+- P1 / P2 尚无 WSL 实测基线；测试已入库，命令写在 skip 信息里。
+- `load_talker` 只读 `pytorch_model.bin`（当前 checkpoint 的形态）；vendor 参照臂
+  仍保留 safetensors 回退。若 checkpoint 改成 safetensors-only，默认路径要补。
+- speaker embedding 路径保留了 vendor 语义，但它从未被赋值（ADR 0011 §5 的既有
+  缺口，本轮不变）。
+- P0 的 bridge 是固定合成张量：thinker 的 fork attention 需要 CUDA/triton，MPS 上
+  跑不了。P0 因此只验证 talker + code2wav 的确定性，不验证端到端 thinker 输出。

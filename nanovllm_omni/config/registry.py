@@ -204,6 +204,7 @@ class DeployStageConfig:
     gpu_memory_utilization: float | None = None
     device: str | None = None
     devices: str | tuple[str, ...] | None = None
+    backend: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_sampling_params, dict):
@@ -221,6 +222,8 @@ class DeployStageConfig:
             )
         if self.device is not None and not isinstance(self.device, str):
             raise ValueError(f"device must be a string or null, got {self.device!r}")
+        if self.backend is not None and not isinstance(self.backend, str):
+            raise ValueError(f"backend must be a string or null, got {self.backend!r}")
         if self.devices is not None and not isinstance(self.devices, (str, tuple)):
             raise ValueError(f"devices must be a string, sequence, or null, got {self.devices!r}")
         if isinstance(self.devices, tuple) and not all(
@@ -390,6 +393,7 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
                 gpu_memory_utilization=_parse_optional_float(s, "gpu_memory_utilization"),
                 device=s.get("device"),
                 devices=_parse_devices(s),
+                backend=s.get("backend"),
             )
             for s in data.get("stages", [])
         ),

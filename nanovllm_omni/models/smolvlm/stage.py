@@ -153,7 +153,7 @@ class SmolVLMStage(StageEngine):
             )
         self.dtype = dtype_str
         model_id = getattr(args, "model", None) or _MODEL_ID
-        backend_name = str(extra.get("backend", "torch"))
+        backend_name = str(getattr(args, "backend", None) or extra.get("backend", "torch"))
         backend_kwargs: dict[str, Any] = {"dtype": dtype_str}
         if backend_name != "mlx-vlm":
             # ``args.device`` is a torch knob and reads "cpu" on a host

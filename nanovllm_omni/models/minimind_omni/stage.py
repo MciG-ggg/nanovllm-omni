@@ -83,6 +83,20 @@ def _resolve_model_path(args: Any) -> str:
     return _thinker_only_dir(_resolve_snapshot(model))
 
 
+def _stage_backend(args: Any, extra: dict[str, Any]) -> str:
+    """Which backend this stage runs on.
+
+    ``args.backend`` is the declared knob (``OmniEngineArgs.backend``, also
+    settable per stage in the deploy YAML); ``extra["backend"]`` stays as the
+    older escape hatch so existing callers keep working. The declared value
+    wins, because that is the one the argument validator checked.
+    """
+    declared = getattr(args, "backend", None)
+    if declared:
+        return str(declared)
+    return str(extra.get("backend", "torch"))
+
+
 def _resolve_mlx_model_path(args: Any, subdir: str = "mlx-thinker") -> str:
     """A converted MLX directory next to the checkpoint.
 
@@ -229,7 +243,7 @@ class ThinkerStage(StageEngine):
         self.deploy = deploy
         self.args = args
         extra = dict(getattr(args, "extra", None) or {})
-        self._backend_name = str(extra.get("backend", "torch"))
+        self._backend_name = _stage_backend(args, extra)
         if self._backend_name == "mlx":
             # The MLX runner loads an ``mlx_lm`` directory and has no
             # torch model class.
@@ -471,7 +485,7 @@ class TalkerStage(StageEngine):
         from .bundle import _resolve_snapshot
 
         extra = getattr(self.args, "extra", None) or {}
-        backend_name = str(extra.get("backend", "torch"))
+        backend_name = _stage_backend(self.args, extra)
         backend_kwargs: dict[str, Any] = {"dtype": getattr(self.args, "dtype", None)}
         if backend_name == "mlx":
             # The MLX runner loads the converted directory and runs on the

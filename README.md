@@ -127,13 +127,33 @@ LIBERO eval episode; the two-stage pipeline (vlm LLM_AR → action DIFFUSION) em
 
 ## Quickstart
 
-Install the package and its existing dependencies; add the `minimind`
-extra for the audio path (torch/transformers) and `.[smolvla]` for the
-SmolVLA examples:
+The base package is framework-free: `import nanovllm_omni` and the
+scheduler/registry work with no torch and no mlx installed. Each hardware
+track is its own extra, and they are **meant to be installed separately** —
+they pull mutually exclusive dependencies (MLX's `mlx-vlm` needs
+`datasets>=4`, SmolVLA's `lerobot` needs `datasets<=3.6`).
+
+| extra | what it adds | where it runs |
+|---|---|---|
+| *(none)* | yaml + the scheduler; the backend registry | anywhere |
+| `cuda` | torch, triton, flash-attn, the fork's attention kernel | Linux/WSL, NVIDIA GPU |
+| `mlx` | mlx, mlx-lm — MiniMind-O thinker + talker | Apple Silicon |
+| `mlx-vlm` | the above + mlx-vlm, torchvision — SmolVLM | Apple Silicon |
+| `smolvla` | torch, transformers, lerobot | CUDA (lerobot needs a GPU) |
+| `gradio` | the demo UI | alongside any family extra |
+| `dev` | pytest, ruff, black | anywhere |
 
 ```bash
-pip install -e ".[dev,minimind]"
+# Linux / WSL with an NVIDIA card
+pip install -e ".[dev,cuda]"
+
+# Apple Silicon
+pip install -e ".[dev,mlx]"          # MiniMind-O
+pip install -e ".[dev,mlx-vlm]"      # + SmolVLM
 ```
+
+`triton` and `flash-attn` carry a `sys_platform != 'darwin'` marker, so
+`.[cuda]` on a Mac installs torch and nothing that has no wheel there.
 
 For MiniMind-O (audio), pull the weights once into local directories
 (the bundle loader is offline-first and never auto-fetches):
@@ -190,11 +210,11 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 A bundled Gradio UI composes all four tabs with per-tab lazy engine load:
 
 ```bash
-pip install -e ".[dev,minimind,smolvla,gradio]"
+pip install -e ".[dev,cuda,smolvla,gradio]"
 python -m nanovllm_omni.serving.app
 ```
 
-Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do not load more than one tab's model at once. The launcher depends on `[gradio]` only — pre-install `[minimind]` / `[smolvla]` for the tabs you intend to use.
+Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do not load more than one tab's model at once. The launcher depends on `[gradio]` only — pre-install `[cuda]` / `[smolvla]` for the tabs you intend to use.
 
 ### Reproducing the latency claim
 

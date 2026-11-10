@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Smallest vllm-omni-compatible pipeline runtime, performance-engineered for MiniMind-O with a continuous-batching thinker runner and unified omni-modal I/O contract demos."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+# 3.12, not 3.11: lerobot publishes >=0.5 only for 3.12+, and on 3.11
+# the resolver falls back to lerobot 0.3.x, whose `datasets<=3.6` cannot
+# coexist with mlx-vlm's `datasets>=4`. Locking for a version nobody runs
+# made the whole lockfile unsolvable.
+requires-python = ">=3.12"
 authors = [
     { name = "nanovllm-omni contributors" },
 ]
@@ -28,11 +32,68 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.4",
-    "black>=24.0",
+# ---------------------------------------------------------------------------
+# Backend tracks. The three are mutually exclusive by construction, so they
+# are separate extras rather than one list:
+#
+#   base   (dependencies above)  framework-free: the scheduler, the registry,
+#                                the deploy configs. `import nanovllm_omni`
+#                                works with none of the extras installed.
+#   cuda   torch + triton + flash-attn, the fork's attention kernel.
+#   mlx    Apple Silicon: mlx + mlx-lm for the text models.
+#   mlx-vlm  the above plus mlx-vlm + torchvision for the vision families.
+#
+# They cannot share one environment: mlx-vlm 0.7 needs `datasets>=4` while
+# lerobot 0.3 (the smolvla extra) needs `datasets<=3.6`, and mlx-vlm needs
+# `starlette>=1.0.1` while gradio 5 pins it below 1.0. uv resolves every
+# extra into one lockfile, so a single list would be unsolvable. Installing
+# `.[cuda]` and `.[mlx]` together is a user error, not a supported mode.
+# ---------------------------------------------------------------------------
+cuda = [
+    # Mirrors third_party/nano-vllm's own `[cuda]` extra; that is where the
+    # fork declares its kernel dependencies, so keep the ranges in step.
+    "torch>=2.4.0",
+    # No macOS wheel exists for triton, so the marker keeps `uv sync --extra
+    # cuda` on a Mac from failing with an opaque "no wheel" error and instead
+    # installs nothing extra there. `backend/torch_backend.py` never imports
+    # the fork's attention, so a Mac can still use this extra's torch half.
+    "triton>=3.0.0; sys_platform != 'darwin'",
+    "flash-attn; sys_platform != 'darwin'",
+    "transformers>=4.51",
+    "huggingface_hub>=0.20",
+    # MiniMind-O's checkpoint carries trust_remote_code modeling files, and
+    # code2wav needs the Mimi codec through transformers.
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    "onnxruntime>=1.16",
+    "funasr>=1.0",
 ]
+mlx = [
+    "mlx>=0.32.4",
+    "mlx-lm>=0.32.2",
+    # `_as_mx` in backend/mlx_talker.py goes through numpy; code2wav still
+    # needs torch and transformers for the Mimi codec (ADR 0024).
+    "numpy>=1.24",
+    "safetensors>=0.4",
+    "torch>=2.0",
+    # mlx-lm 0.32.2 imports transformers' nested `rope_parameters` shape.
+    "transformers>=5.0",
+]
+mlx-vlm = [
+    "mlx>=0.32.4",
+    "mlx-vlm>=0.7.12",
+    # Required, not optional: transformers 5's Idefics3 image processor
+    # silently falls back to numpy output without torchvision, and the MLX
+    # embedding lookup then fails with a shape error.
+    "torchvision>=0.19",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "torch>=2.0",
+    "transformers>=5.0",
+]
+# Model families. `smolvla` pulls lerobot, which pins `datasets<=3.6`; that
+# is the constraint that makes it uninstallable next to mlx-vlm. Keep it in
+# its own environment.
 smolvla = [
     "torch>=2.3.1",
     "transformers>=4.40",
@@ -51,35 +112,26 @@ smolvla = [
 ]
 # Gradio UI demo layer (`nanovllm_omni.serving.app`). UI tool, NOT a server
 # framework -- leaves the stdlib HTTP adapter in `nanovllm_omni.serving.openai_adapter`
-# untouched. Install alongside a model-family extra (e.g. `.[minimind,gradio]`)
+# untouched. Install alongside a model-family extra (e.g. `.[cuda,gradio]`)
 # to actually run a tab; `gradio` alone only enables the demo launcher.
+# >=6 because gradio 5 pins starlette<1.0 and the mlx-vlm track needs >=1.0.1.
 gradio = [
-    "gradio>=5.0,<6.0",
+    "gradio>=6.0",
 ]
-# Real-weight MiniMind-O path: required for
-# examples/offline_inference/minimind_o/{end2end,batched}.py and the
-# `pytest -m smoke` suite. The bundle loader is offline-first; weights
-# must be pre-provisioned (see
-# examples/offline_inference/minimind_o/README.md) before the smoke
-# tests can run, not pulled at install time. funasr/librosa/onnxruntime
-# are peer deps of the MiniMind trust_remote_code modeling files.
-minimind = [
-    "torch>=2.0",
-    "transformers>=4.50",
-    "huggingface_hub>=0.20",
-    "soundfile>=0.12",
-    "librosa>=0.10",
-    "onnxruntime>=1.16",
-    "funasr>=1.0",
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "black>=24.0",
 ]
 experiments = [
     "hydra-core>=1.3",
     "tyro>=0.9",
 ]
-# PEP 735 dependency groups. The `minimind` group mirrors the
-# `[minimind]` optional extra so `uv sync` picks it up via
-# `[tool.uv] default-groups` below. CI stays unaffected because it
-# installs via `pip install -e ".[dev]"` and never reads this table.
+
+# PEP 735 dependency groups. uv resolves every group into the lockfile, so
+# these mirror the CUDA track only: it is the one `uv sync` should install by
+# default for development. The MLX groups are opt-in (`uv sync --group mlx`)
+# and are NOT listed in `default-groups` for the reason in the header above.
 [dependency-groups]
 minimind = [
     "torch>=2.0",
@@ -92,11 +144,8 @@ minimind = [
     # int8 stretch for TK-015 -- optional; install explicitly if you want it.
     "bitsandbytes>=0.43",
 ]
-# Mirrors `[project.optional-dependencies].gradio` so `uv sync` picks it
-# up if wired into default-groups. Off by default; the UI launcher is an
-# opt-in convenience.
 gradio = [
-    "gradio>=5.0,<6.0",
+    "gradio>=6.0",
 ]
 
 [project.urls]

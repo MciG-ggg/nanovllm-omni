@@ -24,7 +24,6 @@ import math
 import torch
 import torch.distributed as dist
 from nanovllm.layers.activation import SiluAndMul
-from nanovllm.layers.attention import Attention
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import (
@@ -34,6 +33,14 @@ from nanovllm.layers.linear import (
 )
 from nanovllm.layers.rotary_embedding import get_rope
 from torch import nn
+
+# ``nanovllm.layers.attention`` imports triton at module scope, and triton has
+# no macOS wheel. The MLX track never builds a fork ModelRunner, so it only
+# needs ``_thinker_stage`` -- importing the whole module for that would drag
+# triton in on a Mac. The stage factory is therefore re-exported lazily by
+# ``__getattr__`` below, and ``Attention`` is imported inside the one class
+# that uses it.
+_LAZY_ATTENTION = ("Attention",)
 
 
 class ThinkerAttention(nn.Module):
@@ -93,6 +100,8 @@ class ThinkerAttention(nn.Module):
             max_position=max_position,
             base=rope_theta,
         )
+        from nanovllm.layers.attention import Attention
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -358,6 +367,20 @@ class MiniMindThinker(nn.Module):
 # ---------------------------------------------------------------------------
 #  Stage factory (called by pipeline.py via tuple registration)
 # ---------------------------------------------------------------------------
+
+
+def __getattr__(name: str):
+    """Lazy re-export so importing this module does not need triton.
+
+    ``_thinker_stage`` lives below and only needs ``stage.ThinkerStage``;
+    the model classes above still import fork layers, which is why the
+    whole module cannot be a hard dependency of the MLX track.
+    """
+    if name in _LAZY_ATTENTION:
+        from nanovllm.layers.attention import Attention
+
+        return Attention
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _thinker_stage(deploy, args, model_class=None):

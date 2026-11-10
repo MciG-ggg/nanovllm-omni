@@ -114,11 +114,32 @@ LIBERO 评测片段;两阶段管线(vlm LLM_AR → action DIFFUSION)输出 actio
 
 ## 快速开始
 
-安装包及其已有依赖;音频路径加 `[minimind]` extra(torch / transformers),SmolVLA examples 加 `.[smolvla]`:
+base 包不含任何 array 框架：不装 torch 也不装 mlx，`import nanovllm_omni`
+和调度器就能用。每个硬件轨是独立的 extra，**本来就该分开装** —— 它们的
+依赖互斥（MLX 的 `mlx-vlm` 要 `datasets>=4`，SmolVLA 的 `lerobot` 要
+`datasets<=3.6`）。
+
+| extra | 装了什么 | 跑在哪 |
+|---|---|---|
+| *(不装)* | yaml + 调度器 + backend 注册表 | 任何机器 |
+| `cuda` | torch、triton、flash-attn、fork 的 attention kernel | Linux/WSL，NVIDIA 卡 |
+| `mlx` | mlx、mlx-lm —— MiniMind-O 的 thinker + talker | Apple Silicon |
+| `mlx-vlm` | 上面那些 + mlx-vlm、torchvision —— SmolVLM | Apple Silicon |
+| `smolvla` | torch、transformers、lerobot | CUDA（lerobot 要 GPU） |
+| `gradio` | demo UI | 跟任意 family extra 一起 |
+| `dev` | pytest、ruff、black | 任何机器 |
 
 ```bash
-pip install -e ".[dev,minimind]"
+# Linux / WSL + NVIDIA 卡
+pip install -e ".[dev,cuda]"
+
+# Apple Silicon
+pip install -e ".[dev,mlx]"          # MiniMind-O
+pip install -e ".[dev,mlx-vlm]"      # 再加 SmolVLM
 ```
+
+`triton` 和 `flash-attn` 带了 `sys_platform != 'darwin'` 的 marker，所以在
+Mac 上装 `.[cuda]` 只装 torch，不会去拉没有 wheel 的包。
 
 跑 MiniMind-O(音频),先把权重一次性拉到本地(bundle loader 是 offline-first 的,不会自动 fetch):
 
@@ -171,11 +192,11 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 打包好的 Gradio UI 用四个 tab 拼四个模型族,每个 tab 首次点击时才 lazy-load `Omni(...)` 引擎:
 
 ```bash
-pip install -e ".[dev,minimind,smolvla,gradio]"
+pip install -e ".[dev,cuda,smolvla,gradio]"
 python -m nanovllm_omni.serving.app
 ```
 
-4 GB 卡上,同一时刻只加载一个 tab 的模型。launcher 只依赖 `[gradio]` —— 想跑哪个 tab 就先装对应的 `[minimind]` / `[smolvla]`。
+4 GB 卡上,同一时刻只加载一个 tab 的模型。launcher 只依赖 `[gradio]` —— 想跑哪个 tab 就先装对应的 `[cuda]` / `[smolvla]`。
 
 ### 复现延迟数字
 

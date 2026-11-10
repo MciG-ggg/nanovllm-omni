@@ -82,6 +82,11 @@ class MlxConfig:
     enforce_eager: bool = True
     max_capture_bs: int = 1
     graph_max_seq_len: int = 2048
+    kvcache_block_size: int = 256
+    num_kvcache_blocks: int = 64
+    max_num_seqs: int = 512
+    max_num_batched_tokens: int = 16384
+    eos: int | None = None
 
 
 class MlxStageRunner:
@@ -104,6 +109,8 @@ class MlxStageRunner:
         # ``model_class`` is the torch factory contract; MLX picks the
         # architecture from ``config.json`` in the model directory.
         self._model, self.tokenizer = mlx_load(config.model_path)
+        if config.eos is None:
+            config.eos = min(int(token) for token in self.tokenizer.eos_token_ids)
         self._model.set_dtype(getattr(mx, config.dtype))
         mx.eval(self._model.parameters())
         self._cache: Any = None
@@ -175,22 +182,33 @@ class MlxStageRunner:
         if inputs_embeds is not None:
             raise NotImplementedError("the MLX backend has no inputs_embeds path")
         if is_prefill:
-            from mlx_lm.models.cache import BatchKVCache, make_prompt_cache
+            from mlx_lm.models.cache import BatchKVCache
 
-            if len(self._left_padding) > 1:
-                self._cache = [
-                    BatchKVCache(self._left_padding) for _ in range(len(self._model.layers))
-                ]
+            new_cache = [BatchKVCache(self._left_padding) for _ in range(len(self._model.layers))]
+            logits = self._model(input_ids, cache=new_cache)
+            if self._cache is None:
+                self._cache = new_cache
             else:
-                # The unpadded single path keeps mlx_lm's causal fast path.
-                self._cache = make_prompt_cache(self._model)
-        elif self._cache is None:
+                for cached_layer, new_layer in zip(self._cache, new_cache, strict=True):
+                    cached_layer.extend(new_layer)
+            return logits[:, -1, :]
+        if self._cache is None:
             # A decode step without a prefill would feed one token into an
             # empty cache and return plausible-looking garbage.
             raise RuntimeError("the MLX backend needs a prefill before its first decode step")
         # MLX's cache carries the RoPE offset, so ``positions`` is not consumed.
         logits = self._model(input_ids, cache=self._cache)
         return logits[:, -1, :]
+
+    def filter_cache_rows(self, batch_indices: list[int]) -> None:
+        """Keep the cache rows for the still-running sequences."""
+        if self._cache is None:
+            return
+        if not batch_indices:
+            self._cache = None
+            return
+        for cache in self._cache:
+            cache.filter(batch_indices)
 
     def set_context(self, is_prefill: bool, **kwargs: Any) -> None:
         """MLX keeps the per-step state in the cache object, not in globals."""
@@ -433,6 +451,11 @@ class MlxBackend:
             model_path=model_path,
             dtype=kwargs.pop("dtype", None) or self.dtype,
             device=kwargs.pop("device", None) or self.device,
+            kvcache_block_size=kwargs.pop("kvcache_block_size", None) or 256,
+            num_kvcache_blocks=kwargs.pop("num_kvcache_blocks", None) or 64,
+            max_num_seqs=kwargs.pop("max_num_seqs", None) or 512,
+            max_num_batched_tokens=kwargs.pop("max_num_batched_tokens", None) or 16384,
+            eos=kwargs.pop("eos", None),
         )
 
     def make_stage_runner(self, model_class: type, config: Any) -> MlxStageRunner:

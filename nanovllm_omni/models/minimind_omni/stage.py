@@ -358,8 +358,8 @@ class ThinkerStage(StageEngine):
                 pad_token=_THINKER_PAD_TOKEN,
                 talker_tail=_TALKER_TAIL,
             )
-            # The MLX driver re-runs the whole sequence, so its bridge rows
-            # are already the full-sequence ones.
+            # Every forwarded position contributes one bridge row; the last
+            # sampled token is never forwarded, so it has none (ADR 0025).
             bridges = [result.bridge_hidden for result in decoded]
         else:
             decoded = decode_minimind(

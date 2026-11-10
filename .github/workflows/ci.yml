@@ -140,9 +140,6 @@ jobs:
   mlx-track:
     name: MLX track (Apple Silicon)
     runs-on: macos-15
-    # GitHub's macOS runner cannot be validated locally. Observe one CI cycle,
-    # then remove continue-on-error after the next green run.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:

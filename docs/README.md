@@ -75,6 +75,7 @@
 | [0017](adr/0017-rewrite-talker-in-repo.md) | talker 的模型代码自己写 | 窗口化 KV 一步到位 |
 | [0020](adr/0020-rewrite-scope-vendor-only.md) | 「自己写」的边界 | 只重写 vendor 自定义代码，第三方库照用 |
 | [0023](adr/0023-mlx-track-order.md) | MLX 轨的执行顺序 | thinker-only 起步，kernel 先 decode 后 prefill |
+| [0024](adr/0024-code2wav-stays-on-torch.md) | code2wav 不写 MLX 版 | 转置卷积 MLX 21.98 ms vs torch MPS 20.56 ms，移植换不来吞吐 |
 
 ### 项目定位与目标
 

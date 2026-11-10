@@ -2,7 +2,9 @@
 
 还没做的事。每条带证据（`file:line` 或 ADR 章节），按「影响双轨可比性 > 教学价值 > 清理」排序。
 
-最后更新：2026-11-10。
+最后更新：2026-11-10（20:15）。
+
+`[x]` 已完成，`[~]` 部分完成，`[ ]` 未做。
 
 ## 一、Continuous batching
 
@@ -157,10 +159,9 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
   `StageRunner.decode(...)`）。
   证据：以上四处
 
-- [ ] **MX-7 补 ADR 0023 里没做的测量**
-  - 「8 个独立池各自 rebind」的测量没做（ADR 0023 说这是「本轮最大的测量缺口」）
-  - trace 次数没测
-  证据：`docs/adr/0023-mlx-track-order.md:175`、`docs/adr/0023-mlx-track-order.md`「未做」
+- [~] **MX-7 补 ADR 0023 里没做的测量** —— 部分完成（`0ce7896`）
+  - [x] 「8 个独立池各自 rebind」的测量（ADR 0023 说这是「本轮最大的测量缺口」）
+  - [ ] trace 次数没测
 
 - [ ] **MX-8 MLX 轨缺的模型族**
   ADR 0014 边界：talker、code2wav（Mimi）、SD-Turbo（diffusers）、SmolVLA（lerobot）
@@ -172,15 +173,11 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
 
 已经做了但文档没跟上。改代码时顺手改，别单开一轮。
 
-- [ ] **DR-1 ADR 0013 的 backend 表没提 `mlx-vlm`**
-  `rg mlx-vlm docs/adr/0013-backend-abstraction.md` 命中 0 次，但 `mlx-vlm` backend
-  已经注册（`nanovllm_omni/backend/__init__.py:53`）并有测试（`tests/test_mlx_vlm.py`）。
-  证据：`docs/adr/0013-backend-abstraction.md:76` 的表只列了 `mlx` 一行
+- [x] **DR-1 ADR 0013 的 backend 表没提 `mlx-vlm`** —— 已修（`0ce7896`）
+  补了 `mlx-vlm` backend、`make_talker_runner`、模型族与 backend 的组合边界。
 
-- [ ] **DR-2 ADR 0013 的工作量表已过期**
-  表里写「MLX backend：paged KV + 批 decode | 未做」，但 ADR 0025 已经接上 Scheduler
-  并做了批 decode 与行回收。需要标「部分完成」并指向 ADR 0025。
-  证据：`docs/adr/0013-backend-abstraction.md:92`
+- [x] **DR-2 ADR 0013 的工作量表已过期** —— 已修（`0ce7896`）
+  标了部分完成并指向 ADR 0025。
 
 - [ ] **DR-3 ADR 0012 的 bs=8 结论要在 MLX 轨重测**
   ADR 0014 明说「ADR 0012 的『bs=8 是净亏』是 CUDA 轨的结论；MLX 轨上 talker 仍然

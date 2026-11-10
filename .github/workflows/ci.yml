@@ -131,15 +131,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv pip install mkdocs mkdocs-material
+      - run: uv pip install --system mkdocs mkdocs-material
       - run: |
           # Lightweight smoke test: confirm mkdocs config parses.
           # Real build deferred until docs/ has content (Phase 6).
-          uv run python -c "import yaml; yaml.safe_load(open('mkdocs.yml')) if __import__('os').path.exists('mkdocs.yml') else print('mkdocs.yml not yet created -- skipping (deferred to Phase 6)')"
+          python -c "import yaml; yaml.safe_load(open('mkdocs.yml')) if __import__('os').path.exists('mkdocs.yml') else print('mkdocs.yml not yet created -- skipping (deferred to Phase 6)')"
 
   mlx-track:
     name: MLX track (Apple Silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     # GitHub's macOS runner cannot be validated locally. Observe one CI cycle,
     # then remove continue-on-error after the next green run.
     continue-on-error: true

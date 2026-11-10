@@ -123,8 +123,7 @@ base 包不含任何 array 框架：不装 torch 也不装 mlx，`import nanovll
 |---|---|---|
 | *(不装)* | yaml + 调度器 + backend 注册表 | 任何机器 |
 | `cuda` | torch、triton、flash-attn、fork 的 attention kernel | Linux/WSL，NVIDIA 卡 |
-| `mlx` | mlx、mlx-lm —— MiniMind-O 的 thinker + talker | Apple Silicon |
-| `mlx-vlm` | 上面那些 + mlx-vlm、torchvision —— SmolVLM | Apple Silicon |
+| `mlx` | mlx、mlx-lm、mlx-vlm、torchvision —— 四个族都能跑 | Apple Silicon |
 | `smolvla` | torch、transformers、lerobot | CUDA（lerobot 要 GPU） |
 | `gradio` | demo UI | 跟任意 family extra 一起 |
 | `dev` | pytest、ruff、black | 任何机器 |
@@ -134,9 +133,13 @@ base 包不含任何 array 框架：不装 torch 也不装 mlx，`import nanovll
 pip install -e ".[dev,cuda]"
 
 # Apple Silicon
-pip install -e ".[dev,mlx]"          # MiniMind-O
-pip install -e ".[dev,mlx-vlm]"      # 再加 SmolVLM
+pip install -e ".[dev,mlx]"          # 四个族都能跑
 ```
+
+`mlx`、`mlx-lm`、`mlx-vlm` 合成一个 extra 是刻意的：它们能在同一个进程里
+共存（MiniMind 的 talker 解码和 SmolVLM 的图文回答在同一个解释器里跑过，没
+有问题），拆开会多出一种"装了 mlx 却在 SmolVLM 上撞 ModuleNotFoundError"的
+状态。
 
 `triton` 和 `flash-attn` 带了 `sys_platform != 'darwin'` 的 marker，所以在
 Mac 上装 `.[cuda]` 只装 torch，不会去拉没有 wheel 的包。

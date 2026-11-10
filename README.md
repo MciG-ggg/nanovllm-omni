@@ -137,19 +137,22 @@ they pull mutually exclusive dependencies (MLX's `mlx-vlm` needs
 |---|---|---|
 | *(none)* | yaml + the scheduler; the backend registry | anywhere |
 | `cuda` | torch, triton, flash-attn, the fork's attention kernel | Linux/WSL, NVIDIA GPU |
-| `mlx` | mlx, mlx-lm — MiniMind-O thinker + talker | Apple Silicon |
-| `mlx-vlm` | the above + mlx-vlm, torchvision — SmolVLM | Apple Silicon |
+| `mlx` | mlx, mlx-lm, mlx-vlm, torchvision — every family | Apple Silicon |
 | `smolvla` | torch, transformers, lerobot | CUDA (lerobot needs a GPU) |
 | `gradio` | the demo UI | alongside any family extra |
 | `dev` | pytest, ruff, black | anywhere |
+
+`mlx`, `mlx-lm` and `mlx-vlm` are one extra on purpose: they coexist in a
+single process (a MiniMind talker decode and a SmolVLM answer run in the
+same interpreter without trouble), and splitting them only adds a mode
+where SmolVLM fails with `ModuleNotFoundError` after installing "mlx".
 
 ```bash
 # Linux / WSL with an NVIDIA card
 pip install -e ".[dev,cuda]"
 
 # Apple Silicon
-pip install -e ".[dev,mlx]"          # MiniMind-O
-pip install -e ".[dev,mlx-vlm]"      # + SmolVLM
+pip install -e ".[dev,mlx]"          # all four families
 ```
 
 `triton` and `flash-attn` carry a `sys_platform != 'darwin'` marker, so

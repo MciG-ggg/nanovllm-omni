@@ -40,14 +40,17 @@ dependencies = [
 #                                the deploy configs. `import nanovllm_omni`
 #                                works with none of the extras installed.
 #   cuda   torch + triton + flash-attn, the fork's attention kernel.
-#   mlx    Apple Silicon: mlx + mlx-lm for the text models.
-#   mlx-vlm  the above plus mlx-vlm + torchvision for the vision families.
+#   mlx    Apple Silicon: mlx + mlx-lm + mlx-vlm + torchvision. One extra
+#          for all of MLX, because those three libraries coexist in one
+#          process (verified) and splitting them only creates a mode where
+#          SmolVLM fails after the user installed "mlx".
 #
-# They cannot share one environment: mlx-vlm 0.7 needs `datasets>=4` while
-# lerobot 0.3 (the smolvla extra) needs `datasets<=3.6`, and mlx-vlm needs
-# `starlette>=1.0.1` while gradio 5 pins it below 1.0. uv resolves every
-# extra into one lockfile, so a single list would be unsolvable. Installing
-# `.[cuda]` and `.[mlx]` together is a user error, not a supported mode.
+# `cuda` and `mlx` cannot share one environment: triton has no macOS wheel,
+# and the two torch builds disagree. `smolvla` cannot share one with `mlx`
+# either: mlx-vlm needs `datasets>=4` while lerobot 0.3 needs `datasets<=3.6`.
+# uv resolves every extra into one lockfile, so a list that forced both would
+# be unsolvable. Installing `.[cuda]` and `.[mlx]` together is a user error,
+# not a supported mode.
 # ---------------------------------------------------------------------------
 cuda = [
     # Mirrors third_party/nano-vllm's own `[cuda]` extra; that is where the
@@ -69,18 +72,13 @@ cuda = [
     "funasr>=1.0",
 ]
 mlx = [
+    # One extra, not two. `mlx`, `mlx-lm` and `mlx-vlm` coexist in one
+    # process without trouble (verified: a MiniMind talker decode and a
+    # SmolVLM image answer in the same interpreter), they are small, and a
+    # split extra only creates a mode where SmolVLM fails with
+    # ModuleNotFoundError after the user installed "mlx".
     "mlx>=0.32.4",
     "mlx-lm>=0.32.2",
-    # `_as_mx` in backend/mlx_talker.py goes through numpy; code2wav still
-    # needs torch and transformers for the Mimi codec (ADR 0024).
-    "numpy>=1.24",
-    "safetensors>=0.4",
-    "torch>=2.0",
-    # mlx-lm 0.32.2 imports transformers' nested `rope_parameters` shape.
-    "transformers>=5.0",
-]
-mlx-vlm = [
-    "mlx>=0.32.4",
     "mlx-vlm>=0.7.12",
     # Required, not optional: transformers 5's Idefics3 image processor
     # silently falls back to numpy output without torchvision, and the MLX
@@ -88,12 +86,17 @@ mlx-vlm = [
     "torchvision>=0.19",
     "Pillow>=10.0",
     "numpy>=1.24",
+    "safetensors>=0.4",
+    # `_as_mx` in backend/mlx_talker.py goes through numpy, and code2wav
+    # still needs torch + transformers for the Mimi codec (ADR 0024).
     "torch>=2.0",
+    # mlx-lm 0.32.2 imports transformers' nested `rope_parameters` shape;
+    # mlx-vlm 0.7.12 asks for >=5.14.
     "transformers>=5.0",
 ]
 # Model families. `smolvla` pulls lerobot, which pins `datasets<=3.6`; that
-# is the constraint that makes it uninstallable next to mlx-vlm. Keep it in
-# its own environment.
+# is the constraint that makes it uninstallable next to the mlx extra. Keep
+# it in its own environment.
 smolvla = [
     "torch>=2.3.1",
     "transformers>=4.40",

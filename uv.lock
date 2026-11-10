@@ -2054,16 +2054,10 @@ gradio = [
 mlx = [
     { name = "mlx" },
     { name = "mlx-lm" },
-    { name = "numpy" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-mlx-vlm = [
-    { name = "mlx" },
     { name = "mlx-vlm" },
     { name = "numpy" },
     { name = "pillow" },
+    { name = "safetensors" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "transformers" },
@@ -2107,15 +2101,13 @@ requires-dist = [
     { name = "lerobot", marker = "extra == 'smolvla'", specifier = ">=0.3" },
     { name = "librosa", marker = "extra == 'cuda'", specifier = ">=0.10" },
     { name = "mlx", marker = "extra == 'mlx'", specifier = ">=0.32.4" },
-    { name = "mlx", marker = "extra == 'mlx-vlm'", specifier = ">=0.32.4" },
     { name = "mlx-lm", marker = "extra == 'mlx'", specifier = ">=0.32.2" },
-    { name = "mlx-vlm", marker = "extra == 'mlx-vlm'", specifier = ">=0.7.12" },
+    { name = "mlx-vlm", marker = "extra == 'mlx'", specifier = ">=0.7.12" },
     { name = "nano-vllm", editable = "third_party/nano-vllm" },
     { name = "numpy", marker = "extra == 'mlx'", specifier = ">=1.24" },
-    { name = "numpy", marker = "extra == 'mlx-vlm'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'smolvla'", specifier = ">=1.24" },
     { name = "onnxruntime", marker = "extra == 'cuda'", specifier = ">=1.16" },
-    { name = "pillow", marker = "extra == 'mlx-vlm'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'mlx'", specifier = ">=10.0" },
     { name = "pillow", marker = "extra == 'smolvla'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -2124,17 +2116,15 @@ requires-dist = [
     { name = "soundfile", marker = "extra == 'cuda'", specifier = ">=0.12" },
     { name = "torch", marker = "extra == 'cuda'", specifier = ">=2.4.0" },
     { name = "torch", marker = "extra == 'mlx'", specifier = ">=2.0" },
-    { name = "torch", marker = "extra == 'mlx-vlm'", specifier = ">=2.0" },
     { name = "torch", marker = "extra == 'smolvla'", specifier = ">=2.3.1" },
-    { name = "torchvision", marker = "extra == 'mlx-vlm'", specifier = ">=0.19" },
+    { name = "torchvision", marker = "extra == 'mlx'", specifier = ">=0.19" },
     { name = "transformers", marker = "extra == 'cuda'", specifier = ">=4.51" },
     { name = "transformers", marker = "extra == 'mlx'", specifier = ">=5.0" },
-    { name = "transformers", marker = "extra == 'mlx-vlm'", specifier = ">=5.0" },
     { name = "transformers", marker = "extra == 'smolvla'", specifier = ">=4.40" },
     { name = "triton", marker = "sys_platform != 'darwin' and extra == 'cuda'", specifier = ">=3.0.0" },
     { name = "tyro", marker = "extra == 'experiments'", specifier = ">=0.9" },
 ]
-provides-extras = ["cuda", "mlx", "mlx-vlm", "smolvla", "gradio", "dev", "experiments"]
+provides-extras = ["cuda", "mlx", "smolvla", "gradio", "dev", "experiments"]
 
 [package.metadata.requires-dev]
 gradio = [{ name = "gradio", specifier = ">=6.0" }]

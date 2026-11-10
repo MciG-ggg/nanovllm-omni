@@ -68,7 +68,22 @@ def test_the_base_declares_no_framework() -> None:
     extras = project["optional-dependencies"]
     assert "cuda" in extras and "mlx" in extras, "the tracks must be separate extras"
     assert any("triton" in dep for dep in extras["cuda"])
-    assert any("mlx-lm" in dep for dep in extras["mlx"])
+
+
+def test_the_mlx_extra_carries_every_mlx_library() -> None:
+    """One extra for MLX: the three libraries coexist, so splitting is a trap."""
+    import tomllib
+
+    project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    mlx = " ".join(project["optional-dependencies"]["mlx"])
+
+    for package in ("mlx>=", "mlx-lm>=", "mlx-vlm>=", "torchvision>="):
+        assert package in mlx, f"{package!r} is missing from the mlx extra"
+
+    assert "mlx-vlm" not in project["optional-dependencies"], (
+        "mlx-vlm must not be its own extra: installing `mlx` alone would then "
+        "leave SmolVLM failing with ModuleNotFoundError"
+    )
 
 
 def test_the_cuda_track_is_marked_off_macos() -> None:

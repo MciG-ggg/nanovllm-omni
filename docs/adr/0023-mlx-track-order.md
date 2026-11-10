@@ -60,8 +60,8 @@ CUDA 轨的 `audio_codes` / token 序列比（ADR 0021 的 token 级一致）。
 - **backend**：`MlxStageRunner` 走完整 AR 循环（prefill → 采样 → 逐 token
   decode）。单序列用 `KVCache`；多序列左补齐后用 `BatchKVCache`（逐行 RoPE
   offset + pad 列 mask）。`capabilities.max_batch` 从 1 改为 `None`。
-  `bridge_hidden()` 返回 `None`——milestone 1 没有 talker，`bridge_layer`
-  的位置留在模型侧，未接线。
+  `bridge_hidden()` 返回第 `bridge_layer` 层之后、final norm 之前的行
+  （recorder 包住那一层；见下文「thinker stage 在 MLX 上跑通」）。
 - **采样**：对齐 CUDA 的
   `models/minimind_omni/stage_runner.py::_sampler_with_rp`：temperature 下限
   1e-5、full-history repetition penalty（默认 1.05）、top-p、每序列独立
@@ -104,7 +104,8 @@ CUDA 轨的 `audio_codes` / token 序列比（ADR 0021 的 token 级一致）。
 - **ADR 0021 的 token 级一致未验证**：本机没有 CUDA 基线。另外两边 RNG 流
   不同（`torch.multinomial` vs `mx.random.categorical`），相同 seed 只对齐
   参数，不对齐随机流；真要对 token，需要先统一采样器。
-- **bridge_layer / talker / code2wav 未接**。thinker-only 不需要 bridge 行。
+- **code2wav 未接**。thinker 与 talker 已在 MLX 上串通（见下文）；code2wav 仍是
+  torch 侧的 Mimi，Mac 上走 CPU。
 
 ### `mx.compile` 的实测（2026-11-09 补）
 
@@ -255,9 +256,67 @@ block table 非连续且带 `-1` 洞）：
 - 上面说的「8 池各自 rebind」的测量没做。
 - trace 次数没测。
 
+### talker 的 MLX 版（2026-11-10 补）
+
+- `backend/mlx_talker.py`：`MiniMindTalker` 的 MLX 移植（fp32 的 RMSNorm、
+  GQA + 逐头 q/k RMSNorm、rotate-half RoPE、SwiGLU、8 码本的 embed/head
+  适配器、`embed_proj`/`codec_proj`/`spk_proj`、两个标量 scale）加上
+  `MlxTalkerRunner`。调度、发射门、top-50 + 抽样、逐码本 last-3 的
+  repetition penalty 都与 `backend/torch_talker.py` 一致；`talker_kv="windowed"`
+  也接上了。
+- `backend/mlx_backend.py`：`MlxBackend.make_talker_runner`；`MlxStageRunner.forward`
+  改成先跑 body（`model.model`）再跑 head，body 的 hidden states 留在 runner 上，
+  `bridge_hidden()` 返回它们（`[B, T, hidden]`）。
+- 权重：`scripts/convert_minimind_talker_mlx.py` 把 checkpoint 里的 `talker.*`
+  转成 `~/models/minimind-3o/mlx-talker`（`model.safetensors` + `config.json`），
+  `--check` 用随机 bridge 比对两边的 logits。
+
+**实测**（M2 Air，mlx 0.32.4 / torch 2.11.0 CPU fp16）：八个码本的 logits 最大
+绝对偏差 **0.0625**，均值 0.0033–0.0118（序列长 1 / 2 / 8 / 12 / 33 / 64）。
+logits 量级到 42，fp16 的格步是 0.03125，所以这是 fp16 舍入而不是模型差异；
+ADR 0022 记的 teacher-forced 基线也是 0.0625。窗口版与 dense 版在同一绝对列上
+的偏差同样是 0.0625。
+
+**两边的 frames 不可比**：`torch.multinomial`（指数竞速）与
+`mx.random.categorical`（Gumbel-max）走不同的随机流，同 seed 只对齐参数、不对齐
+抽样。实测同一 seed、同一 bridge：帧数相同（16 帧），逐帧相同的 0 帧。
+
+### thinker stage 在 MLX 上跑通（2026-11-10 补）
+
+- `bridge_hidden()` 现在取第 `bridge_layer`（=3）层之后、final norm 之前的
+  hidden，与 vendor、fork 同一处：recorder 包住那一层。实测对 vendor 的最大
+  绝对差 **0.25**（幅值 10128，相对 2.5e-05），见 `tests/test_mlx_bridge.py`。
+- `models/minimind_omni/stage_runner.py::decode_minimind_mlx`：MLX 版的 vendor
+  decode 舞步——一个 dense batch（左补齐），采样配方复用
+  `backend/mlx_backend.py::_make_sampler`（temperature、full-history
+  repetition penalty、top-p、每序列一个 RNG key），post-EOS 的 filler clocking
+  （先 `enter_token` 再 `pad_token`）与 `talker_tail` 停止条件与 CUDA 轨一致。
+  MLX 的 recorder 只留最后一次 forward 的行，所以 bridge 来自一次全序列
+  forward（fresh cache）重跑，理由同 CUDA 轨的 `recapture_bridge_minimind`。
+- `models/minimind_omni/stage.py::ThinkerStage`：按 `extra["backend"]` 选驱动。
+  `backend="mlx"` 时加载 `<checkpoint>/mlx-thinker`（不是 torch checkpoint），
+  不 import torch 的 thinker 模块（不需要 triton），也不建 NCCL 进程组；
+  `args.device` 是 torch 的旋钮（没有 CUDA 时读 `"cpu"`），不传给 MLX backend。
+
+**实测**（M2 Air，mlx 0.32.4 / mlx-lm 0.32.2，fp16）：
+
+- 中文 prompt「今天天气怎么样？」，`temperature=0.7`、`max_tokens=16`、
+  `seed=42`：文本「今天的天气情况因地而异，建议您查看当地的天气预」，
+  bridge `[38, 768]`（22 个 prompt 位置 + 16 个生成位置）。
+- 与 vendor 的 bridge 对比（vendor 在 CPU 上跑 fp16，同一条 token 序列）：
+  最大绝对偏差 **0.25**，bridge 量级 10128，相对偏差 **2.47e-05**。
+- post-EOS filler：EOS 落在第 22 个位置，`content_len=22` + `talker_tail=8`
+  → 生成 30 个 token（EOS 后 1 个 `enter_token` + 7 个 `pad_token`），
+  bridge `[52, 768]`。
+- 批：两条 prompt（各 22 token）在一个 dense batch 里跑，各自 `[30, 768]`，
+  `thinker2talker` 交接出 `start_pos=22`、`num_steps=8`。
+
+测试：`tests/test_minimind_thinker_mlx.py`（`pytest.importorskip("mlx")`，
+没有 `~/models/minimind-3o/mlx-thinker` 时 skip）。
+
 ## 边界
 
-- 本 ADR **不**承诺 MLX 轨能跑完整 omni 管线。MiniMind-O 的完整管线需要 talker，
-  而 talker 的 MLX 版尚未存在。
+- 本 ADR **不**承诺 MLX 轨能跑完整 omni 管线。talker 的 MLX 版已经有了，
+  但端到端的 bridge 语义（上一节）与 code2wav 还没接。
 - 本 ADR **不**决定 kernel 源码放哪个目录、怎么编译加载——实现细节。
 - 本 ADR **不**改 ADR 0019 的分工：大块归 MLX 轨，本 ADR 定的正是 MLX 轨的内部顺序。

@@ -105,6 +105,26 @@ while not scheduler.is_finished():
 
 每轮先把手上的 `is_finished` 序列从 `scheduler.running` 摘掉、同时 `filter` 掉对应行。
 
+### 一条硬约束：decode 的行数必须等于 cache 的行数
+
+`mx.fast.rope` 的 `offset` 长度必须等于本步输入的行数。cache 有几行、
+这次喂几行，两者必须一致，否则报错：
+
+```
+cache 有 2 行, 喂 1 行 -> FAIL [rope] offset must be a scalar or vector with 1 elements but has shape (2)
+cache 有 2 行, 喂 2 行 -> OK
+cache 有 2 行, 喂 3 行 -> FAIL [rope] offset must be a scalar or vector with 3 elements but has shape (2)
+```
+
+这条约束是 `BatchKVCache` 的直接后果：它的 `offset` 是一个长度等于批次的数组。
+
+推论：**退役序列删 cache 行时，必须在同一步把那个序列从 `schedule()` 返回的
+`seqs` 里去掉**。`decode_minimind_mlx` 的 `_filter_inactive_cache_rows` 在
+`schedule()` 之后、`prepare_*` 之前调用，两边看到的是同一批 `seqs`，所以行数一致。
+
+（ADR 0023 记过「`mx.fast.rope` 的 `offset` 最多一维」，那条说的是维度上限；
+这里是长度上限，是另一回事。）
+
 ### bridge rows：重跑整条序列
 
 MLX 的 bridge rows 不能靠 decode 期间累积。原因是算过的位置和 bridge row 不是

@@ -17,8 +17,16 @@ CUDA 轨的**这一轮**做到：talker 的模型代码自己写（ADR 0020 的�
 | 层 | 判定 | 这次的闸门 |
 |---|---|---|
 | **P0 自洽** | 同引擎、同输入、同 seed 跑两次 | `audio_codes` 逐位相同 + WAV sha256 相同 |
-| **P1 行为** | 与参照实现的 token 序列是否一致 | 重写版 vs vendor：同 prompt 同 seed 的 `audio_codes` 序列**逐位相同** |
+| **P1 行为** | 与参照实现的 token 序列是否一致 | ~~重写版 vs vendor：同 prompt 同 seed 的 `audio_codes` 序列**逐位相同**~~；由下文三档判据取代 / 放宽 |
 | **P2 数值** | 固定输入下数值是否在容差内 | teacher-forced 对照：audio logits 的 max abs diff 在容差内 |
+
+**P1 判据修订（2026-11-10；依据 ADR 0021 §「二、「输出一致」的定义」）**：原来的逐位判据保留为 `EXACT` 档，但不再是唯一通过条件。对同 prompt、同 seed 的 vendor / 重写版比较，标准如下：
+
+- `EXACT`：两臂的 `audio_codes` 序列逐位相同。
+- `TOP_K_MATCH`：在第一个分歧位置，两臂各自选出的 code 都在对方同位置、同码本的 top-k 候选集合里。
+- `FAIL`：不满足 `EXACT` 或 `TOP_K_MATCH`。
+
+`EXACT` 仍是首选结果；三档标准放宽的是通过条件，不降低期望值。这样修订是因为本 ADR 下文已说明，重写版只计算最后一个位置的 `lm_head`，使 GEMM 从 `[T, H] × [H, V]` 变成 `[1, H] × [H, V]`；cuBLAS 可能选到不同的 kernel，导致 bit 漂移。正确实现因此可能不满足原 P1 的逐位判据。三档命名与首分歧位的交叉 top-k 判据沿用 ADR 0021；本闸门的 `EXACT` 按这里定义的 `audio_codes` 全序列逐位比较。
 
 **P2 不是 bitwise，而且这一轮明确不追求 bitwise。** 理由（ADR 0011 §2 已经写了）：
 只有固定整条栈时逐 bit 才有定义。重写会改变 GEMM 的形状——最直接的是

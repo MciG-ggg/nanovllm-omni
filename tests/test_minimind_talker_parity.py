@@ -52,6 +52,10 @@ MAX_NEW_TOKENS = 24
 # wrong embedding, norm, or RoPE path (ADR 0022).
 MAX_ABS_DIFF = 0.125
 MAX_MEAN_ABS_DIFF = 0.01
+TOP_K = 5
+EXACT = "EXACT"
+TOP_K_MATCH = "TOP_K_MATCH"
+FAIL = "FAIL"
 
 _WSL_HINT = (
     "CUDA-only parity gate. Run it on the WSL box where the RTX 3050 baseline "
@@ -68,10 +72,13 @@ import sys
 import torch
 
 from nanovllm_omni import Omni, SamplingParams
+from nanovllm_omni.backend.torch_talker import TorchTalkerRunner
 from nanovllm_omni.models.minimind_omni.stage import TalkerStage
 
 codes = []
+topk_candidates = []
 original = TalkerStage.__call__
+original_logits = TorchTalkerRunner._logits
 
 
 def _spy(self, payload, sampling):
@@ -80,7 +87,16 @@ def _spy(self, payload, sampling):
     return output
 
 
+def _capture_logits(self, bridge, audio_codes, spk_emb, cache):
+    logits = original_logits(self, bridge, audio_codes, spk_emb, cache)
+    topk_candidates.append(
+        [logits_i[0, -1, :].topk({TOP_K}).indices for logits_i in logits]
+    )
+    return logits
+
+
 TalkerStage.__call__ = _spy
+TorchTalkerRunner._logits = _capture_logits
 omni = Omni(
     {MODEL!r},
     mimi_model_id={MIMI!r},
@@ -99,7 +115,10 @@ with torch.no_grad():
             extra={{"repetition_penalty": 1.0}},
         ),
     )
-print(json.dumps(codes[0]))
+print(json.dumps({{"codes": codes[0], "topk": [
+    [indices.cpu().tolist() for indices in step]
+    for step in topk_candidates
+]}}))
 """
 
 
@@ -152,7 +171,9 @@ def _payload(num_steps: int = NUM_STEPS) -> TalkerInputPayload:
     )
 
 
-def _run_pipeline(impl: str) -> list[list[int]]:
+def _run_pipeline(
+    impl: str,
+) -> tuple[list[list[int]], list[list[list[int]]]]:
     result = subprocess.run(
         [sys.executable, "-c", _CHILD, impl],
         capture_output=True,
@@ -160,7 +181,70 @@ def _run_pipeline(impl: str) -> list[list[int]]:
         env=dict(os.environ, HF_HUB_OFFLINE="1"),
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    captured = json.loads(result.stdout.strip().splitlines()[-1])
+    return captured["codes"], captured["topk"]
+
+
+def audio_code_parity_verdict(
+    vendor_codes: list[list[int]],
+    rewritten_codes: list[list[int]],
+    vendor_topk: list[list[list[int]]],
+    rewritten_topk: list[list[list[int]]],
+) -> str:
+    if vendor_codes == rewritten_codes:
+        return EXACT
+
+    # Length mismatch is a parity verdict (FAIL), not an error: the two arms
+    # may stop at different frames, and that is exactly what this reports.
+    for frame_index, (vendor_frame, rewritten_frame) in enumerate(
+        zip(vendor_codes, rewritten_codes, strict=False)
+    ):
+        for codebook_index, (vendor_code, rewritten_code) in enumerate(
+            zip(vendor_frame, rewritten_frame, strict=False)
+        ):
+            if vendor_code == rewritten_code:
+                continue
+            # Emitted frame f uses codebook i at sampled position f + i + 1.
+            step = frame_index + codebook_index + 1
+            vendor_candidates = vendor_topk[step][codebook_index]
+            rewritten_candidates = rewritten_topk[step][codebook_index]
+            if vendor_code in rewritten_candidates and rewritten_code in vendor_candidates:
+                return TOP_K_MATCH
+            return FAIL
+    return FAIL
+
+
+def test_audio_code_parity_verdict_uses_top_k_candidates() -> None:
+    vendor_codes = [[11, 20, 12, 13, 14, 15, 16, 17]]
+    rewritten_codes = [[11, 21, 12, 13, 14, 15, 16, 17]]
+    matching_vendor_logits = torch.full((3, 8, 32), -100.0)
+    matching_rewritten_logits = torch.full((3, 8, 32), -100.0)
+    matching_vendor_logits[2, 1, 20] = 10.0
+    matching_vendor_logits[2, 1, 21] = 9.0
+    matching_rewritten_logits[2, 1, 21] = 10.0
+    matching_rewritten_logits[2, 1, 20] = 9.0
+    failing_vendor_logits = torch.full((3, 8, 32), -100.0)
+    failing_rewritten_logits = torch.full((3, 8, 32), -100.0)
+    failing_vendor_logits[2, 1, 20] = 10.0
+    failing_vendor_logits[2, 1, 21] = 9.0
+    failing_rewritten_logits[2, 1, 21] = 10.0
+    failing_rewritten_logits[2, 1, 0:4] = torch.tensor([9.0, 8.0, 7.0, 6.0])
+
+    matching_vendor_topk = matching_vendor_logits.topk(TOP_K, dim=-1).indices.tolist()
+    matching_rewritten_topk = matching_rewritten_logits.topk(TOP_K, dim=-1).indices.tolist()
+    failing_vendor_topk = failing_vendor_logits.topk(TOP_K, dim=-1).indices.tolist()
+    failing_rewritten_topk = failing_rewritten_logits.topk(TOP_K, dim=-1).indices.tolist()
+    exact_verdict = audio_code_parity_verdict(
+        vendor_codes, vendor_codes, matching_vendor_topk, matching_vendor_topk
+    )
+    topk_verdict = audio_code_parity_verdict(
+        vendor_codes, rewritten_codes, matching_vendor_topk, matching_rewritten_topk
+    )
+    fail_verdict = audio_code_parity_verdict(
+        vendor_codes, rewritten_codes, failing_vendor_topk, failing_rewritten_topk
+    )
+
+    assert (exact_verdict, topk_verdict, fail_verdict) == (EXACT, TOP_K_MATCH, FAIL)
 
 
 @pytest.mark.smoke
@@ -197,11 +281,18 @@ def test_rewritten_audio_codes_match_vendor() -> None:
     if not os.path.isdir(MODEL) or not os.path.isdir(MIMI):
         pytest.skip(f"MiniMind/Mimi weights not found: {MODEL}, {MIMI}")
 
-    vendor = _run_pipeline("vendor")
-    rewritten = _run_pipeline("rewritten")
+    vendor_codes, vendor_topk = _run_pipeline("vendor")
+    rewritten_codes, rewritten_topk = _run_pipeline("rewritten")
 
-    assert vendor, "the vendor arm emitted no frames; the gate would pass vacuously"
-    assert rewritten == vendor
+    assert vendor_codes, "the vendor arm emitted no frames; the gate would pass vacuously"
+    assert rewritten_codes, "the rewritten arm emitted no frames; the gate would pass vacuously"
+    verdict = audio_code_parity_verdict(
+        vendor_codes,
+        rewritten_codes,
+        vendor_topk,
+        rewritten_topk,
+    )
+    assert verdict in (EXACT, TOP_K_MATCH), f"P1 parity verdict: {verdict}"
 
 
 @pytest.mark.smoke

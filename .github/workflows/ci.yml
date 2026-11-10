@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +59,12 @@ jobs:
         run: |
           uv run python -m compileall -q nanovllm_omni
 
+      - name: Build wheel and verify package contents
+        run: |
+          uv build --wheel
+          python -m zipfile -l dist/*.whl | grep -q 'nanovllm_omni/backend/base.py'
+          python -m zipfile -l dist/*.whl | grep -q 'nanovllm_omni/backend/mlx_kernel/paged_attention.metal'
+
       - name: Run unit tests (skip smoke + skip torch-requiring)
         run: |
           # -m "not smoke" excludes the smoke-marked tests (those need real
@@ -75,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -121,7 +127,7 @@ jobs:
           submodules: recursive
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true

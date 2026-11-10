@@ -15,17 +15,21 @@ Two gates:
   logits on CPU in fp32. It needs no GPU, no triton and no fork attention, so
   it runs anywhere.
 - ``test_windowed_stage_matches_dense_codes`` compares the audio codes the
-  stage produces under both paths. That one goes through the full pipeline and
-  is CUDA-only.
+  stage produces under both paths on CPU with a fixed bridge and checkpoint.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
+torch = pytest.importorskip("torch")
+
 MODEL = os.environ.get("MINIMIND_PARITY_MODEL_DIR", os.path.expanduser("~/models/minimind-3o"))
+PROMPT_LEN = 12
 
 # fp32 on CPU: the window and dense arms differ only in the attention GEMM's
 # shape, so the drift is GEMM reduction noise, not a semantic difference.
@@ -42,10 +46,38 @@ def _require_checkpoint() -> None:
         pytest.skip(f"checkpoint not found at {MODEL}")
 
 
+def _stage(kv: str):
+    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
+
+    return TalkerStage(
+        deploy=None,
+        args=SimpleNamespace(
+            model=MODEL,
+            device="cpu",
+            dtype="float32",
+            extra={"talker_impl": "rewritten", "talker_kv": kv},
+        ),
+    )
+
+
+def _payload(bridge: torch.Tensor, entry: dict):
+    from nanovllm_omni.models.minimind_omni.stage_processors import TalkerInputPayload
+
+    length = bridge.shape[0]
+    num_steps = entry["num_steps"]
+    return TalkerInputPayload(
+        input_ids=torch.zeros(length, dtype=torch.long),
+        bridge_states=bridge,
+        text_token_ids=tuple(range(length)),
+        prompt_token_ids=tuple(range(PROMPT_LEN)),
+        output_token_ids=tuple(range(PROMPT_LEN, length)),
+        metadata={"start_pos": PROMPT_LEN, "num_steps": num_steps},
+    )
+
+
 def test_windowed_matches_dense_logits() -> None:
     """The windowed path must land on the same logits as the dense path."""
     _require_checkpoint()
-    import torch
 
     from nanovllm_omni.models.minimind_omni.talker import (
         TalkerConfig,
@@ -93,7 +125,6 @@ def test_windowed_matches_dense_logits() -> None:
 def test_windowed_cache_keeps_the_settled_prefix() -> None:
     """The cache holds the settled prefix; its length is the next RoPE offset."""
     _require_checkpoint()
-    import torch
 
     from nanovllm_omni.models.minimind_omni.talker import (
         TalkerConfig,
@@ -125,21 +156,23 @@ def test_windowed_cache_keeps_the_settled_prefix() -> None:
 
 
 def test_windowed_stage_matches_dense_codes() -> None:
-    """The stage must emit the same audio codes under both paths.
-
-    CUDA-only: the stage's bridge comes from the thinker, whose fork
-    attention needs triton.
-    """
-    pytest.importorskip("torch")
-    import torch
-
-    if not torch.cuda.is_available():
-        pytest.skip(
-            "CUDA-only gate. Run it on the WSL box where the RTX 3050 baseline "
-            "lives (ADR 0014: do not compare across machines):\n"
-            "  ssh mcigs-wsl && cd ~/Projects/nanovllm-omni\n"
-            "  export PYTHONPATH=$PWD:$PWD/third_party/nano-vllm KMP_DUPLICATE_LIB_OK=TRUE\n"
-            "  uv run python -m pytest tests/test_minimind_talker_windowed.py -m smoke -v"
-        )
+    """The stage must emit the same audio codes under both paths."""
     _require_checkpoint()
-    pytest.skip("wired up after the model-level gate is green")
+
+    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "talker_golden_cpu.json")
+    with open(fixture, encoding="utf-8") as handle:
+        entry = json.load(handle)["dense_seed42_steps12"]
+    generator = torch.Generator().manual_seed(entry["bridge_seed"])
+    bridge = torch.randn(
+        PROMPT_LEN + entry["num_steps"], 768, generator=generator, dtype=torch.float32
+    )
+    dense_payload = _payload(bridge, entry)
+    windowed_payload = _payload(bridge, entry)
+    sampling = SimpleNamespace(extra={"audio_temperature": 0.2}, seed=entry["seed"])
+    dense_stage = _stage("dense")
+    windowed_stage = _stage("windowed")
+
+    dense_codes = dense_stage(dense_payload, sampling).audio_codes
+    windowed_codes = windowed_stage(windowed_payload, sampling).audio_codes
+
+    assert torch.equal(dense_codes, windowed_codes)

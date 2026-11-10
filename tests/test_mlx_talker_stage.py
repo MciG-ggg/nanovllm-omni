@@ -8,15 +8,13 @@ comparable is the frame count -- the schedule and the emission gate are shared -
 and that is what the cross-runner test asserts.
 
 ``mlx`` is a Mac-track extra the project venv does not have, so the module-level
-guard skips both the MLX and the torch arms on a machine without it. One test is
-a strict xfail: the stage forwards an ``impl=`` kwarg that
-``MlxTalkerRunner.__init__`` does not accept, so ``extra={"backend": "mlx"}``
-cannot build a talker runner today.
+guard skips this module on a machine without it.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -63,20 +61,28 @@ def _request() -> TalkerRequest:
     )
 
 
+@dataclass(frozen=True)
 class _Args:
     """``OmniEngineArgs`` stand-in: the three fields the stage reads."""
 
-    model = MODEL_DIR
-    device = "cpu"
-    dtype = "float16"
-    extra = {"talker_impl": "rewritten", "talker_kv": "dense", "backend": "mlx"}
+    model: str = MODEL_DIR
+    device: str = "cpu"
+    dtype: str = "float16"
+    extra: dict[str, str] = field(
+        default_factory=lambda: {
+            "talker_impl": "rewritten",
+            "talker_kv": "dense",
+            "backend": "mlx",
+        }
+    )
 
 
+@dataclass(frozen=True)
 class _Sampling:
     """``SamplingParams`` stand-in carrying the vendor audio temperature and seed."""
 
-    extra = {"audio_temperature": 0.2}
-    seed = SEED
+    extra: dict[str, float] = field(default_factory=lambda: {"audio_temperature": 0.2})
+    seed: int = SEED
 
 
 def _payload():
@@ -149,27 +155,6 @@ def test_the_stage_routes_through_the_mlx_backend(monkeypatch) -> None:
 
     assert consulted["name"] == "mlx"
     assert consulted["running"] == MLX_TALKER
-
-
-def test_the_stage_produces_frames_once_the_impl_kwarg_is_dropped(monkeypatch) -> None:
-    """The stage path holds end to end apart from the ``impl=`` kwarg; see the xfail."""
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
-
-    _require_checkpoint()
-    make_runner = MlxBackend.make_talker_runner
-
-    def _without_impl(self, model_path, **kwargs):
-        kwargs.pop("impl", None)
-        return make_runner(self, model_path, **kwargs)
-
-    monkeypatch.setattr(MlxBackend, "make_talker_runner", _without_impl)
-    stage = TalkerStage(deploy=None, args=_Args())
-
-    output = stage(_payload(), _Sampling())
-
-    assert isinstance(stage._runner, MlxTalkerRunner)
-    assert output.audio_codes.shape == (EXPECTED_FRAMES, NUM_CODEBOOKS)
-    assert output.audio_codes.tolist() == stage._runner.generate(_request())
 
 
 def test_the_stage_can_build_its_mlx_talker_runner_unpatched() -> None:

@@ -7,8 +7,8 @@ talker + code2wav determinism, not parity.
 
 P1 and P2 are CUDA gates and skip elsewhere with the WSL command in the reason.
 P1 runs the full pipeline once per talker implementation and compares the
-sampled code sequence. P2 replays the rewritten forward on the exact tensors
-the vendor driver saw and compares the last-position logits it would sample.
+sampled code sequence. P2 captures the vendor runner's teacher-forced inputs,
+then compares both ``TorchTalkerRunner._logits`` paths at active codebooks.
 
 transformers / Mimi load inside helpers: only ``-m smoke`` runs reach them.
 """
@@ -47,10 +47,9 @@ NUM_STEPS = 32
 MAX_NEW_TOKENS = 24
 
 # ADR 0011 §4.2 measured max 0.0625 / mean 0.0047 on RTX 3050 fp16 for the
-# teacher-forced talker, where the two arms also differed in bridge input.
-# This gate feeds both arms identical tensors, so the only expected drift is
-# the last-position lm_head GEMM (ADR 0022). Reference value x2 leaves room
-# for fp16 GEMM noise while still catching a wrong embedding/norm/RoPE.
+# teacher-forced talker. This gate feeds both arms identical tensors; the
+# doubled limits leave room for fp16 implementation drift while catching a
+# wrong embedding, norm, or RoPE path (ADR 0022).
 MAX_ABS_DIFF = 0.125
 MAX_MEAN_ABS_DIFF = 0.01
 
@@ -212,35 +211,52 @@ def test_rewritten_audio_logits_match_vendor() -> None:
     if not os.path.isdir(MODEL):
         pytest.skip(f"MiniMind weights not found: {MODEL}")
 
-    vendor_stage = TalkerStage(SimpleNamespace(), _args("cuda", "vendor"))
-    rewritten_stage = TalkerStage(SimpleNamespace(), _args("cuda", "rewritten"))
-    vendor_stage._ensure_model()
-    rewritten_stage._ensure_model()
+    from nanovllm_omni.backend.base import TalkerRequest
+    from nanovllm_omni.backend.talker_recipe import NUM_CODEBOOKS
+    from nanovllm_omni.backend.torch_talker import TorchTalkerRunner
 
-    calls: list = []
-    original = vendor_stage._talker_logits
+    vendor = TorchTalkerRunner(MODEL, device="cuda", dtype="float16", impl="vendor")
+    rewritten = TorchTalkerRunner(MODEL, device="cuda", dtype="float16", impl="rewritten")
+    payload = _payload()
+    request = TalkerRequest(
+        bridge=payload.bridge_states,
+        num_steps=payload.metadata["num_steps"],
+        start_pos=payload.metadata["start_pos"],
+        seed=SEED,
+        repetition_penalty=1.0,
+        speaker_embedding=payload.speaker_embedding,
+    )
 
-    def _capture(bridge, codes, spk_emb):
-        logits = original(bridge, codes, spk_emb)
+    calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, list[torch.Tensor]]] = []
+    original = vendor._logits
+
+    def _capture(bridge, codes, spk_emb, cache):
+        logits = original(bridge, codes, spk_emb, cache)
         calls.append(
             (
                 bridge.detach().cpu(),
                 codes.detach().cpu(),
+                None if spk_emb is None else spk_emb.detach().cpu(),
                 [row[0, -1, :].detach().float().cpu() for row in logits],
             )
         )
         return logits
 
-    vendor_stage._talker_logits = _capture
+    vendor._logits = _capture
     try:
-        vendor_stage(_payload(), SamplingParams(seed=SEED))
+        vendor.generate(request)
     finally:
-        vendor_stage._talker_logits = original
+        vendor._logits = original
 
     diffs = []
-    for step, (bridge, codes, vendor_logits) in enumerate(calls):
-        ours = rewritten_stage._talker_logits(bridge.to("cuda"), codes.to("cuda"), None)
-        for index in range(min(step, 8)):
+    for step, (bridge, codes, spk_emb, vendor_logits) in enumerate(calls):
+        ours = rewritten._logits(
+            bridge.to("cuda"),
+            codes.to("cuda"),
+            None if spk_emb is None else spk_emb.to("cuda"),
+            None,
+        )
+        for index in range(min(step, NUM_CODEBOOKS)):
             diffs.append((ours[index][0, -1, :].float().cpu() - vendor_logits[index]).abs())
 
     assert diffs, "no active codebook position was compared"

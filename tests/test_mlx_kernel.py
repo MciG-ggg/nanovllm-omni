@@ -27,6 +27,18 @@ def _shape(num_heads: int = 8, num_kv_heads: int = 4) -> DecodeShape:
     return DecodeShape(num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=HEAD_DIM)
 
 
+@pytest.mark.parametrize(
+    ("num_heads", "num_kv_heads", "head_dim", "message"),
+    [
+        (8, 4, 80, "head_dim.*multiple of 32"),
+        (7, 3, 96, "num_heads.*divisible by num_kv_heads"),
+    ],
+)
+def test_decode_shape_rejects_unsupported_shapes(num_heads, num_kv_heads, head_dim, message):
+    with pytest.raises(ValueError, match=message):
+        DecodeShape(num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim)
+
+
 def _pool(block_table: list[list[int]], context_lens: list[int], pool_rows: int):
     """A pool plus a dense reference cache holding the same rows, block-table order."""
     batch = len(context_lens)
@@ -84,6 +96,13 @@ def test_paged_decode_matches_dense_batch_kv_cache():
 
     difference = mx.abs(paged.astype(mx.float32) - dense.astype(mx.float32))
     assert float(difference.max()) < 2e-3
+
+
+def test_paged_decode_rejects_context_beyond_block_table_capacity():
+    shape, query, keys, values, table, lens = _pool([[0]], [BLOCK_SIZE + 1], BLOCK_SIZE)
+
+    with pytest.raises(ValueError, match="context_lens.*capacity.*256"):
+        kernels.paged_decode_attention(query, keys, values, table, lens, shape)
 
 
 def _poisoned_pool(shape: DecodeShape, pool_rows: int):
@@ -168,6 +187,24 @@ def test_store_kv_writes_only_live_slots():
     assert bool(mx.all(keys == 0).item())
 
 
+@pytest.mark.parametrize(
+    ("slot", "message"),
+    [
+        (BLOCK_SIZE, "slot_mapping.*pool_rows.*256"),
+        (-2, "slot_mapping.*-1"),
+    ],
+)
+def test_store_kv_rejects_invalid_slots(slot, message):
+    shape = _shape()
+    keys = mx.zeros((BLOCK_SIZE, shape.num_kv_heads, HEAD_DIM), mx.float16)
+    values = mx.zeros_like(keys)
+    fresh_keys = mx.ones((1, shape.num_kv_heads, HEAD_DIM), mx.float16)
+    fresh_values = mx.ones_like(fresh_keys)
+
+    with pytest.raises(ValueError, match=message):
+        kernels.store_kv(fresh_keys, fresh_values, keys, values, mx.array([slot], mx.int32), shape)
+
+
 def test_store_then_decode_sees_the_new_rows():
     shape = _shape()
     context_len = 300
@@ -193,9 +230,9 @@ def test_store_then_decode_sees_the_new_rows():
     )
     mx.eval(attended)
 
-    # Every key is zero except the stored one, so the output is a weighted
-    # average of 2.0 and 0.0 -- never above the stored value.
-    assert float(mx.abs(attended).max()) <= 2.0 + 1e-3
+    # Every key is zero except the stored one, so every softmax weight is positive.
+    assert float(attended.min()) > 0.0
+    assert float(attended.max()) <= 2.0 + 1e-3
     assert bool(mx.all(mx.isfinite(attended)).item())
 
 

@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any
 
 
 def _default_device() -> str:
@@ -18,7 +18,7 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-OmniPromptType: TypeAlias = str | dict[str, Any]
+type OmniPromptType = str | dict[str, Any]
 """One generate() prompt: text, or a dict carrying modal content.
 
 The dict shape mirrors the reference ``OmniTextPrompt`` -- a ``prompt`` key plus

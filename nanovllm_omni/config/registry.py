@@ -26,12 +26,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import yaml
 
-ModelRegistration: TypeAlias = tuple[str, str, str]
-StageFactoryRegistration: TypeAlias = tuple[str, str]
+type ModelRegistration = tuple[str, str, str]
+type StageFactoryRegistration = tuple[str, str]
 
 
 @dataclass(frozen=True)

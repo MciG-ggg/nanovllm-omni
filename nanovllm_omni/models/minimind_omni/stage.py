@@ -35,6 +35,7 @@ nano-vllm is installed as an editable package via ``uv``
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -469,6 +470,10 @@ class TalkerStage(StageEngine):
         # vendor class is the P1/P2 reference arm, not the default.
         extra = getattr(args, "extra", None) or {}
         self._impl = str(extra.get("talker_impl", "rewritten"))
+        if self._impl not in ("rewritten", "vendor"):
+            raise ValueError(
+                f"unknown talker_impl {self._impl!r}; expected 'rewritten' or 'vendor'"
+            )
         # ADR 0017 windowed KV stays opt-in until its parity gate is green on
         # CUDA (ADR 0022); the dense path is the one with a measured baseline.
         self._kv = str(extra.get("talker_kv", "dense"))
@@ -554,17 +559,10 @@ class TalkerStage(StageEngine):
 
         # ``start_pos``/``num_steps`` arrive precomputed from thinker2talker
         # (prompt length / generated-row count); no second split here.
-        from collections.abc import Mapping as _Mapping
-
-        meta = dict(payload.metadata) if isinstance(payload.metadata, _Mapping) else {}
+        meta = dict(payload.metadata) if isinstance(payload.metadata, Mapping) else {}
         bridge_len = bridge.shape[-2]
         start_pos = int(meta.get("start_pos", len(payload.prompt_token_ids)))
         num_steps = int(meta.get("num_steps", bridge_len - start_pos))
-        if start_pos >= bridge_len:
-            # Degenerate payload (no generated rows): fall back to the
-            # last row as the single decode position.
-            start_pos = max(0, bridge_len - 1)
-            num_steps = bridge_len - start_pos
         if watchdog_limit is not None:
             num_steps = min(num_steps, watchdog_limit)
 

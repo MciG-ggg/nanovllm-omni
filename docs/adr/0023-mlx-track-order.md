@@ -98,14 +98,15 @@ CUDA 轨的 `audio_codes` / token 序列比（ADR 0021 的 token 级一致）。
 
 ### 未完成
 
-- **没有 varlen / paged KV / Metal kernel**。ADR 0021 的 kernel 路线只做到
-  接口设计：`docs/dev/mlx-varlen-kernel-interface.md`。Metal Toolchain 已装好，
-  `mx.fast.metal_kernel` 可用，但 kernel 源码与接线未写。
+- **MlxStageRunner 尚未接入 varlen / paged KV attention**。Metal paged decode
+  attention 与 KV store kernel 已实现于 `nanovllm_omni/backend/mlx_kernel/`，
+  `tests/test_mlx_kernel.py` 有数值闸门；kernel 尚未接进 `MlxStageRunner`，详见
+  `backend/mlx_kernel/kernels.py` 的模块说明。
 - **ADR 0021 的 token 级一致未验证**：本机没有 CUDA 基线。另外两边 RNG 流
   不同（`torch.multinomial` vs `mx.random.categorical`），相同 seed 只对齐
   参数，不对齐随机流；真要对 token，需要先统一采样器。
-- **code2wav 未接**。thinker 与 talker 已在 MLX 上串通（见下文）；code2wav 仍是
-  torch 侧的 Mimi，Mac 上走 CPU。
+- **code2wav 不是 MLX 实现**。thinker 与 talker 已在 MLX 上串通（见下文）；
+  Code2Wav 仍由 torch Mimi 实现，Mac 上走 MPS（ADR 0024）。
 
 ### `mx.compile` 的实测（2026-11-09 补）
 
@@ -223,6 +224,12 @@ block table 非连续且带 `-1` 洞）：
 
 ### 接线还没做完（未提交的半成品留在草稿区）
 
+> **状态更新（2026-11-10）**：本节关于 `mlx_backend.py` 接线损坏的结论已被后续
+> 实现取代。Metal kernel 源码现位于 `nanovllm_omni/backend/mlx_kernel/`，
+> `tests/test_mlx_kernel.py` 覆盖数值闸门；这些 kernel 仍未接入 `MlxStageRunner`。
+> `backend/paged_kv.py`、`backend/paged_attention.py` 与 `docs/dev/paged-kv-draft/`
+> 是当时记录的本地草稿指针，当前 checkout 中均不存在。
+
 `backend/paged_kv.py` 与 `backend/paged_attention.py` 已写完但**没有验证跑通**，
 `mlx_backend.py` 的接线改到一半是坏的（`DEFAULT_MAX_BLOCKS` 的 import 缺失导致 NameError；
 `PagedContext` 的所有权错：`prepare_*` 里整体替换了对象，但各层仍指向旧的那份）。
@@ -316,7 +323,8 @@ ADR 0022 记的 teacher-forced 基线也是 0.0625。窗口版与 dense 版在�
 
 ## 边界
 
-- 本 ADR **不**承诺 MLX 轨能跑完整 omni 管线。talker 的 MLX 版已经有了，
-  但端到端的 bridge 语义（上一节）与 code2wav 还没接。
-- 本 ADR **不**决定 kernel 源码放哪个目录、怎么编译加载——实现细节。
+- 本 ADR **不**承诺 omni 管线全部由 MLX 执行。MiniMind thinker → talker 的 bridge
+  已接通；Code2Wav 仍是 torch/MPS 实现（ADR 0024），所以该链路跨 MLX 与 torch。
+- 本 ADR **不**决定 kernel 如何编译加载——实现细节。源码位置见
+  `nanovllm_omni/backend/mlx_kernel/`。
 - 本 ADR **不**改 ADR 0019 的分工：大块归 MLX 轨，本 ADR 定的正是 MLX 轨的内部顺序。

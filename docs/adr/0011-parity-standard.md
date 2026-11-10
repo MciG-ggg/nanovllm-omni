@@ -149,8 +149,9 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   已删的 `talker.py` 和未修的 bridge），且不会报错。闸门脚本会打印
   `repo under test` 行，跑完先看这行对不对。
 - **MiniMind 音色条件**：`speaker_embedding` 从未被赋值，`ref_codes` 也不支持；
-  当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
-  `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。
+  当前固定走官方 default voice。vendor talker 的 in-place speaker mask 由
+  `backend/torch_talker.py::TorchTalkerRunner._logits` 实现，但接线音色前还要把
+  speaker token 放进 audio buffer。
 - **MiniMind 帧数不能当 parity 指标**：同一 prompt 上四个产物的实测
   （24000 Hz / 16-bit / 单声道，帧数 = 时长 × 12.5）：
 

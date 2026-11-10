@@ -16,9 +16,10 @@ with an asyncio semaphore and a thread pool.
 installed as an editable dependency via `pyproject.toml`'s
 `[tool.uv.sources] nano-vllm = { path = "third_party/nano-vllm", editable = true }`.
 **It is the AR engine behind `Omni.generate`** for the LLM-shaped stages
-(MiniMind-O thinker, SmolVLM). MiniMind-O's talker is **not** on the fork:
-it runs the vendor `MiniMindOmni.talker` module directly (see
-`models/minimind_omni/stage.py`). We do not
+(MiniMind-O thinker, SmolVLM). MiniMind-O's talker is a repository-owned
+rewrite (`models/minimind_omni/talker.py`) and is selected by default; the
+checkpoint-provided talker remains available as a parity reference through
+`talker_impl="vendor"` (see `models/minimind_omni/stage.py`). We do not
 fork it lightly — the vLLM-style paged-KV decoder and CUDA-Graph capture
 path live there, and re-implementing them locally would be a multi-month
 side quest. What we do **not** take from the fork is its
@@ -71,11 +72,14 @@ rebuilt.
 | `engine/runner.py` | Sequential stage execution and deploy merge | Single-replica in-process runner |
 | `engine/executor.py` | Thread-pool and semaphore wrapper | Async transport around the runner |
 | `engine/stage_runner.py` | Fork-AR adapter (`StageRunner`, `get_stage_config`, `_ensure_dist`) — composes fork `ModelRunner` + `Sampler` and exposes the fork-attention lifecycle as discrete methods | New — fork has no local equivalent |
+| `nanovllm_omni/backend/` | Backend protocols, registry, and Torch / MLX AR and talker runners | Local framework-specific stage seam |
+| `nanovllm_omni/backend/mlx_kernel/` | Metal paged decode attention and KV-store kernels with a compile gate; not yet wired into `MlxStageRunner` | Standalone MLX kernel implementation; numerical gate in `tests/test_mlx_kernel.py` |
 | `models/minimind_omni/bundle.py` | Bundle loader: HF model + Mimi codec + tokenizer into one `MinimindBundle` | MiniMind-O only |
 | `models/minimind_omni/thinker.py` | `MiniMindThinker`: 12-layer AR stack on fork layers; bridge hidden state capture into a registered buffer | MiniMind-O only |
+| `models/minimind_omni/talker.py` | Repository-owned MiniMind talker rewrite; dense is the default and windowed KV is optional | MiniMind-O only |
 | `models/minimind_omni/code2wav.py` | Mimi codec decode + WAV envelope | MiniMind-O only |
 | `models/minimind_omni/pipeline.py` | Three-stage `PipelineConfig` declaration | MiniMind-O only |
-| `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes invoked by the factory; the talker runs the vendor `MiniMindOmni.talker` on the thinker bridge | MiniMind-O only |
+| `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes; the repository rewrite is the default talker, with the vendor arm available for parity checks | MiniMind-O only |
 | `models/minimind_omni/stage_runner.py` | MiniMind-O decode recipe (`decode_minimind`, `recapture_bridge_minimind`) composed on `engine.stage_runner.StageRunner` | MiniMind-O only |
 | `models/minimind_omni/stage_processors.py` | `ThinkerStageOutput` / `TalkerInputPayload` / `Code2WavInputPayload` — frozen dataclasses + pure-function converters | MiniMind-O only |
 | `models/minimind_omni/hf_config.py` | `MiniMindOConfig` — the repo's own config class for `model_type: minimind-o`; registered so the hub's `auto_map` file never runs | MiniMind-O only |

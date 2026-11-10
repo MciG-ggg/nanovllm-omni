@@ -55,8 +55,8 @@ stage 层隐式绑在 torch + CUDA 上，而且这个绑定比看上去深：
   `forward` / `sample` / `bridge_hidden` / `model` / `config`，加 `set_context` /
   `reset_context`。进出边界上的 `Sequence` 是 fork 的纯 Python 对象，
   跨边界的只有 batch 张量与 logits。
-- `Backend`——`name` / `device` / `dtype` / `capabilities`，加 `make_config` 与
-  `make_stage_runner`。
+- `Backend`——`name` / `device` / `dtype` / `capabilities`，加 `make_config`、
+  `make_stage_runner` 与 `make_talker_runner`。
 
 `set_context` / `reset_context` 在协议里，是因为 stage 会调：fork 把每步的状态放在
 模块级全局里，MLX 放在 cache 对象里。stage 不该知道是哪一种。
@@ -102,16 +102,19 @@ config 都得是可写的普通对象。
   付费，整批跑到最慢成员结束。这是 ADR 0015 拒绝的过渡形态；真 CB 要等
   `docs/dev/mlx-varlen-kernel-interface.md` 的 kernel 落地。
 - **MLX backend 没有 bridge hidden**：MiniMind-O 的 thinker → talker 桥在 MLX 侧不存在。
-- **MLX backend 已在本机实测 thinker-only**：权重转换、单序列 AR 循环与
-  4 序列 dense batch 都跑通；数字与限制见 ADR 0023 与
-  `docs/perf/minimind-thinker-mlx-2026-11-09.md`。未测 `mx.compile`，也未取得
-  CUDA 基线做 token 级一致。
-- **MLX 还不能驱动完整 pipeline**：decode 循环直接构造 fork `Scheduler`（这部分与
-  框架无关，所以能复用），但 `decode_minimind` 仍按 fork `Config` 的字段走；
-  `extra["backend"]` 当前只有 `torch` 能走完整 stage。MLX 的 thinker 目前由
-  `tools/bench_mlx_thinker.py` 驱动。
-- **torch backend 在 Mac 上跑不了**：triton 无 macOS wheel（见上）。本仓库的 Mac 路线
-  只能是 MLX backend。
+  > 已被 ADR 0023「talker 的 MLX 版」及「thinker stage 在 MLX 上跑通」取代（2026-11-10）：
+  > `MlxStageRunner.bridge_hidden()` 现在返回 bridge hidden 行。
+- **MLX backend 的首轮实测是 thinker-only**：后续已增加 MiniMind talker 的 MLX runner
+  与 SmolVLM 的 `mlx-vlm` 路径，详见 ADR 0023。首轮 thinker 数字与限制仍见
+  `docs/perf/minimind-thinker-mlx-2026-11-09.md`；MLX 与 CUDA 的 token 级一致仍未验证。
+- **并非每个 backend 都有 talker 臂**：`MlxVlmBackend.make_talker_runner()` 在
+  `backend/mlx_vlm.py` 中抛出 `NotImplementedError`；该 backend 用于没有 talker
+  stage 的 SmolVLM，`max_batch=1`。
+- **模型族与 backend 的组合有边界**：MiniMind thinker / talker 可走 `mlx`，SmolVLM
+  有独立的 `mlx-vlm` 路径；Code2Wav 仍由 torch 实现，Mac 上走 MPS（ADR 0024）。
+  MLX paged kernel 尚未接入 `MlxStageRunner`，不能据此声称所有 stage 都由 MLX 执行。
+- **fork 的 torch AR backend 在 Mac 上跑不了**：triton 无 macOS wheel（见上）；
+  Mac 上的 MiniMind thinker / talker 与 SmolVLM 分别走 MLX backend，Code2Wav 走 torch/MPS。
 - `mlx_lm.generate.BatchGenerator` 自带一套增量批处理（`PromptProcessingBatch`
   支持 extend / filter / split）。本 backend 不用它——nanovllm-omni 自己的调度器才是
   被讲的东西。这是另一个值得比的实现，不是现成答案。

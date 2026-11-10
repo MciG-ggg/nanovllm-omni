@@ -195,9 +195,37 @@ def test_mlx_decode_filters_finished_cache_rows_before_next_step(monkeypatch) ->
         for ids, limit in (([1, 2, 3, 4, 5], 2), ([6, 7, 8], 3), ([9, 10, 11, 12, 13], 4))
     ]
 
+    recaptured: list[int] = []
+
+    def fake_recapture(token_ids: list[int]) -> np.ndarray:
+        recaptured.append(len(token_ids))
+        return np.zeros((len(token_ids), 4), dtype=np.float32)
+
+    runner.recapture_bridge = fake_recapture
     results = decode_minimind_mlx(runner, requests)
 
     assert runner._model.forward_rows == [1, 1, 1, 3, 2, 1]
+    # Each request gets one full-sequence re-run for its bridge rows.
+    assert recaptured == [7, 6, 9]
     assert [result.generated for result in results] == [[1, 1], [6, 6, 6], [9, 9, 9, 9]]
     assert all(result.text_state is not None for result in results)
     assert runner._cache is None
+
+
+def test_mlx_recapture_bridge_leaves_the_running_cache_alone(monkeypatch) -> None:
+    """The recapture prefill uses a fresh cache, not the running one."""
+    runner = _fake_runner(monkeypatch, MlxConfig(model_path="unused"))
+    old_sequences = [
+        types.SimpleNamespace(token_ids=[1, 2, 3, 4, 5]),
+        types.SimpleNamespace(token_ids=[6, 7, 8, 9, 10]),
+    ]
+
+    input_ids, positions = runner.prepare_prefill(old_sequences)
+    runner.forward(input_ids, positions, True)
+    running_cache = runner._cache
+    running_idx = running_cache[0]._idx
+
+    runner.recapture_bridge([1, 2, 3, 4, 5, 6, 7])
+
+    assert runner._cache is running_cache
+    assert running_cache[0]._idx == running_idx

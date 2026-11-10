@@ -210,6 +210,29 @@ class MlxStageRunner:
         for cache in self._cache:
             cache.filter(batch_indices)
 
+    def recapture_bridge(self, token_ids: list[int]) -> Any:
+        """One full-sequence prefill, returning the bridge rows ``[T, hidden]``.
+
+        The decode loop forwards one token per step against the paged cache,
+        but the vendor runs full-sequence attention every step. The rows are
+        not bit-equal and the talker cross-attends to them, so the bridge
+        comes from this re-run instead.
+
+        The prefill uses a fresh cache, so the running decode state in
+        ``self._cache`` is untouched.
+        """
+        from mlx_lm.models.cache import BatchKVCache
+
+        if not token_ids:
+            return None
+        cache = [BatchKVCache([0]) for _ in range(len(self._model.layers))]
+        ids = self._mx.array([list(token_ids)], dtype=self._mx.int32)
+        self._model(ids, cache=cache)
+        rows = self.bridge_hidden()
+        if rows is None:
+            return None
+        return rows[0]
+
     def set_context(self, is_prefill: bool, **kwargs: Any) -> None:
         """MLX keeps the per-step state in the cache object, not in globals."""
 

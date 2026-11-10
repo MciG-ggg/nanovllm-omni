@@ -336,8 +336,8 @@ def decode_minimind_mlx(
     """Decode requests with the fork Scheduler and MLX cache rows.
 
     Sampling matches the CUDA thinker's temperature, repetition penalty,
-    top-p, and per-request RNG keys. Bridge rows are collected from scheduled
-    forwards; the last sampled token is not re-run to capture another row.
+    top-p, and per-request RNG keys. The bridge rows come from a
+    full-sequence re-run per request, the same way the CUDA track gets them.
     """
     import mlx.core as mx
     import torch
@@ -455,14 +455,22 @@ def decode_minimind_mlx(
         stage_runner.reset_context()
         _filter_inactive_cache_rows()
 
-    return [
-        ThinkerDecoded(
-            generated=state.generated,
-            bridge_hidden=state.bridge_hidden,
-            text_state=state.text_state,
+    results = []
+    for request, state in zip(requests, states.values(), strict=True):
+        # The decode loop forwarded one token per step against the paged
+        # cache, but the vendor runs full-sequence attention every step.
+        # The rows are not bit-equal and the talker cross-attends to them,
+        # so the bridge comes from a full-sequence re-run.
+        full_ids = list(request.token_ids) + list(state.generated)
+        bridge = stage_runner.recapture_bridge(full_ids)
+        results.append(
+            ThinkerDecoded(
+                generated=state.generated,
+                bridge_hidden=_mx_to_torch(bridge) if bridge is not None else state.bridge_hidden,
+                text_state=state.text_state,
+            )
         )
-        for state in states.values()
-    ]
+    return results
 
 
 __all__ = [

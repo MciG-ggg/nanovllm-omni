@@ -84,21 +84,20 @@ def test_mlx_thinker_decodes_text(decoded: Any) -> None:
     assert len(decoded.prompt_token_ids) > 0
 
 
-def test_mlx_bridge_has_one_row_per_forwarded_position(decoded: Any) -> None:
-    """CHECK: the bridge contains prompt rows and forwarded output positions."""
-    forwarded_positions = len(decoded.prompt_token_ids) + len(decoded.output_token_ids) - 1
+def test_mlx_bridge_has_one_row_per_thinker_position(decoded: Any) -> None:
+    """CHECK: one bridge row per thinker position, ``[T, 768]``."""
+    positions = len(decoded.prompt_token_ids) + len(decoded.output_token_ids)
 
-    assert tuple(decoded.bridge_states.shape) == (forwarded_positions, 768)
+    assert tuple(decoded.bridge_states.shape) == (positions, 768)
 
 
-def test_mlx_bridge_prefix_matches_the_vendor(decoded: Any) -> None:
-    """CHECK: captured rows match the corresponding vendor prefix."""
+def test_mlx_bridge_matches_the_vendor(decoded: Any) -> None:
+    """CHECK: the rows are the vendor's rows."""
     import numpy as np
 
     token_ids = list(decoded.prompt_token_ids) + list(decoded.output_token_ids)
     vendor = _vendor_bridge(token_ids)
-    captured = decoded.bridge_states.numpy()
-    diff = np.abs(vendor[: len(captured)] - captured)
+    diff = np.abs(vendor - decoded.bridge_states.numpy())
 
     # One fp16 step at the bridge's magnitude: both paths use fp16 weights.
     magnitude = float(np.abs(vendor).max())

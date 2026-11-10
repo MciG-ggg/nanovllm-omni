@@ -105,29 +105,40 @@ while not scheduler.is_finished():
 
 每轮先把手上的 `is_finished` 序列从 `scheduler.running` 摘掉、同时 `filter` 掉对应行。
 
-### 已知的损失（写清楚，不遮）
+### bridge rows：重跑整条序列
 
-MLX 现在拿 bridge rows 的办法是**每轮 decode 结束后把整条序列重跑一遍**
-（`stage_runner.py:340-352`、`:365-368` 的 docstring）。切到调度器之后：
+MLX 的 bridge rows 不能靠 decode 期间累积。原因是算过的位置和 bridge row 不是
+一一对应：decode 循环每步 forward 一个 token，但最后一���采样出来的 token 从来没被
+forward，所以它没有 row。
 
-- 一个请求从 prefill 到结束跨多个批次，重跑时它可能已不在当前批次里；
-- 当前实现把多个请求的 rows `cat` 成 `[B, T, 768]`，各序列长度不同，cat 不出来。
+CUDA 轨早就有这个问题的解法（`recapture_bridge_minimind`）：decode 结束后，对每条
+请求**整条序列重跑一次 prefill**，取那一层的 hidden。MLX 侧照做。
 
-本轮接受**只保留"本步仍在批次内"的请求的 bridge rows**，并把 `decode_minimind_mlx`
-的 docstring 改成如实描述。要在贪心 parity 上把这件事做成严格等价，需要在每次
-prefill 之后立刻重跑一次 bridge（`recapture_bridge_minimind` 就是这个思路），那是
-下一轮的事——先让两条轨跑同一个调度器。
+`MlxStageRunner.recapture_bridge`（`backend/mlx_backend.py`）做这件事，关键是它用
+**一份全新的 cache**，不碰 `self._cache`——正在跑的 decode 状态不受影响。
+
+实测（M2 Air，8 层 checkpoint，prompt 22 token + 生成 16 token）：
+
+| 路径 | 行数 | 与 vendor 的最大差 |
+|---|---:|---:|
+| decode 累积 | 37 | 形状就不对（少一行） |
+| **recapture** | **38** | **0.25**（量级 10128，相对 2.5e-5） |
+
+0.25 是 fp16 的精度极限，不是逻辑误差。
 
 ## 后果
 
 - MLX 轨能出和 CUDA 轨同类的数字：动态 join、chunked prefill、preemption。
 - `decode_minimind_mlx` 与 `decode_minimind` 的结构差距缩小到只剩 `forward` 与采样器。
-- bridge rows 的完整性降级，docstring 必须同步改。
+- bridge rows 由整条序列重跑得到，与 CUDA 轨和 vendor 都对齐；
+  重跑的代价是每条请求一次 prefill，ADR 不承诺这一项的吞吐数字。
 - `MlxConfig` 增加 KV 与调度两组字段（`kvcache_block_size` / `num_kvcache_blocks` /
   `max_num_seqs` / `max_num_batched_tokens` / `eos`），`MlxBackend.make_config` 透传，
   `MlxStageRunner.__init__` 从 tokenizer 填 `eos`。
 - decode 阶段每个退役的序列（FINISHED 或 preempt）都要 `filter` 掉它那一行，否则下一轮
   的行数和 cache 行数对不上。
+- `MlxStageRunner` 多一个 `recapture_bridge` 方法：整条序列重跑一次 prefill，
+  用独立的 cache，不影响正在跑的 decode。
 
 ## 边界
 

@@ -221,13 +221,25 @@ class MlxVlmBackend:
         )
 
     def make_config(self, model_path: str, **kwargs: Any) -> MlxVlmConfig:
-        return MlxVlmConfig(
+        # These shared stage kwargs belong to CUDA; MLX uses one device,
+        # loads a converted model, and does not capture CUDA graphs.
+        kwargs.pop("gpu_memory_utilization", None)
+        kwargs.pop("tensor_parallel_size", None)
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("max_capture_bs", None)
+        config = MlxVlmConfig(
             model_path=model_path,
             dtype=kwargs.pop("dtype", None) or self.dtype,
             device=kwargs.pop("device", None) or self.device,
+            kvcache_block_size=kwargs.pop("kvcache_block_size", None) or 256,
+            num_kvcache_blocks=kwargs.pop("num_kvcache_blocks", None) or 64,
             max_num_seqs=kwargs.pop("max_num_seqs", None) or 1,
             max_num_batched_tokens=kwargs.pop("max_num_batched_tokens", None) or 16384,
+            eos=kwargs.pop("eos", None),
         )
+        if kwargs:
+            raise ValueError(f"unsupported MLX VLM config kwargs: {', '.join(sorted(kwargs))}")
+        return config
 
     def make_stage_runner(self, model_class: type, config: Any) -> MlxVlmStageRunner:
         return MlxVlmStageRunner(model_class=model_class, config=config)

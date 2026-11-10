@@ -10,7 +10,8 @@ only the MiniMind-O specific bits:
 
   - weight slicing for the thinker-only safetensors
     (``_THINKER_KEEP_PREFIX`` / ``_thinker_only_dir`` /
-    ``_resolve_model_path``)
+    ``_resolve_model_path``) and the converted ``mlx_lm`` directory
+    (``_resolve_mlx_model_path``)
   - HuggingFace tokenizer loader for the MiniMind-3o snapshot
   - ``ThinkerStage`` and ``TalkerStage`` high-level stage classes
     invoked by ``PipelineRunner``'s ``_stage_factory``.
@@ -34,19 +35,17 @@ nano-vllm is installed as an editable package via ``uv``
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from nanovllm_omni.backend import get_backend
 from nanovllm_omni.engine.stage_engine import StageEngine
-from nanovllm_omni.engine.stage_runner import (
-    StageRunner,
-    _ensure_dist,
-    get_stage_config,
-    stage_kwargs_from_args,
-)
+from nanovllm_omni.engine.stage_runner import _ensure_dist, stage_kwargs_from_args
 from nanovllm_omni.models.minimind_omni.hf_config import register_minimind_config
 from nanovllm_omni.models.minimind_omni.stage_runner import (
     decode_minimind,
+    decode_minimind_mlx,
     recapture_bridge_minimind,
 )
 
@@ -83,6 +82,43 @@ def _resolve_model_path(args: Any) -> str:
             "(fork Config validates the model path is a real directory)."
         )
     return _thinker_only_dir(_resolve_snapshot(model))
+
+
+def _stage_backend(args: Any, extra: dict[str, Any]) -> str:
+    """Which backend this stage runs on.
+
+    ``args.backend`` is the declared knob (``OmniEngineArgs.backend``, also
+    settable per stage in the deploy YAML); ``extra["backend"]`` stays as the
+    older escape hatch so existing callers keep working. The declared value
+    wins, because that is the one the argument validator checked.
+    """
+    declared = getattr(args, "backend", None)
+    if declared:
+        return str(declared)
+    return str(extra.get("backend", "torch"))
+
+
+def _resolve_mlx_model_path(args: Any, subdir: str = "mlx-thinker") -> str:
+    """A converted MLX directory next to the checkpoint.
+
+    ``scripts/convert_minimind_thinker_mlx.py`` writes ``<checkpoint>/mlx-thinker``
+    and ``scripts/convert_minimind_talker_mlx.py`` writes
+    ``<checkpoint>/mlx-talker``; the MLX backend loads those directories
+    instead of the torch checkpoint.
+    """
+    import os
+
+    from .bundle import _resolve_snapshot
+
+    model = getattr(args, "model", None)
+    if not model:
+        raise ValueError("OmniEngineArgs.model is required to construct a StageRunner")
+    path = os.path.join(_resolve_snapshot(model), subdir)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"no {subdir} at {path}; run scripts/convert_minimind_{subdir.split('-')[-1]}_mlx.py"
+        )
+    return path
 
 
 def _thinker_only_dir(src: str) -> str:
@@ -198,26 +234,27 @@ class ThinkerStage(StageEngine):
     The factory ``_thinker_stage`` (in ``thinker.py``) constructs this
     class; ``PipelineRunner`` then drives decoding by calling the
     instance with ``(payload, sampling)``.
+
+    ``extra["backend"]`` picks the track: ``"torch"`` (default) runs the
+    fork CUDA path, ``"mlx"`` runs the Apple Silicon path.
     """
 
     def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
         super().__init__()
-        from .thinker import MiniMindThinker
-
         self.deploy = deploy
         self.args = args
-        self.model_class = model_class or MiniMindThinker
-        # The decode graph is the default: on the RTX 3050 it cuts the
-        # thinker stage from ~2250 ms to ~595 ms per request (ADR-0007),
-        # and eager and graph produce byte-identical audio for the same
-        # seed (tests/test_minimind_graph_parity.py). The fork falls back
-        # to eager when capture fails, so a device that cannot capture
-        # still runs.
-        #
-        # ``extra["use_thinker_cuda_graph"] = False`` opts back out; that
-        # is the bench harness's comparison knob (ADR-0005 keeps the
-        # choice at the stage, out of DeployConfig).
         extra = dict(getattr(args, "extra", None) or {})
+        self._backend_name = _stage_backend(args, extra)
+        if self._backend_name == "mlx":
+            # The MLX runner loads an ``mlx_lm`` directory and has no
+            # torch model class.
+            self.model_class = model_class
+            model_path = _resolve_mlx_model_path(args)
+        else:
+            from .thinker import MiniMindThinker
+
+            self.model_class = model_class or MiniMindThinker
+            model_path = _resolve_model_path(args)
         # The local config class replaces the hub's ``auto_map`` file, so
         # no remote code runs and the fork Config can ask for none.
         register_minimind_config()
@@ -247,17 +284,35 @@ class ThinkerStage(StageEngine):
         # Official eval_omni.py runs the released weights in fp16 (`.half()`).
         if stage_kwargs.get("dtype") is None:
             stage_kwargs["dtype"] = "float16"
-        self.config = get_stage_config(
-            model_path=_resolve_model_path(args),
+        backend_kwargs = {"dtype": stage_kwargs["dtype"]}
+        if self._backend_name != "mlx":
+            # ``args.device`` is a torch knob and reads "cpu" on a host
+            # without CUDA, while MLX runs on the unified-memory GPU.
+            backend_kwargs["device"] = getattr(args, "device", None)
+        backend = get_backend(self._backend_name, **backend_kwargs)
+        self.config = backend.make_config(
+            model_path=model_path,
             **stage_kwargs,
         )
-        self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
-        # Ensure NCCL process group exists before ModelRunner tries to init.
-        _ensure_dist()
-        self.stage_runner = StageRunner(
+        if self._backend_name != "mlx":
+            # The decode graph is the default: on the RTX 3050 it cuts the
+            # thinker stage from ~2250 ms to ~595 ms per request (ADR-0007),
+            # and eager and graph produce byte-identical audio for the same
+            # seed (tests/test_minimind_graph_parity.py). The fork falls back
+            # to eager when capture fails, so a device that cannot capture
+            # still runs.
+            #
+            # ``extra["use_thinker_cuda_graph"] = False`` opts back out; that
+            # is the bench harness's comparison knob (ADR-0005 keeps the
+            # choice at the stage, out of DeployConfig).
+            self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
+            # Ensure NCCL process group exists before ModelRunner tries to init.
+            _ensure_dist()
+        self.stage_runner = backend.make_stage_runner(
             model_class=self.model_class,
             config=self.config,
         )
+        self._tokenizer_path = model_path
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Decode one prompt end to end (direct-call form of ``step``)."""
@@ -286,31 +341,47 @@ class ThinkerStage(StageEngine):
 
         from .stage_processors import ThinkerStageOutput
 
-        tokenizer = _load_tokenizer(_resolve_model_path(self.args))
+        tokenizer = _load_tokenizer(self._tokenizer_path)
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is None:
-            eos_id = self.config.eos
+            eos_id = getattr(self.config, "eos", None)
 
         prepared = [
             self._prepare_decode(payload, sampling, tokenizer)
             for payload, sampling in zip(payloads, samplings, strict=True)
         ]
-        decoded = decode_minimind(
-            self.stage_runner,
-            prepared,
-            eos_id=eos_id,
-            enter_token=_THINKER_ENTER_TOKEN,
-            pad_token=_THINKER_PAD_TOKEN,
-            talker_tail=_TALKER_TAIL,
-        )
+        if self._backend_name == "mlx":
+            decoded = decode_minimind_mlx(
+                self.stage_runner,
+                prepared,
+                eos_id=eos_id,
+                enter_token=_THINKER_ENTER_TOKEN,
+                pad_token=_THINKER_PAD_TOKEN,
+                talker_tail=_TALKER_TAIL,
+            )
+            # Every forwarded position contributes one bridge row; the last
+            # sampled token is never forwarded, so it has none (ADR 0025).
+            bridges = [result.bridge_hidden for result in decoded]
+        else:
+            decoded = decode_minimind(
+                self.stage_runner,
+                prepared,
+                eos_id=eos_id,
+                enter_token=_THINKER_ENTER_TOKEN,
+                pad_token=_THINKER_PAD_TOKEN,
+                talker_tail=_TALKER_TAIL,
+            )
+            bridges = [
+                recapture_bridge_minimind(
+                    self.stage_runner,
+                    request.token_ids + list(result.generated),
+                    result.bridge_hidden,
+                )
+                for request, result in zip(prepared, decoded, strict=True)
+            ]
 
         outputs = []
-        for request, result in zip(prepared, decoded, strict=True):
-            bridge_hidden = recapture_bridge_minimind(
-                self.stage_runner,
-                request.token_ids + list(result.generated),
-                result.bridge_hidden,
-            )
+        for request, result, bridge_hidden in zip(prepared, decoded, bridges, strict=True):
             eos_index = next(
                 (i for i, token in enumerate(result.generated) if token == eos_id), None
             )
@@ -382,107 +453,59 @@ class TalkerOutput:
 
 
 # Vendor constant — single channel of the audio-buffer pad (model_omni.py).
-_AUDIO_PAD_TOKEN = 2049
-_AUDIO_STOP_TOKEN = 2050
-_AUDIO_SPK_TOKEN = 2051
-_AUDIO_VENDOR_TEMPERATURE = 0.2
-_AUDIO_REPETITION_PENALTY = 1.05
 # The vendor talker needs post-EOS filler rows to reach its own stop token;
 # 64 covers the 56 frames measured for the teacher-forced reference.
 _TALKER_TAIL = 64
 
 
-def _can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
-    """Whether the emission gate opens at ``step`` or at any later step.
-
-    The gate needs all eight codebooks active, ``idx[i] = step - 7 + i``.
-    ``idx`` only grows, so a codebook that stays inactive now stays inactive
-    forever: a closed gate is permanent, which is what lets the decode loop
-    stop early without changing the emitted frames.
-    """
-    return all(stop_positions[i] is None or step - 7 + i < stop_positions[i] for i in range(8))
-
-
 class TalkerStage(StageEngine):
-    """Stage 1 — MiniMind talker decode on the vendor ``TalkerModule`` (full sequence per step)."""
+    """Stage 1 — MiniMind talker decode; dense rewrite by default, vendor arm selectable."""
 
     def __init__(self, deploy: Any, args: Any) -> None:
         super().__init__()
         self.deploy = deploy
         self.args = args
-        self._model: Any = None
-        self._device: str | None = None
-        self._config: Any = None
+        self._runner: Any = None
+        # ADR 0020: the checkpoint stays as weights + parity reference. The
+        # vendor class is the P1/P2 reference arm, not the default.
+        extra = getattr(args, "extra", None) or {}
+        self._impl = str(extra.get("talker_impl", "rewritten"))
+        if self._impl not in ("rewritten", "vendor"):
+            raise ValueError(
+                f"unknown talker_impl {self._impl!r}; expected 'rewritten' or 'vendor'"
+            )
+        # ADR 0017 windowed KV stays opt-in until its parity gate is green on
+        # CUDA (ADR 0022); the dense path is the one with a measured baseline.
+        self._kv = str(extra.get("talker_kv", "dense"))
+        if self._kv not in ("dense", "windowed"):
+            raise ValueError(f"unknown talker_kv {self._kv!r}; expected 'dense' or 'windowed'")
+        if self._kv == "windowed" and self._impl != "rewritten":
+            raise ValueError("talker_kv='windowed' requires talker_impl='rewritten'")
 
-    def _ensure_model(self) -> Any:
-        """Load the vendor talker from the original checkpoint."""
-        if self._model is not None:
-            return self._model
-
-        import os
-
-        import torch
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+    def _ensure_runner(self) -> Any:
+        """Build the talker runner for the selected backend."""
+        if self._runner is not None:
+            return self._runner
 
         from .bundle import _resolve_snapshot
 
-        model_dir = _resolve_snapshot(getattr(self.args, "model", None))
-        config_cls = get_class_from_dynamic_module("model_omni.OmniConfig", model_dir)
-        talker_cls = get_class_from_dynamic_module("model_omni.TalkerModule", model_dir)
-        config = config_cls.from_pretrained(model_dir)
-
-        talker = talker_cls(config).eval()
-        weights = os.path.join(model_dir, "pytorch_model.bin")
-        if os.path.isfile(weights):
-            state = torch.load(weights, map_location="cpu", weights_only=True)
+        extra = getattr(self.args, "extra", None) or {}
+        backend_name = _stage_backend(self.args, extra)
+        backend_kwargs: dict[str, Any] = {"dtype": getattr(self.args, "dtype", None)}
+        if backend_name == "mlx":
+            # The MLX runner loads the converted directory and runs on the
+            # unified-memory GPU, so the torch device does not apply.
+            model_path = _resolve_mlx_model_path(self.args, "mlx-talker")
         else:
-            from safetensors.torch import load_file
-
-            state = {}
-            for name in sorted(os.listdir(model_dir)):
-                if name.endswith(".safetensors"):
-                    state.update(load_file(os.path.join(model_dir, name)))
-        talker.load_state_dict(
-            {
-                key[len("talker.") :]: value
-                for key, value in state.items()
-                if key.startswith("talker.")
-            },
-            strict=True,
+            backend_kwargs["device"] = getattr(self.args, "device", None)
+            model_path = _resolve_snapshot(getattr(self.args, "model", None))
+        backend = get_backend(backend_name, **backend_kwargs)
+        self._runner = backend.make_talker_runner(
+            model_path,
+            impl=self._impl,
+            kv=self._kv,
         )
-        talker = talker.half().to("cuda")
-
-        self._model = talker
-        self._config = talker.talker_config
-        self._device = "cuda"
-        return talker
-
-    def _talker_logits(self, bridge: Any, audio_codes: Any, spk_emb: Any) -> Any:
-        """Run the vendor talker over the full sequence; return its 8 logit tensors."""
-        import torch
-
-        talker = self._model
-        embeds = talker.embed_tokens(audio_codes)
-        if spk_emb is not None:
-            if spk_emb.dim() == 1:
-                spk_emb = spk_emb.unsqueeze(0)
-            mask = (audio_codes[:, 0, :] == _AUDIO_SPK_TOKEN).unsqueeze(-1)
-            embeds = torch.where(mask, talker.spk_proj(spk_emb).unsqueeze(1), embeds)
-        hidden = (
-            talker.embed_proj(bridge) * talker.text_scale
-            + talker.codec_proj(embeds) * talker.audio_scale
-        )
-        seq_len = hidden.shape[1]
-        position_embeddings = (talker.freqs_cos[:seq_len], talker.freqs_sin[:seq_len])
-        for layer in talker.layers:
-            hidden, _ = layer(
-                hidden,
-                position_embeddings,
-                past_key_value=None,
-                use_cache=False,
-            )
-        hidden = talker.norm(hidden)
-        return talker.lm_head(hidden)
+        return self._runner
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Run the Talker: AR decode audio codes from bridge hidden states.
@@ -503,12 +526,14 @@ class TalkerStage(StageEngine):
         """
         import torch
 
+        from ...backend.base import TalkerRequest
+        from ...backend.talker_recipe import (
+            AUDIO_REPETITION_PENALTY,
+            AUDIO_VENDOR_TEMPERATURE,
+            NUM_CODEBOOKS,
+        )
         from .stage_processors import TalkerInputPayload
 
-        model = self._ensure_model()
-        device = self._device
-
-        # ---- Extract & validate inputs ----
         if not isinstance(payload, TalkerInputPayload):
             raise TypeError(
                 f"TalkerStage expected TalkerInputPayload, got {type(payload).__name__}"
@@ -521,150 +546,51 @@ class TalkerStage(StageEngine):
             raise ValueError("TalkerStage received empty text_token_ids")
 
         extra = getattr(sampling, "extra", None) or {}
-        # Seed here as well as in the thinker: the talker's own sampling is
-        # the last RNG consumer, and the first request in a process also
-        # consumes RNG building the talker weights (``_ensure_model`` above).
-        # Without this, the same (prompt, seed) yields different audio
-        # depending on how many requests the process served before.
-        # Mirrors ``models/smolvlm/stage.py``.
         seed = getattr(sampling, "seed", None)
-        if seed is not None:
-            torch.manual_seed(int(seed))
+        # Audio temperature is taken from the vendor default (0.2); the
+        # text ``sampling.temperature`` is for the thinker stage.
+        temperature = float(extra.get("audio_temperature", AUDIO_VENDOR_TEMPERATURE))
+        if temperature <= 1e-10:
+            temperature = 1e-5
         # ``watchdog_limit`` caps the number of talker decode steps the
         # way upstream's ``talker_max_steps_after_last_thinker_token``
         # does; unset means "replay every generated thinker row".
         watchdog_limit = int(extra["watchdog_limit"]) if extra.get("watchdog_limit") else None
-        # Audio temperature is taken from the vendor default (0.2); the
-        # text ``sampling.temperature`` is for the thinker stage.
-        temperature = float(extra.get("audio_temperature", _AUDIO_VENDOR_TEMPERATURE))
-        if temperature <= 1e-10:
-            temperature = 1e-5
 
-        bridge = bridge.unsqueeze(0).to(device=device, dtype=model.embed_proj[0].weight.dtype)
-        spk_emb = payload.speaker_embedding
         # ``start_pos``/``num_steps`` arrive precomputed from thinker2talker
         # (prompt length / generated-row count); no second split here.
-        from collections.abc import Mapping as _Mapping
-
-        meta = dict(payload.metadata) if isinstance(payload.metadata, _Mapping) else {}
-        bridge_len = bridge.shape[1]
+        meta = dict(payload.metadata) if isinstance(payload.metadata, Mapping) else {}
+        bridge_len = bridge.shape[-2]
         start_pos = int(meta.get("start_pos", len(payload.prompt_token_ids)))
         num_steps = int(meta.get("num_steps", bridge_len - start_pos))
-        if start_pos >= bridge_len:
-            # Degenerate payload (no generated rows): fall back to the
-            # last row as the single decode position.
-            start_pos = max(0, bridge_len - 1)
-            num_steps = bridge_len - start_pos
         if watchdog_limit is not None:
             num_steps = min(num_steps, watchdog_limit)
 
-        # ---- Staggered decode loop (mirrors vendor stream_generate) ----
-        # Vendor ``step`` is the count of generated tokens BEFORE this
-        # iteration's append, so the first iteration has ``step = 0`` and
-        # ``audio_step = -1`` (every codebook pads). Codebook ``i`` starts
-        # sampling real codes once ``audio_step >= i``.
-        audio_codes: list[list[int]] = [[] for _ in range(8)]
-        audio_stop_pos: list[int | None] = [None] * 8
-        emitted_frames: list[list[int]] = []
-
-        # Audio buffer: prompt columns stay pad; generated column
-        # ``start_pos + p`` holds ``audio_codes[i][p]`` for ``i < min(p, 8)``
-        # (vendor's diagonal backfill). Column ``start_pos + p`` is final as
-        # soon as codebook ``p - 1`` has sampled step ``p``, and
-        # ``audio_codes[i][p]`` never changes after it is appended — so each
-        # step writes only the column that just became final instead of
-        # rebuilding the whole buffer. Same values either way; ADR 0007 has
-        # the timings that motivated this.
-        buf = torch.full(
-            (1, 8, start_pos + num_steps),
-            _AUDIO_PAD_TOKEN,
-            dtype=torch.long,
-            device=device,
+        runner = self._ensure_runner()
+        frames = runner.generate(
+            TalkerRequest(
+                bridge=bridge,
+                num_steps=num_steps,
+                start_pos=start_pos,
+                temperature=temperature,
+                seed=seed,
+                speaker_embedding=payload.speaker_embedding,
+                repetition_penalty=AUDIO_REPETITION_PENALTY,
+            )
         )
 
-        with torch.no_grad():
-            for step in range(num_steps):
-                audio_step = step - 1
-                # Vendor's forward sees ``audio_buffer`` BEFORE this
-                # iteration's append, so the sequence length is
-                # ``start_pos + step`` — the very first forward covers
-                # exactly the prompt.
-                seq_len = start_pos + step
-                column = step - 1
-                if column >= 0:
-                    filled = min(column, 8)
-                    if filled:
-                        buf[0, :filled, start_pos + column] = torch.tensor(
-                            [audio_codes[i][column] for i in range(filled)],
-                            dtype=torch.long,
-                            device=device,
-                        )
-
-                # Vendor recomputes the full sequence every step
-                # (``use_cache=False`` on the parity path), so the talker
-                # sees the whole prefix, not a sliding window.
-                logits_list = self._talker_logits(
-                    bridge[:, :seq_len, :], buf[:, :, :seq_len], spk_emb
-                )
-
-                # Sample one code per codebook. HF ``model_omni.py``
-                # stream_generate: ``logits_i = al[0,-1,:] / 0.2``, then
-                # ``for prev in audio_codes[i][-3:]: logits_i[prev] /= 1.05``
-                # (last-3 of THAT layer only), then ``topk(50)`` +
-                # multinomial. The penalty is real in the HF reference —
-                # it is only absent from the vLLM refactor.
-                for i, logits in enumerate(logits_list):
-                    if audio_step < i:
-                        audio_codes[i].append(_AUDIO_PAD_TOKEN)
-                        continue
-                    # Match vendor exactly: keep the model dtype through
-                    # temperature scaling and top-k, then draw with
-                    # torch.multinomial from the 50-token softmax. Using the
-                    # generic Gumbel sampler consumes a different RNG path;
-                    # one different code recursively changes every later
-                    # audio-buffer column.
-                    logits_i = logits[0, -1, :].clone() / temperature
-                    for previous_code in audio_codes[i][-3:]:
-                        logits_i[previous_code] /= _AUDIO_REPETITION_PENALTY
-                    top_value, top_index = logits_i.topk(50)
-                    sampled = torch.multinomial(torch.softmax(top_value, dim=-1), 1)
-                    code = top_index[sampled].item()
-                    audio_codes[i].append(code)
-                    if audio_stop_pos[i] is None and code >= 2048:
-                        audio_stop_pos[i] = len(audio_codes[i]) - 1
-
-                # Vendor break check runs BEFORE the append/emission.
-                if audio_codes[7] and audio_codes[7][-1] == _AUDIO_STOP_TOKEN:
-                    break
-
-                # HF emission gate: ``audio_step >= 7`` with the diagonal
-                # ``frame[i] = audio_codes[i][step - 7 + i]`` and the
-                # active-layer filter ``stop_pos[i] is None or
-                # step - 7 + i < stop_pos[i]`` over all 8 layers.
-                if audio_step >= 7:
-                    if _can_emit_frame(audio_stop_pos, step):
-                        idx = [step - 7 + i for i in range(8)]
-                        emitted_frames.append([audio_codes[i][idx[i]] for i in range(8)])
-                    else:
-                        # A closed gate never reopens, so every remaining step
-                        # would be a full-sequence forward with no observable
-                        # effect. Stopping here keeps the frames byte-identical.
-                        break
-
-        # ---- Pack output ----
-        # ``emitted_frames`` mirrors the vendor: one row per emitted
-        # frame, each row is the diagonal ``audio_codes[i][step - 7 + i]``.
-        # Truncation is no longer needed because we only ever appended
-        # full 8-code rows.
-        if not emitted_frames:
-            audio_codes_tensor = torch.zeros(0, 8, dtype=torch.long)
+        # ``frames`` mirrors the vendor: one row per emitted frame, each row
+        # is the diagonal ``audio_codes[i][step - 7 + i]``. Truncation is
+        # not needed because only full 8-code rows are ever appended.
+        if not frames:
+            audio_codes_tensor = torch.zeros(0, NUM_CODEBOOKS, dtype=torch.long)
         else:
-            audio_codes_tensor = torch.tensor(emitted_frames, dtype=torch.long)
+            audio_codes_tensor = torch.tensor(frames, dtype=torch.long)
         return TalkerOutput(audio_codes=audio_codes_tensor.cpu())
 
 
 def _talker_stage(deploy: Any, args: Any) -> Any:
-    """Stage 1 factory — the vendor talker, loaded from the full checkpoint."""
+    """Stage 1 factory — the talker selected by ``extra["talker_impl"]``."""
     return TalkerStage(deploy, args)
 
 

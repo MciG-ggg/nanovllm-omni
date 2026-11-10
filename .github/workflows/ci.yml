@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +59,12 @@ jobs:
         run: |
           uv run python -m compileall -q nanovllm_omni
 
+      - name: Build wheel and verify package contents
+        run: |
+          uv build --wheel
+          python -m zipfile -l dist/*.whl | grep -q 'nanovllm_omni/backend/base.py'
+          python -m zipfile -l dist/*.whl | grep -q 'nanovllm_omni/backend/mlx_kernel/paged_attention.metal'
+
       - name: Run unit tests (skip smoke + skip torch-requiring)
         run: |
           # -m "not smoke" excludes the smoke-marked tests (those need real
@@ -75,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -121,12 +127,51 @@ jobs:
           submodules: recursive
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv pip install mkdocs mkdocs-material
+      - run: uv pip install --system mkdocs mkdocs-material
       - run: |
           # Lightweight smoke test: confirm mkdocs config parses.
           # Real build deferred until docs/ has content (Phase 6).
-          uv run python -c "import yaml; yaml.safe_load(open('mkdocs.yml')) if __import__('os').path.exists('mkdocs.yml') else print('mkdocs.yml not yet created -- skipping (deferred to Phase 6)')"
+          python -c "import yaml; yaml.safe_load(open('mkdocs.yml')) if __import__('os').path.exists('mkdocs.yml') else print('mkdocs.yml not yet created -- skipping (deferred to Phase 6)')"
+
+  mlx-track:
+    name: MLX track (Apple Silicon)
+    runs-on: macos-15
+    # GitHub's macOS runner cannot be validated locally. Observe one CI cycle,
+    # then remove continue-on-error after the next green run.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install MLX dependencies
+        run: uv sync --extra mlx --extra dev
+
+      - name: Run MLX track tests
+        run: |
+          uv run pytest -q \
+            tests/test_backend_config.py \
+            tests/test_backend_wiring.py \
+            tests/test_dependency_layers.py \
+            tests/test_mlx_backend.py \
+            tests/test_mlx_bridge.py \
+            tests/test_mlx_kernel.py \
+            tests/test_mlx_talker_stage.py \
+            tests/test_mlx_talker.py \
+            tests/test_mlx_vlm.py \
+            tests/test_minimind_thinker_mlx.py \
+            tests/test_parity_check.py

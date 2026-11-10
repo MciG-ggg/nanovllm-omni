@@ -17,7 +17,8 @@ rules there.
 git clone https://github.com/MciG-ggg/nanovllm-omni
 cd nanovllm-omni
 pip install -e ".[dev]"            # lint + test, no torch
-pip install -e ".[dev,minimind]"   # adds MiniMind-O path (torch etc.)
+pip install -e ".[dev,cuda]"       # Linux/WSL: torch + triton + flash-attn
+#   pip install -e ".[dev,mlx]"      # Apple Silicon: mlx + mlx-lm
 
 # Run the fast feedback loop (same checks as pre-push):
 scripts/pre-commit

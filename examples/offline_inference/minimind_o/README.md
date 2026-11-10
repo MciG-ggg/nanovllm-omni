@@ -79,3 +79,51 @@ HF_HUB_OFFLINE=1 bash run_end2end.sh \
   condition (`bridge_states`) must be the full block output `mlp_out + residual`
   — what the vendor captures. Copying only `mlp_out` leaves the text correct
   but the audio wrong (half amplitude, wrong length).
+
+## Apple Silicon (MLX)
+
+The torch track rides the fork's triton attention kernel (no macOS wheel)
+and needs NCCL, so it cannot start on a Mac. `end2end_mlx.py` runs the
+same three stages, split by framework:
+
+| stage | backend | why |
+|---|---|---|
+| thinker | MLX (`mlx-lm`) | converted by `scripts/convert_minimind_thinker_mlx.py` |
+| talker | MLX (in-repo port) | `backend/mlx_talker.py`, converted by `scripts/convert_minimind_talker_mlx.py` |
+| code2wav | torch on MPS | ADR 0024: MLX's transposed conv is not faster (21.98 vs 20.56 ms) |
+
+### Setup
+
+```bash
+# Both conversions read the same checkpoint and write sibling directories.
+python scripts/convert_minimind_thinker_mlx.py
+python scripts/convert_minimind_talker_mlx.py
+ls ~/models/minimind-3o/mlx-thinker ~/models/minimind-3o/mlx-talker
+```
+
+### Run
+
+```bash
+bash run_end2end_mlx.sh --prompt "你好" --output out.wav
+```
+
+Measured on an M2 Air (`--max-tokens 40 --seed 42`): 2.56 s of 24 kHz mono
+audio, 122924 WAV bytes, 5.4 s wall.
+
+### Notes
+
+- **The talker's emission gate opens at step 8.** With `--max-tokens`
+  below that the talker emits zero frames and code2wav rejects the empty
+  code matrix with `audio codes must be non-empty`. Raise the budget; the
+  default 40 leaves headroom.
+- Stage timings on this machine: thinker prefill 10.5 ms + 4.4 ms/step,
+  talker 22 frames ≈ 190 ms, code2wav ≈ 194 ms — code2wav is 42% of the
+  chain, and it is the one stage that stays on torch.
+- `bridge_hidden()` returns the hidden states after layer `bridge_layer`
+  (=3) and before the final norm, matching the vendor and the fork.
+  Measured against the vendor's own `model_omni.py`: max abs diff 0.25 at
+  magnitude 10128. `tests/test_mlx_bridge.py` pins it.
+- Sampled codes are **not** comparable across frameworks: `torch.multinomial`
+  and `mx.random.categorical` consume different RNG streams, so the same
+  seed aligns the parameters and not the draws. Compare logits
+  (`tests/test_mlx_talker.py`, max abs diff 0.0625), not codes.

@@ -105,6 +105,7 @@ class PipelineRunner:
             "max_num_seqs",
             "gpu_memory_utilization",
             "device",
+            "backend",
         ):
             value = getattr(stage_deploy, field_name)
             if value is not None:

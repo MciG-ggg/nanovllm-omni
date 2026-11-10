@@ -24,7 +24,6 @@ import math
 import torch
 import torch.distributed as dist
 from nanovllm.layers.activation import SiluAndMul
-from nanovllm.layers.attention import Attention
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import (
@@ -93,6 +92,8 @@ class ThinkerAttention(nn.Module):
             max_position=max_position,
             base=rope_theta,
         )
+        from nanovllm.layers.attention import Attention
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,

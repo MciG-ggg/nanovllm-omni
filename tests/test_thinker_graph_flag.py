@@ -7,10 +7,10 @@ in ``extra``). The stage turns it into the fork ``Config``'s
 output, ADR-0005 amendment 2026-10-30), eager when the bench asks for the
 comparison cell.
 
-The fork layers are heavy, so the stage is built with the three fork
-touch points stubbed: ``get_stage_config`` (returns the config the
-stage mutates), ``StageRunner`` (owns the GPU model) and
-``_ensure_dist`` (needs a process group).
+The fork layers are heavy, so the stage is built with the two fork
+touch points stubbed: ``get_backend`` (returns the config the stage
+mutates and the runner that owns the GPU model) and ``_ensure_dist``
+(needs a process group).
 """
 
 from __future__ import annotations
@@ -23,12 +23,25 @@ import pytest
 from nanovllm_omni.models.minimind_omni import stage as stage_mod
 
 
+def _fake_backend(config: SimpleNamespace, captured: dict | None = None) -> SimpleNamespace:
+    def make_config(model_path, **kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        return config
+
+    return SimpleNamespace(
+        make_config=make_config,
+        make_stage_runner=lambda model_class, config: SimpleNamespace(
+            model_class=model_class, config=config
+        ),
+    )
+
+
 def _build_stage(monkeypatch: pytest.MonkeyPatch, extra: dict) -> object:
     config = SimpleNamespace(enforce_eager=None)
     monkeypatch.setattr(stage_mod, "_resolve_model_path", lambda *a, **k: "/tmp/model")
-    monkeypatch.setattr(stage_mod, "get_stage_config", lambda *a, **k: config)
+    monkeypatch.setattr(stage_mod, "get_backend", lambda *a, **k: _fake_backend(config))
     monkeypatch.setattr(stage_mod, "_ensure_dist", lambda: None)
-    monkeypatch.setattr(stage_mod, "StageRunner", lambda **kw: SimpleNamespace(**kw))
     args = SimpleNamespace(model="/tmp/model", device="cpu", extra=extra)
     thinker = stage_mod.ThinkerStage(deploy=None, args=args)
     return thinker, config
@@ -39,9 +52,8 @@ def _captured_stage_kwargs(monkeypatch: pytest.MonkeyPatch, extra: dict) -> dict
     config = SimpleNamespace(enforce_eager=None)
     seen: dict = {}
     monkeypatch.setattr(stage_mod, "_resolve_model_path", lambda *a, **k: "/tmp/model")
-    monkeypatch.setattr(stage_mod, "get_stage_config", lambda *a, **k: seen.update(k) or config)
+    monkeypatch.setattr(stage_mod, "get_backend", lambda *a, **k: _fake_backend(config, seen))
     monkeypatch.setattr(stage_mod, "_ensure_dist", lambda: None)
-    monkeypatch.setattr(stage_mod, "StageRunner", lambda **kw: SimpleNamespace(**kw))
     args = SimpleNamespace(model="/tmp/model", device="cpu", extra=extra)
     stage_mod.ThinkerStage(deploy=None, args=args)
     return seen

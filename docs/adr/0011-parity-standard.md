@@ -149,8 +149,9 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   已删的 `talker.py` 和未修的 bridge），且不会报错。闸门脚本会打印
   `repo under test` 行，跑完先看这行对不对。
 - **MiniMind 音色条件**：`speaker_embedding` 从未被赋值，`ref_codes` 也不支持；
-  当前固定走官方 default voice。vendor talker 的 in-place speaker mask 已在
-  `_talker_logits` 实现，但接线音色前还要把 speaker token 放进 audio buffer。
+  当前固定走官方 default voice。vendor talker 的 in-place speaker mask 由
+  `backend/torch_talker.py::TorchTalkerRunner._logits` 实现，但接线音色前还要把
+  speaker token 放进 audio buffer。
 - **MiniMind 帧数不能当 parity 指标**：同一 prompt 上四个产物的实测
   （24000 Hz / 16-bit / 单声道，帧数 = 时长 × 12.5）：
 
@@ -173,11 +174,15 @@ teacher-forced 自 vendor 臂（误差不累积），只有 bridge 不同。20 �
   方差。脚本已备：`.scratch/frame_count.py`（gitignore，未入库），它同时
   报告我们的循环是“门关闭”退出还是被 `_TALKER_TAIL` 截断。
   WSL 实验机在 2026-10-31 处于 offline，这项尚未跑。
-- **MiniMind talker 实现**：生产路径用 vendor `MiniMindOmni.talker`（fp16），
-  仓库里没有 fork talker 实现；`content_len + 64` 的 bridge tail 覆盖
+- **MiniMind talker 实现**：生产路径是本仓库的 dense 重写
+  （`models/minimind_omni/talker.py`，`extra["talker_impl"]="rewritten"` 为默认，
+  见 ADR 0022 实施记录）；vendor `MiniMindOmni.talker`（fp16）只作 parity 参照臂，
+  由 `extra["talker_impl"]="vendor"` 选用。`content_len + 64` 的 bridge tail 覆盖
   teacher-forced 实测的 56 帧。
 - **MiniMind talker 没有自动闸门**：§4.2 的 teacher-forced 对照是一次性
   harness，未入库。ADR 只在 P1（文本）和 P2（bridge）上声称有闸门。
+  > 已由 ADR 0022 实施：`tests/test_minimind_talker_parity.py` 入库了 P0/P1/P2
+  > 三层。P0 在 MPS 上通过（非 parity 结论）；P1/P2 待 WSL 回填首个基线。
 - **MiniMind profile 数字**：已重测（2026-10-31，WSL / RTX 3050，bench prompt
   `short_01`，`bench time --pipeline full --max-tokens 512`）：wall 1539.4 ms、
   thinker 473.2、talker 1039.4、code2wav 26.8（37 帧）。详见 ADR 0007。

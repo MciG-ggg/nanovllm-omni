@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from nanovllm_omni.models.smolvlm.stage import SmolVLMStage
+from nanovllm_omni.models.smolvlm.stage import SmolVLMStage, TorchVlmSupport
 
 _IMAGE_TOKEN_ID = 3
 
@@ -44,8 +44,14 @@ def _stage() -> tuple[SmolVLMStage, _FakeVision]:
         )
     )
     stage = object.__new__(SmolVLMStage)
-    stage.model = shell
-    stage.image_token_id = _IMAGE_TOKEN_ID
+    stage.vlm = TorchVlmSupport(
+        model=shell,
+        processor=None,
+        image_token_id=_IMAGE_TOKEN_ID,
+        eos_token_id=0,
+        device="cpu",
+        dtype=torch.float32,
+    )
     return stage, vision
 
 

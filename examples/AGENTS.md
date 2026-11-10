@@ -22,6 +22,12 @@ examples/
       save_*.py                    # decode server JSON -> artifact
 ```
 
+A model family that has a second run mode on another backend puts it in
+the **same folder** as a second entrypoint, suffixed `_mlx`: on Apple
+Silicon the torch track cannot start (the fork's attention needs triton,
+which has no macOS wheel), so `run_mlx.py` / `end2end_mlx.py` is how that
+family is demoed there. The suffix is the backend name, not a new family.
+
 Rule of thumb: **one folder per model family**, not per script. A
 model family with two natural demo shapes (`synthetic_obs.py` +
 `libero_eval.py`) lives in **one** folder with two entries, not two

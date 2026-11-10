@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Smallest vllm-omni-compatible pipeline runtime, performance-engineered for MiniMind-O with a continuous-batching thinker runner and unified omni-modal I/O contract demos."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+# Python 3.12 is the project's minimum supported version. The current lock
+# resolves lerobot 0.6.1, which does not depend on datasets.
+requires-python = ">=3.12"
 authors = [
     { name = "nanovllm-omni contributors" },
 ]
@@ -18,7 +20,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -28,22 +29,77 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.4",
-    "black>=24.0",
+# ---------------------------------------------------------------------------
+# Backend tracks use separate extras because CUDA and MLX cannot share one
+# environment. Model-family extras are selected independently.
+#
+#   base   (dependencies above)  importing `nanovllm_omni` does not load a
+#                                framework. Installing base still resolves the
+#                                fork's hard dependencies, including torch and
+#                                transformers.
+#   cuda   torch + triton + flash-attn, the fork's attention kernel.
+#   mlx    Apple Silicon: mlx + mlx-lm + mlx-vlm + torchvision. One extra
+#          for all of MLX, because those three libraries coexist in one
+#          process (verified) and splitting them only creates a mode where
+#          SmolVLM fails after the user installed "mlx".
+#
+# `cuda` and `mlx` cannot share one environment: triton has no macOS wheel,
+# and the two torch builds disagree. `smolvla` remains a separate model-family
+# extra; the current lock resolves lerobot 0.6.1 without a datasets dependency.
+# Installing `.[cuda]` and `.[mlx]` together is unsupported.
+# ---------------------------------------------------------------------------
+cuda = [
+    # Mirrors third_party/nano-vllm's own `[cuda]` extra; that is where the
+    # fork declares its kernel dependencies, so keep the ranges in step.
+    "torch>=2.4.0",
+    # No macOS wheel exists for triton, so the marker keeps `uv sync --extra
+    # cuda` on a Mac from failing with an opaque "no wheel" error and instead
+    # installs nothing extra there. `backend/torch_backend.py` never imports
+    # the fork's attention, so a Mac can still use this extra's torch half.
+    "triton>=3.0.0; sys_platform != 'darwin'",
+    "flash-attn; sys_platform != 'darwin'",
+    "transformers>=4.51",
+    "huggingface_hub>=0.20",
+    # MiniMind-O's checkpoint carries trust_remote_code modeling files, and
+    # code2wav needs the Mimi codec through transformers.
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    "onnxruntime>=1.16",
+    "funasr>=1.0",
 ]
+mlx = [
+    # One extra, not two. `mlx`, `mlx-lm` and `mlx-vlm` coexist in one
+    # process without trouble (verified: a MiniMind talker decode and a
+    # SmolVLM image answer in the same interpreter), they are small, and a
+    # split extra only creates a mode where SmolVLM fails with
+    # ModuleNotFoundError after the user installed "mlx".
+    "mlx>=0.32.4",
+    "mlx-lm>=0.32.2",
+    "mlx-vlm>=0.7.12",
+    # Required, not optional: transformers 5's Idefics3 image processor
+    # silently falls back to numpy output without torchvision, and the MLX
+    # embedding lookup then fails with a shape error.
+    "torchvision>=0.19",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "safetensors>=0.4",
+    # `_as_mx` in backend/mlx_talker.py goes through numpy, and code2wav
+    # still needs torch + transformers for the Mimi codec (ADR 0024).
+    "torch>=2.0",
+    # mlx-lm 0.32.2 imports transformers' nested `rope_parameters` shape;
+    # mlx-vlm 0.7.12 asks for >=5.14.
+    "transformers>=5.0",
+]
+# Model families. `smolvla` pulls lerobot; keep it as a separate extra because
+# it is outside the MLX track's supported model coverage (ADR 0014).
 smolvla = [
     "torch>=2.3.1",
     "transformers>=4.40",
     "lerobot>=0.3",
     # PyAV is required, not optional: importing `lerobot.policies` pulls
-    # the policy factory, which pulls the groot processors, which pull
-    # `lerobot.datasets`, which requires PyAV. Without it every
-    # `from lerobot.policies...` import fails with "'av' is required
-    # but not installed". The `dataset` extra of lerobot provides it
-    # on Python 3.12 and newer; this pin also covers Python 3.11, where
-    # the resolver picks lerobot 0.3.3 and that extra does not exist.
+    # the policy factory, groot processors and `lerobot.datasets`, which require
+    # `av`. Declare it directly because this dependency does not request a
+    # lerobot extra that supplies it.
     "av>=12",
     "Pillow>=10.0",
     "huggingface_hub>=0.20",
@@ -51,35 +107,24 @@ smolvla = [
 ]
 # Gradio UI demo layer (`nanovllm_omni.serving.app`). UI tool, NOT a server
 # framework -- leaves the stdlib HTTP adapter in `nanovllm_omni.serving.openai_adapter`
-# untouched. Install alongside a model-family extra (e.g. `.[minimind,gradio]`)
+# untouched. Install alongside a model-family extra (e.g. `.[cuda,gradio]`)
 # to actually run a tab; `gradio` alone only enables the demo launcher.
+# >=6 because gradio 5 pins starlette<1.0 and the mlx-vlm track needs >=1.0.1.
 gradio = [
-    "gradio>=5.0,<6.0",
+    "gradio>=6.0",
 ]
-# Real-weight MiniMind-O path: required for
-# examples/offline_inference/minimind_o/{end2end,batched}.py and the
-# `pytest -m smoke` suite. The bundle loader is offline-first; weights
-# must be pre-provisioned (see
-# examples/offline_inference/minimind_o/README.md) before the smoke
-# tests can run, not pulled at install time. funasr/librosa/onnxruntime
-# are peer deps of the MiniMind trust_remote_code modeling files.
-minimind = [
-    "torch>=2.0",
-    "transformers>=4.50",
-    "huggingface_hub>=0.20",
-    "soundfile>=0.12",
-    "librosa>=0.10",
-    "onnxruntime>=1.16",
-    "funasr>=1.0",
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "black>=24.0",
 ]
 experiments = [
     "hydra-core>=1.3",
     "tyro>=0.9",
 ]
-# PEP 735 dependency groups. The `minimind` group mirrors the
-# `[minimind]` optional extra so `uv sync` picks it up via
-# `[tool.uv] default-groups` below. CI stays unaffected because it
-# installs via `pip install -e ".[dev]"` and never reads this table.
+
+# PEP 735 dependency groups. `minimind` is selected by default; MLX is a
+# project extra, not a group, and is enabled with `uv sync --extra mlx`.
 [dependency-groups]
 minimind = [
     "torch>=2.0",
@@ -92,11 +137,8 @@ minimind = [
     # int8 stretch for TK-015 -- optional; install explicitly if you want it.
     "bitsandbytes>=0.43",
 ]
-# Mirrors `[project.optional-dependencies].gradio` so `uv sync` picks it
-# up if wired into default-groups. Off by default; the UI launcher is an
-# opt-in convenience.
 gradio = [
-    "gradio>=5.0,<6.0",
+    "gradio>=6.0",
 ]
 
 [project.urls]
@@ -106,9 +148,9 @@ Issues = "https://github.com/MciG-ggg/nanovllm-omni/issues"
 
 [tool.uv]
 # Make `uv sync` install the real-weight MiniMind-O group by default so
-# `python examples/audio.py` works out of the box. CI is unaffected: it
-# uses `pip install -e ".[dev]"` which only reads
-# `[project.optional-dependencies]`, never `[dependency-groups]`.
+# `python examples/audio.py` works out of the box. CI's `uv sync --extra dev`
+# also includes this group. `--no-default-groups` skips it, but nano-vllm
+# still brings torch and transformers as hard dependencies.
 default-groups = ["minimind"]
 
 [tool.uv.sources]
@@ -117,7 +159,10 @@ nano-vllm = { path = "third_party/nano-vllm", editable = true }
 [tool.setuptools]
 packages = [
     "nanovllm_omni",
+    "nanovllm_omni.backend",
+    "nanovllm_omni.backend.mlx_kernel",
     "nanovllm_omni.config",
+    "nanovllm_omni.diffusion",
     "nanovllm_omni.engine",
     "nanovllm_omni.entrypoints",
     "nanovllm_omni.models",
@@ -127,11 +172,12 @@ packages = [
     "nanovllm_omni.models.smolvlm",
     "nanovllm_omni.bench",
     "nanovllm_omni.serving",
-
+    "nanovllm_omni.utils",
 ]
 
 [tool.setuptools.package-data]
 nanovllm_omni = ["deploy/*.yaml"]
+"nanovllm_omni.backend.mlx_kernel" = ["*.metal"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -144,7 +190,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
@@ -152,10 +198,10 @@ ignore = ["E501"]  # line length handled by formatter
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = false
 warn_unused_ignores = true

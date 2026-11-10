@@ -22,6 +22,11 @@ We compose on top of ``StageRunner`` rather than subclassing, so the
 engine has one cohesive AR adapter and model families stay side-effect
 free at import time. The recipe is two top-level functions —
 ``decode_minimind`` and ``recapture_bridge_minimind``.
+
+The MLX track has its own driver, ``decode_minimind_mlx``: the vendor
+dance over one dense batch, with the same sampling recipe (the one
+``backend.mlx_backend.generate_mlx`` uses) so the two tracks draw from
+the same distribution.
 """
 
 from __future__ import annotations
@@ -67,6 +72,14 @@ class _SeqState:
     content_len: int | None = None
 
 
+@dataclass(frozen=True)
+class _MlxSampling:
+    """The sampling fields the backend's MLX sampler reads."""
+
+    top_p: float
+    extra: dict[str, Any]
+
+
 def _apply_repetition_penalty(logits: Any, token_ids: list[int], penalty: float) -> None:
     """Divide every already-seen token's logit by ``penalty``, in place.
 
@@ -93,9 +106,8 @@ def decode_minimind(
 ) -> list[ThinkerDecoded]:
     """Run the vendor decode dance for ``requests`` on one ``StageRunner``.
 
-    Owns the sampler wrap/restore pair (the one place that touches
-    ``stage_runner.model_runner.sampler``), the per-sequence bridge-row
-    accumulation, and the post-EOS filler clocking.
+    Owns the per-sequence bridge-row accumulation and the post-EOS filler
+    clocking.
 
     ``enter_token`` is emitted on a sequence's first post-EOS step (the
     talker tail needs a stable anchor) and ``pad_token`` on every later
@@ -125,9 +137,6 @@ def decode_minimind(
         scheduler.add(sequence)
         states[sequence] = _SeqState(request=request)
 
-    runner = stage_runner.model_runner
-    model = runner.model
-    base_sampler = runner.sampler
     # Which sequences this step is serving, in logits-row order. The fork's
     # ``ParallelLMHead`` already reduces a prefill to one row per sequence
     # (``cu_seqlens_q[1:] - 1``), so row i belongs to ``scheduled[i]`` on
@@ -180,81 +189,75 @@ def decode_minimind(
                     )
             sampled.append(torch.multinomial(probs, 1, generator=state.generator).view(-1))
         # Flat ``[batch]`` of token ids, matching the fork sampler's shape:
-        # ``runner.sampler(...).tolist()`` is read as one id per sequence.
+        # ``stage_runner.sample(...).tolist()`` is read as one id per
+        # sequence.
         return torch.cat(sampled)
 
-    runner.sampler = _sampler_with_rp
+    while not scheduler.is_finished():
+        seqs, is_prefill = scheduler.schedule()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        input_ids, positions = (
+            stage_runner.prepare_prefill(seqs) if is_prefill else stage_runner.prepare_decode(seqs)
+        )
+        temperatures = stage_runner.prepare_sample(seqs)
+        logits = stage_runner.forward(input_ids, positions, is_prefill)
 
-    try:
-        while not scheduler.is_finished():
-            seqs, is_prefill = scheduler.schedule()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            input_ids, positions = (
-                runner.prepare_prefill(seqs) if is_prefill else runner.prepare_decode(seqs)
-            )
-            temperatures = runner.prepare_sample(seqs)
-            logits = runner.run_model(input_ids, positions, is_prefill)
-
-            # Bridge rows are packed by token, not by sequence: sequence i
-            # owns ``num_scheduled_tokens`` consecutive rows of the buffer.
-            bridge = model.get_bridge_hidden()
-            scheduled.clear()
-            offset = 0
-            for sequence in seqs:
-                width = sequence.num_scheduled_tokens if is_prefill else 1
-                scheduled.append(sequence)
-                if bridge is not None:
-                    rows = bridge[offset : offset + width].detach().clone()
-                    state = states[sequence]
-                    state.bridge_hidden = (
-                        rows
-                        if state.bridge_hidden is None
-                        else torch.cat([state.bridge_hidden, rows], dim=0)
-                    )
-                offset += width
-
-            token_ids = runner.sampler(logits, temperatures).tolist()
-
-            # Vendor ``stream_generate`` does NOT end the loop at text EOS:
-            # it sets ``text_finished`` and keeps clocking the forward pass
-            # with throwaway filler so the talker tail can drain. The
-            # sampler still runs on those steps so the RNG stream advances
-            # identically.
-            effective_ids = []
-            for position, (sequence, sampled_id) in enumerate(zip(seqs, token_ids, strict=True)):
+        # Bridge rows are packed by token, not by sequence: sequence i
+        # owns ``num_scheduled_tokens`` consecutive rows of the buffer.
+        bridge = stage_runner.bridge_hidden()
+        scheduled.clear()
+        offset = 0
+        for sequence in seqs:
+            width = sequence.num_scheduled_tokens if is_prefill else 1
+            scheduled.append(sequence)
+            if bridge is not None:
+                rows = bridge[offset : offset + width].detach().clone()
                 state = states[sequence]
-                if state.text_finished:
-                    effective_ids.append(pad_token if state.emitted_filler else enter_token)
-                    state.emitted_filler = True
-                else:
-                    effective_ids.append(sampled_id)
-                    if sampled_id == eos_id:
-                        state.text_finished = True
-                        state.content_len = len(state.generated)
-                state.generated.append(effective_ids[-1])
-                if not is_prefill:
-                    state.text_state = logits[position].detach()
-                if state.request.stop_hit is not None and state.request.stop_hit(state.generated):
-                    # Cap this sequence at the token it just produced so the
-                    # fork's own postprocess finishes it; the rest of the
-                    # batch keeps decoding.
-                    sequence.max_tokens = sequence.num_completion_tokens + 1
-                if (
-                    state.text_finished
-                    and state.content_len is not None
-                    and len(state.generated) >= state.content_len + talker_tail
-                ):
-                    # The talker only needs ``content_len + tail`` bridge rows;
-                    # stop the post-EOS filler clock for this sequence.
-                    sequence.max_tokens = sequence.num_completion_tokens + 1
+                state.bridge_hidden = (
+                    rows
+                    if state.bridge_hidden is None
+                    else torch.cat([state.bridge_hidden, rows], dim=0)
+                )
+            offset += width
 
-            scheduler.postprocess(seqs, effective_ids, is_prefill)
-            stage_runner.reset_context()
-    finally:
-        # Restore so a second call doesn't wrap an already-wrapped
-        # callable (which would explode on signature mismatch).
-        runner.sampler = base_sampler
+        token_ids = stage_runner.sample(logits, temperatures, sampler=_sampler_with_rp).tolist()
+
+        # Vendor ``stream_generate`` does NOT end the loop at text EOS:
+        # it sets ``text_finished`` and keeps clocking the forward pass
+        # with throwaway filler so the talker tail can drain. The
+        # sampler still runs on those steps so the RNG stream advances
+        # identically.
+        effective_ids = []
+        for position, (sequence, sampled_id) in enumerate(zip(seqs, token_ids, strict=True)):
+            state = states[sequence]
+            if state.text_finished:
+                effective_ids.append(pad_token if state.emitted_filler else enter_token)
+                state.emitted_filler = True
+            else:
+                effective_ids.append(sampled_id)
+                if sampled_id == eos_id:
+                    state.text_finished = True
+                    state.content_len = len(state.generated)
+            state.generated.append(effective_ids[-1])
+            if not is_prefill:
+                state.text_state = logits[position].detach()
+            if state.request.stop_hit is not None and state.request.stop_hit(state.generated):
+                # Cap this sequence at the token it just produced so the
+                # fork's own postprocess finishes it; the rest of the
+                # batch keeps decoding.
+                sequence.max_tokens = sequence.num_completion_tokens + 1
+            if (
+                state.text_finished
+                and state.content_len is not None
+                and len(state.generated) >= state.content_len + talker_tail
+            ):
+                # The talker only needs ``content_len + tail`` bridge rows;
+                # stop the post-EOS filler clock for this sequence.
+                sequence.max_tokens = sequence.num_completion_tokens + 1
+
+        scheduler.postprocess(seqs, effective_ids, is_prefill)
+        stage_runner.reset_context()
 
     return [
         ThinkerDecoded(
@@ -283,7 +286,7 @@ def recapture_bridge_minimind(
 
     if not full_ids or bridge_hidden is None:
         return bridge_hidden
-    model = stage_runner.model_runner.model
+    model = stage_runner.model
     n_total = len(full_ids)
     dev = bridge_hidden.device
     stage_runner.set_context(
@@ -301,7 +304,7 @@ def recapture_bridge_minimind(
             _in = torch.tensor(full_ids, dtype=torch.int64, device=dev)
             _pos = torch.arange(n_total, dtype=torch.int64, device=dev)
             _ = model(_in, _pos)
-        _full_bridge = model.get_bridge_hidden()
+        _full_bridge = stage_runner.bridge_hidden()
         if _full_bridge is not None:
             # The buffer holds ``max_position`` rows; only the first
             # ``n_total`` carry this sequence. The talker embeds every
@@ -312,4 +315,168 @@ def recapture_bridge_minimind(
     return bridge_hidden
 
 
-__all__ = ["ThinkerDecode", "ThinkerDecoded", "decode_minimind", "recapture_bridge_minimind"]
+def _mx_to_torch(array: Any) -> Any:
+    """An MLX array as a float32 torch tensor."""
+    import mlx.core as mx
+    import numpy as np
+    import torch
+
+    return torch.from_numpy(np.asarray(array.astype(mx.float32)))
+
+
+def decode_minimind_mlx(
+    stage_runner: Any,
+    requests: list[ThinkerDecode],
+    *,
+    eos_id: int | None = None,
+    enter_token: int = 0,
+    pad_token: int = 0,
+    talker_tail: int = 8,
+) -> list[ThinkerDecoded]:
+    """Decode requests with the fork Scheduler and MLX cache rows.
+
+    Sampling matches the CUDA thinker's temperature, repetition penalty,
+    top-p, and per-request RNG keys. The bridge rows come from a
+    full-sequence re-run per request, the same way the CUDA track gets them.
+    """
+    import mlx.core as mx
+    import torch
+    from nanovllm.engine.scheduler import Scheduler
+    from nanovllm.engine.sequence import Sequence
+    from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
+
+    from nanovllm_omni.backend.mlx_backend import _make_sampler, _seed_key
+
+    if not requests:
+        return []
+    if eos_id is None:
+        # The runner fills ``config.eos`` from the tokenizer; a hand-built
+        # MlxConfig (the fake-model test) leaves it None.
+        eos_id = stage_runner.config.eos
+        if eos_id is None:
+            eos_id = min(int(token) for token in stage_runner.tokenizer.eos_token_ids)
+
+    scheduler = Scheduler(stage_runner.config)
+    states: dict[Any, _SeqState] = {}
+    sampling_by_sequence: dict[Any, _MlxSampling] = {}
+    rng_key_by_sequence: dict[Any, Any] = {}
+    for request in requests:
+        sequence = Sequence(
+            request.token_ids,
+            ForkSamplingParams(
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                ignore_eos=True,
+            ),
+        )
+        scheduler.add(sequence)
+        states[sequence] = _SeqState(request=request)
+        sampling_by_sequence[sequence] = _MlxSampling(
+            top_p=request.top_p,
+            extra={"repetition_penalty": request.repetition_penalty},
+        )
+        rng_key_by_sequence[sequence] = _seed_key(mx, request)
+
+    cache_sequences = []
+
+    def _filter_inactive_cache_rows() -> None:
+        nonlocal cache_sequences
+        keep_indices = [
+            index for index, sequence in enumerate(cache_sequences) if sequence in scheduler.running
+        ]
+        if len(keep_indices) == len(cache_sequences):
+            return
+        stage_runner.filter_cache_rows(keep_indices)
+        cache_sequences = [cache_sequences[index] for index in keep_indices]
+
+    while not scheduler.is_finished():
+        if not scheduler.waiting and not scheduler.running:
+            break
+        seqs, is_prefill = scheduler.schedule()
+        _filter_inactive_cache_rows()
+        stage_runner.set_context(is_prefill=is_prefill)
+        input_ids, positions = (
+            stage_runner.prepare_prefill(seqs) if is_prefill else stage_runner.prepare_decode(seqs)
+        )
+        temperatures = stage_runner.prepare_sample(seqs)
+        logits = stage_runner.forward(input_ids, positions, is_prefill)
+
+        bridge = stage_runner.bridge_hidden()
+        for index, sequence in enumerate(seqs):
+            if bridge is None:
+                continue
+            rows = bridge[index]
+            rows = rows[-len(sequence.token_ids) :] if is_prefill else rows[-1:]
+            captured = _mx_to_torch(rows)
+            state = states[sequence]
+            if is_prefill or state.bridge_hidden is None:
+                state.bridge_hidden = captured
+            else:
+                state.bridge_hidden = torch.cat((state.bridge_hidden, captured), dim=0)
+
+        current_keys = [rng_key_by_sequence[sequence] for sequence in seqs]
+        sampler = _make_sampler(
+            mx,
+            seqs,
+            [sampling_by_sequence[sequence] for sequence in seqs],
+            current_keys,
+        )
+        sampled_ids = stage_runner.sample(logits, temperatures, sampler=sampler).tolist()
+        for sequence, key in zip(seqs, current_keys, strict=True):
+            rng_key_by_sequence[sequence] = key
+
+        effective_ids = []
+        for position, (sequence, sampled_id) in enumerate(zip(seqs, sampled_ids, strict=True)):
+            state = states[sequence]
+            if state.text_finished:
+                effective = pad_token if state.emitted_filler else enter_token
+                state.emitted_filler = True
+            else:
+                effective = sampled_id
+                if sampled_id == eos_id:
+                    state.text_finished = True
+                    state.content_len = len(state.generated)
+            effective_ids.append(effective)
+            state.generated.append(effective)
+            if not is_prefill:
+                state.text_state = _mx_to_torch(logits[position])
+            if state.request.stop_hit is not None and state.request.stop_hit(state.generated):
+                sequence.max_tokens = sequence.num_completion_tokens + 1
+            if (
+                state.text_finished
+                and state.content_len is not None
+                and len(state.generated) >= state.content_len + talker_tail
+            ):
+                sequence.max_tokens = sequence.num_completion_tokens + 1
+
+        if is_prefill:
+            cache_sequences.extend(seqs)
+        scheduler.postprocess(seqs, effective_ids, is_prefill)
+        stage_runner.reset_context()
+        _filter_inactive_cache_rows()
+
+    results = []
+    for request, state in zip(requests, states.values(), strict=True):
+        # The decode loop forwarded one token per step against the paged
+        # cache, but the vendor runs full-sequence attention every step.
+        # The rows are not bit-equal and the talker cross-attends to them,
+        # so the bridge comes from a full-sequence re-run.
+        full_ids = list(request.token_ids) + list(state.generated)
+        bridge = stage_runner.recapture_bridge(full_ids)
+        results.append(
+            ThinkerDecoded(
+                generated=state.generated,
+                bridge_hidden=_mx_to_torch(bridge) if bridge is not None else state.bridge_hidden,
+                text_state=state.text_state,
+            )
+        )
+    return results
+
+
+__all__ = [
+    "ThinkerDecode",
+    "ThinkerDecoded",
+    "decode_minimind",
+    "decode_minimind_mlx",
+    "recapture_bridge_minimind",
+]

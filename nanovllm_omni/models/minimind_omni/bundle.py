@@ -65,15 +65,11 @@ def _resolve_snapshot(model_id: str) -> str:
 
 
 def _pick_device(device: str | None) -> str:
-    import torch
+    from ...backend.device import default_torch_device
 
     if device:
         return device
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    return default_torch_device()
 
 
 def _cast_model_dtype(model: Any, dtype: str | None, device: str) -> Any:

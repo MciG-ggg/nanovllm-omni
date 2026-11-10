@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any
 
 
 def _default_device() -> str:
@@ -18,7 +18,7 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-OmniPromptType: TypeAlias = str | dict[str, Any]
+type OmniPromptType = str | dict[str, Any]
 """One generate() prompt: text, or a dict carrying modal content.
 
 The dict shape mirrors the reference ``OmniTextPrompt`` -- a ``prompt`` key plus
@@ -57,6 +57,11 @@ class OmniEngineArgs:
     # its own ``minimind-o`` config class, so the hub's ``auto_map`` file
     # never runs (see ``models/minimind_omni/hf_config.py``).
     trust_remote_code: bool = True
+    # Which array framework the stages run on; ``None`` keeps each stage's
+    # own default (torch). Names come from ``nanovllm_omni.backend``;
+    # ``available_backends()`` lists them. An unknown name is rejected at
+    # construction time by ``validate_backend`` rather than inside a stage.
+    backend: str | None = None
     # Lazy default: ``_default_device()`` resolves at OmniEngineArgs() time
     # to "cuda" if torch sees a GPU, else "cpu". Keep the annotation as
     # ``str | None`` because the annotation is static and torch may not
@@ -90,3 +95,19 @@ class OmniEngineArgs:
                 default = _default_device()
             setattr(self, f.name, kwargs.pop(f.name, default))
         self.extra.update(kwargs)
+        if self.backend is not None:
+            self.validate_backend()
+
+    def validate_backend(self) -> None:
+        """Fail fast on an unknown backend name.
+
+        ``get_backend`` raises too, but it raises inside a stage constructor:
+        by then the pipeline is half built. Checking the name here keeps the
+        error at the argument boundary, where the typo is, and avoids building
+        a backend just to validate its name.
+        """
+        from nanovllm_omni.backend import available_backends
+
+        known = available_backends()
+        if self.backend not in known:
+            raise ValueError(f"unknown backend {self.backend!r}; available: {known}")

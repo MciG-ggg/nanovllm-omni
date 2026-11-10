@@ -12,7 +12,22 @@
 - 🔧 **thinker 解码 bench 原语(回归用,不代表端到端)** — 默认 `bench time` 只测单段 thinker 解码。约 177 ms(`--use-thinker-cuda-graph`)与约 483 ms(eager)中位来自 fork 之前的 bench 栈(2026-09 在 `8f6d522` 上测得);当前代码走 fork 的 CUDA graph,当前代码上没有复现这两个数字的运行,所以它们是出处记录,不是当前测量值。该数字**不含** talker/MTP/Mimi 阶段,不可当作端到端延迟引用。
 - 🌐 **统一的 omni I/O 契约** — MiniMind-O(音频)+ SmolVLM(文本)+ SD-Turbo(图像)+ SmolVLA(动作)共用同一个 `OmniRequestOutput` 信封
 
-一个小型、本地的参考实现,在单卡上跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。
+一个小型、本地的参考实现,跑 vllm-omni 的阶段化(stage-based)服务架构。本项目**不**声称为 vllm-omni 全功能集的实现。
+
+## 两条轨
+
+引擎有两个后端,按 stage 选([ADR 0013](docs/adr/0013-backend-abstraction.md)):
+
+| 轨 | 后端 | 能拿到什么 | 拿不到什么 |
+|---|---|---|---|
+| **CUDA** | `nano-vllm` fork(torch) | varlen attention、paged KV、CUDA Graph | 要 NVIDIA 卡;fork 的 attention 顶层 `import triton`,而 triton 没有 macOS wheel |
+| **MLX** | `mlx`(Apple Silicon) | 能在 Mac 上跑、`mx.compile` 做图捕获 | 还没有 varlen attention——MLX 的 SDPA 有 `mask` 但没有 `cu_seqlens` |
+
+两条轨都在范围内,都要各自出数字([ADR 0014](docs/adr/0014-dual-track-targets.md))。
+**数字不跨机相减**——RTX 3050 的数和 Mac 的数不可比,每份结果文档都写明是哪台机器产的。
+
+serving 本身就是教材,不是附属功能([ADR 0016](docs/adr/0016-serving-is-a-teaching-subject.md))。
+入口是[文档地图](docs/README.md),里面有三条阅读路线。
 
 ![RTX 3050 上的 SD-Turbo 单步图像生成(512×512)](docs/images/sd_turbo_sample.png)
 
@@ -24,7 +39,7 @@
 
 | 项目 | 模态 | 目标 |
 |---|---|---|
-| `nanovllm-omni`(本仓库) | 音频 / 图像 / 动作 / 文本 | 与 vllm-omni 消费侧 API 对齐的 omni-模态运行时,跑在单张 4 GB 卡上 |
+| `nanovllm-omni`(本仓库) | 音频 / 图像 / 动作 / 文本 | 与 vllm-omni 消费侧 API 对齐的 omni-模态运行时,CUDA 与 Apple Silicon 都能跑 |
 | [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) | 仅文本 | 最小化教学用 vLLM 文本路径重写 |
 | [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) | 仅文本 | 另一个教学用 vLLM 文本路径重写 |
 
@@ -99,11 +114,35 @@ LIBERO 评测片段;两阶段管线(vlm LLM_AR → action DIFFUSION)输出 actio
 
 ## 快速开始
 
-安装包及其已有依赖;音频路径加 `[minimind]` extra(torch / transformers),SmolVLA examples 加 `.[smolvla]`:
+base 包不含任何 array 框架：不装 torch 也不装 mlx，`import nanovllm_omni`
+和调度器就能用。每个硬件轨是独立的 extra，**本来就该分开装** —— 它们的
+依赖互斥（MLX 的 `mlx-vlm` 要 `datasets>=4`，SmolVLA 的 `lerobot` 要
+`datasets<=3.6`）。
+
+| extra | 装了什么 | 跑在哪 |
+|---|---|---|
+| *(不装)* | yaml + 调度器 + backend 注册表 | 任何机器 |
+| `cuda` | torch、triton、flash-attn、fork 的 attention kernel | Linux/WSL，NVIDIA 卡 |
+| `mlx` | mlx、mlx-lm、mlx-vlm、torchvision —— 四个族都能跑 | Apple Silicon |
+| `smolvla` | torch、transformers、lerobot | CUDA（lerobot 要 GPU） |
+| `gradio` | demo UI | 跟任意 family extra 一起 |
+| `dev` | pytest、ruff、black | 任何机器 |
 
 ```bash
-pip install -e ".[dev,minimind]"
+# Linux / WSL + NVIDIA 卡
+pip install -e ".[dev,cuda]"
+
+# Apple Silicon
+pip install -e ".[dev,mlx]"          # 四个族都能跑
 ```
+
+`mlx`、`mlx-lm`、`mlx-vlm` 合成一个 extra 是刻意的：它们能在同一个进程里
+共存（MiniMind 的 talker 解码和 SmolVLM 的图文回答在同一个解释器里跑过，没
+有问题），拆开会多出一种"装了 mlx 却在 SmolVLM 上撞 ModuleNotFoundError"的
+状态。
+
+`triton` 和 `flash-attn` 带了 `sys_platform != 'darwin'` 的 marker，所以在
+Mac 上装 `.[cuda]` 只装 torch，不会去拉没有 wheel 的包。
 
 跑 MiniMind-O(音频),先把权重一次性拉到本地(bundle loader 是 offline-first 的,不会自动 fetch):
 
@@ -156,11 +195,11 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 打包好的 Gradio UI 用四个 tab 拼四个模型族,每个 tab 首次点击时才 lazy-load `Omni(...)` 引擎:
 
 ```bash
-pip install -e ".[dev,minimind,smolvla,gradio]"
+pip install -e ".[dev,cuda,smolvla,gradio]"
 python -m nanovllm_omni.serving.app
 ```
 
-4 GB 卡上,同一时刻只加载一个 tab 的模型。launcher 只依赖 `[gradio]` —— 想跑哪个 tab 就先装对应的 `[minimind]` / `[smolvla]`。
+4 GB 卡上,同一时刻只加载一个 tab 的模型。launcher 只依赖 `[gradio]` —— 想跑哪个 tab 就先装对应的 `[cuda]` / `[smolvla]`。
 
 ### 复现延迟数字
 
@@ -202,11 +241,11 @@ docs/           # 项目笔记与性能归档
 
 本仓库明确**不**包含:视频生成、超出所列四类的多模型流水线、分布式执行、WebSocket、FastAPI/uvicorn 服务。对齐的 HTTP seam 在可用时使用 Python 标准库 HTTP server。
 
-### 单卡、单进程运行时
+### 单进程运行时
 
 一个 `Omni(...)` 解析出一个 `PipelineConfig`,构造一个 `PipelineRunner`,所有 stage 装在**一个** Python 进程里。MiniMind-O 的两个 AR stage 通过 `nanovllm_omni/models/minimind_omni/bundle.py` 共享同一份 checkpoint(bench 和 tools 使用);引擎本身只看到 stage 实例。没有 per-stage 子进程池、没有 `StageRuntime`、没有多卡 dispatch、也没有 tensor-parallel worker — 这是设计上有意的。
 
-这是与 vllm-omni 的有意分歧:vllm-omni 里每个 stage 跑在独立的 `StageEngineCoreProc` 子进程里,stage 可以绑定到不同的 GPU。vllm-omni 能这么做是因为每个 stage 都是独立的 HF checkpoint(thinker 30B、talker 2B、code2wav 1B 等)。MiniMind-O 的 `thinker` 和 `talker` 是同一个 `AutoModelForCausalLM` 的子模块,从同一个 safetensors 文件加载,所以 per-stage 子进程隔离会强制每个 stage 重新加载完整的 ~3 GB checkpoint — 在我们目标的 4 GB 卡上跑不动,在更大的卡上也是浪费。`bundle.py` 改成所有东西在一个进程里;stage 之间的通信(thinker hidden states → talker → code2wav)用 Python tensor 引用,零序列化、零 IPC。
+这是与 vllm-omni 的有意分歧:vllm-omni 里每个 stage 跑在独立的 `StageEngineCoreProc` 子进程里,stage 可以绑定到不同的 GPU。vllm-omni 能这么做是因为每个 stage 都是独立的 HF checkpoint(thinker 30B、talker 2B、code2wav 1B 等)。MiniMind-O 的 `thinker` 和 `talker` 是同一个 `AutoModelForCausalLM` 的子模块,从同一个 safetensors 文件加载,所以 per-stage 子进程隔离会强制每个 stage 重新加载完整的 ~3 GB checkpoint — 在这套东西起步时的 4 GB 卡上跑不动,在更大的卡上也是浪费。`bundle.py` 改成所有东西在一个进程里;stage 之间的通信(thinker hidden states → talker → code2wav)用 Python tensor 引用,零序列化、零 IPC。
 
 同卡上的请求级并行不在范围内:四个模型族共用同一个单进程 pipeline runner,每个请求走一次 pipeline 执行。
 

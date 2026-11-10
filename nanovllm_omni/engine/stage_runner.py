@@ -60,14 +60,12 @@ def get_stage_config(model_path: str, **kwargs: Any) -> Any:
     # Without this the decode model runs in fp32 while the stage's
     # own copy of the weights runs in the requested dtype.
     dtype = kwargs.pop("dtype", None)
+    # The fork Config has no device field; ModelRunner selects CUDA during
+    # initialization instead of reading a device value from this config.
+    kwargs.pop("device", None)
     config = Config(model_path, **kwargs)
     if dtype is not None:
         config.hf_config.dtype = getattr(torch, dtype)
-    # Force a CUDA device probe on the config so a later
-    # ``ModelRunner(config)`` sees a consistent device. The fork's
-    # default is "cuda"; an explicit ``device`` kwarg wins.
-    if "device" in kwargs:
-        config.device = kwargs["device"]
     return config
 
 
@@ -246,6 +244,31 @@ class StageRunner:
             input_ids, positions, is_prefill, inputs_embeds=inputs_embeds
         )
 
+    def prepare_prefill(self, seqs: list[Any]) -> tuple[Any, Any]:
+        """Build the batch tensors for a prefill step."""
+        return self.model_runner.prepare_prefill(seqs)
+
+    def prepare_decode(self, seqs: list[Any]) -> tuple[Any, Any]:
+        """Build the batch tensors for a decode step."""
+        return self.model_runner.prepare_decode(seqs)
+
+    def prepare_sample(self, seqs: list[Any]) -> Any:
+        """Build the per-sequence sampling parameters."""
+        return self.model_runner.prepare_sample(seqs)
+
+    def bridge_hidden(self) -> Any:
+        """Hidden states the model produced this step.
+
+        Only families with a second stage call this: MiniMind-O's
+        thinker hands the buffer to the talker.
+        """
+        return self.model_runner.model.get_bridge_hidden()
+
+    @property
+    def model(self) -> Any:
+        """The model object behind this runner."""
+        return self.model_runner.model
+
     def sample(
         self,
         hidden_states: Any,
@@ -254,6 +277,7 @@ class StageRunner:
         top_p: float = 1.0,
         history: Any = None,
         repetition_penalty: float = 1.0,
+        sampler: Any = None,
     ) -> Any:
         """Draw one token per sequence from ``hidden_states`` logits.
 
@@ -262,7 +286,14 @@ class StageRunner:
         Default path is Gumbel-max (bit-exact with the pre-extension
         behaviour); the vendor top-k / top-p + repetition-penalty
         recipe is opt-in per call.
+
+        ``sampler`` replaces the built-in one for this call only, called
+        as ``sampler(hidden_states, temperatures)``. Families with a
+        vendor sampling recipe pass one instead of mutating
+        ``model_runner.sampler``.
         """
+        if sampler is not None:
+            return sampler(hidden_states, temperatures)
         return self.sampler(
             hidden_states,
             temperatures,

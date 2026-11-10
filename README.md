@@ -12,7 +12,25 @@
 - 🔧 **Thinker-decode bench primitive (for regression, not the production path)** — `bench time` (default) measures the single-thinker decode stage only. The ~177 ms (`--use-thinker-cuda-graph`) and ~483 ms (eager) medians come from the pre-fork bench stack (measured at `8f6d522`, 2026-09). The current tree runs the fork CUDA graph, and no run on the current tree reproduces those numbers, so read them as provenance, not as a current measurement. That number does **not** include the talker/MTP/Mimi stages and must not be quoted as end-to-end latency.
 - 🌐 **Unified omni I/O contract** — same `OmniRequestOutput` envelope for MiniMind-O (audio) + SmolVLM (text) + SD-Turbo (image) + SmolVLA (action)
 
-A small, local reference implementation that exercises vllm-omni's stage-based serving architecture on a single card. This project does not claim to implement vllm-omni's full feature set.
+A small, local reference implementation that exercises vllm-omni's stage-based serving architecture. This project does not claim to implement vllm-omni's full feature set.
+
+## Two tracks
+
+The engine runs on two backends, chosen per stage
+([ADR 0013](docs/adr/0013-backend-abstraction.md)):
+
+| Track | Backend | What it gives | What it cannot do |
+|---|---|---|---|
+| **CUDA** | the `nano-vllm` fork (torch) | varlen attention, paged KV, CUDA Graph | needs an NVIDIA card; the fork's attention imports `triton`, which has no macOS wheel |
+| **MLX** | `mlx` (Apple Silicon) | runs on a Mac, `mx.compile` for graph capture | no varlen attention yet — MLX's SDPA has a `mask` but no `cu_seqlens` |
+
+Both tracks are in scope and both must produce their own numbers
+([ADR 0014](docs/adr/0014-dual-track-targets.md)). **Numbers never cross machines** — a
+figure from the RTX 3050 and a figure from the Mac are not comparable, and every
+result document says which machine produced it.
+
+Serving is the subject, not a side feature ([ADR 0016](docs/adr/0016-serving-is-a-teaching-subject.md)).
+Start with the [document map](docs/README.md) — it has three reading routes.
 
 ![SD-Turbo single-step image generation on RTX 3050 (512×512)](docs/images/sd_turbo_sample.png)
 
@@ -25,7 +43,7 @@ There are two other Python projects with `nano-vllm`-style names; they are
 
 | Project | Modalities | Goal |
 |---|---|---|
-| `nanovllm-omni` (this repo) | audio / image / action / text | aligned omni-modal runtime that mirrors vllm-omni's consumer-visible API on a single 4 GB card |
+| `nanovllm-omni` (this repo) | audio / image / action / text | aligned omni-modal runtime that mirrors vllm-omni's consumer-visible API, on CUDA and on Apple Silicon |
 | [`GeeeekExplorer/nano-vllm`](https://github.com/GeeeekExplorer/nano-vllm) | text only | minimal educational re-implementation of vLLM's text path |
 | [`zhx-llm/nanovllm`](https://github.com/zhx-llm/nanovllm) | text only | another educational text-only vLLM reimplementation |
 
@@ -109,13 +127,36 @@ LIBERO eval episode; the two-stage pipeline (vlm LLM_AR → action DIFFUSION) em
 
 ## Quickstart
 
-Install the package and its existing dependencies; add the `minimind`
-extra for the audio path (torch/transformers) and `.[smolvla]` for the
-SmolVLA examples:
+The base package is framework-free: `import nanovllm_omni` and the
+scheduler/registry work with no torch and no mlx installed. Each hardware
+track is its own extra, and they are **meant to be installed separately** —
+they pull mutually exclusive dependencies (MLX's `mlx-vlm` needs
+`datasets>=4`, SmolVLA's `lerobot` needs `datasets<=3.6`).
+
+| extra | what it adds | where it runs |
+|---|---|---|
+| *(none)* | yaml + the scheduler; the backend registry | anywhere |
+| `cuda` | torch, triton, flash-attn, the fork's attention kernel | Linux/WSL, NVIDIA GPU |
+| `mlx` | mlx, mlx-lm, mlx-vlm, torchvision — every family | Apple Silicon |
+| `smolvla` | torch, transformers, lerobot | CUDA (lerobot needs a GPU) |
+| `gradio` | the demo UI | alongside any family extra |
+| `dev` | pytest, ruff, black | anywhere |
+
+`mlx`, `mlx-lm` and `mlx-vlm` are one extra on purpose: they coexist in a
+single process (a MiniMind talker decode and a SmolVLM answer run in the
+same interpreter without trouble), and splitting them only adds a mode
+where SmolVLM fails with `ModuleNotFoundError` after installing "mlx".
 
 ```bash
-pip install -e ".[dev,minimind]"
+# Linux / WSL with an NVIDIA card
+pip install -e ".[dev,cuda]"
+
+# Apple Silicon
+pip install -e ".[dev,mlx]"          # all four families
 ```
+
+`triton` and `flash-attn` carry a `sys_platform != 'darwin'` marker, so
+`.[cuda]` on a Mac installs torch and nothing that has no wheel there.
 
 For MiniMind-O (audio), pull the weights once into local directories
 (the bundle loader is offline-first and never auto-fetches):
@@ -172,11 +213,11 @@ outputs[0].multimodal_output["actions"].array  # np.ndarray [chunk, action_dim]
 A bundled Gradio UI composes all four tabs with per-tab lazy engine load:
 
 ```bash
-pip install -e ".[dev,minimind,smolvla,gradio]"
+pip install -e ".[dev,cuda,smolvla,gradio]"
 python -m nanovllm_omni.serving.app
 ```
 
-Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do not load more than one tab's model at once. The launcher depends on `[gradio]` only — pre-install `[minimind]` / `[smolvla]` for the tabs you intend to use.
+Each tab lazy-loads its `Omni(...)` engine on first click; on a 4 GB card, do not load more than one tab's model at once. The launcher depends on `[gradio]` only — pre-install `[cuda]` / `[smolvla]` for the tabs you intend to use.
 
 ### Reproducing the latency claim
 
@@ -221,7 +262,7 @@ docs/           # project notes and performance archives
 
 This repository intentionally excludes video generation, multi-model pipelines beyond the four listed, distributed execution, WebSockets, and FastAPI/uvicorn serving. The aligned HTTP seam, when available, uses the Python standard library HTTP server.
 
-### Single-card, single-process runtime
+### Single-process runtime
 
 One `Omni(...)` resolves a `PipelineConfig` and builds one
 `PipelineRunner` whose stages live in the same Python process. For
@@ -239,7 +280,7 @@ code2wav 1B, etc.). MiniMind-O's `thinker` and `talker` are
 submodules of one `AutoModelForCausalLM` that loads from a single
 safetensors file, so per-stage subprocess isolation would force
 every stage to re-load the full ~3 GB checkpoint — unaffordable on
-the 4 GB GPU we target and wasteful on anything bigger.
+the 4 GB card this started on and wasteful on anything bigger.
 `bundle.py` instead keeps everything in one process; inter-stage
 traffic (thinker hidden states → talker → code2wav) is Python
 tensor references with zero serialization and zero IPC.

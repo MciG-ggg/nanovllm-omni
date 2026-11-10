@@ -34,9 +34,15 @@ def load_mimi_codec(
     from .bundle import _cast_model_dtype, _pick_device, _resolve_snapshot
 
     device = _pick_device(device)
+    # ``low_cpu_mem_usage=True`` (the default) builds the model on the meta
+    # device and materialises it afterwards; on MPS that leaves placeholders
+    # without storage and ``decode`` dies with "Placeholder storage has not
+    # been allocated on MPS device". Loading eagerly is the only path that
+    # moves cleanly, and the codec is 384 MB so the peak does not matter.
     mimi = MimiModel.from_pretrained(
         _resolve_snapshot(model_id),
         trust_remote_code=trust_remote_code,
+        low_cpu_mem_usage=False if device == "mps" else None,
     ).eval()
     return _cast_model_dtype(mimi, dtype, device).to(device)
 

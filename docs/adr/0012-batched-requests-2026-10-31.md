@@ -18,7 +18,7 @@
 - **默认不设等待窗口**：批只来自"恰好同时在队列里"的请求，想攒批要显式开
   等待窗口并付首请求延迟；
 - **AR stage 的 `max_num_seqs` 生产配置 ≥ 4**，codec 类 stage 常常是 1；
-- **跨 batch size 不承诺逐位等价**（`docs/configuration/stage_configs.md`：
+- **跨 batch size 不承诺逐位等价**（上游 vllm-omni 的 `docs/configuration/stage_configs.md`：
   "Floating-point decoder outputs can differ across batch sizes; this PR does
   not claim bitwise or quality equivalence"）。
 

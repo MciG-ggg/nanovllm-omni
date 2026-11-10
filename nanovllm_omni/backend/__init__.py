@@ -43,10 +43,12 @@ def get_backend(name: str | None = None, **kwargs: Any) -> Backend:
 
 def _register_builtin_backends() -> None:
     from .mlx_backend import MlxBackend
+    from .mlx_vlm import MlxVlmBackend
     from .torch_backend import TorchBackend
 
     register_backend("torch", TorchBackend)
     register_backend("mlx", MlxBackend)
+    register_backend("mlx-vlm", MlxVlmBackend)
 
 
 _register_builtin_backends()

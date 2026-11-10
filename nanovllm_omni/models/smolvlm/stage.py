@@ -16,13 +16,18 @@ Per ``docs/dev/nanovllm-omni-smolvlm-ar-migration.md`` ADR-016 (revised,
 Call contract: ``payload`` is text prompt (str / ``{"prompt": ...}``);
 images are passed via ``SamplingParams.extra["images"]`` as a list of
 ``PIL.Image.Image``.
+
+Two tracks share this stage. The torch track keeps its own processor and
+its own image merge (``TorchVlmSupport`` below); the MLX track gets both
+from mlx-vlm (``backend/mlx_vlm.py::MlxVlmSupport``), because mlx-vlm's
+processor expands the image placeholder differently from transformers'.
+The stage itself only talks to that support object, so the decode loop
+below is the same on both tracks.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-import torch
 
 from nanovllm_omni.engine.stage_engine import StageEngine
 from nanovllm_omni.utils.profiling import profile_range
@@ -38,112 +43,51 @@ def _vlm_stage(deploy: Any, args: Any, model_class: Any = None) -> Any:
     return SmolVLMStage(deploy, args, model_class=model_class)
 
 
-class SmolVLMStage(StageEngine):
-    """Vision prefill + fork AR decode loop for SmolVLM-500M-Instruct."""
+class TorchVlmSupport:
+    """The torch side of a SmolVLM stage: the processor and the image merge."""
 
-    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
-        super().__init__()
-        from transformers import AutoConfig, AutoProcessor
-
-        from nanovllm_omni.backend import get_backend
-        from nanovllm_omni.engine.stage_runner import (
-            _ensure_dist,
-            stage_kwargs_from_args,
-        )
-
-        # Fork layers (VocabParallelEmbedding, QKVParallelLinear, etc.)
-        # read ``dist.get_rank()`` at construction time. The fork's
-        # ModelRunner calls _ensure_dist() internally; SmolVLMModel is
-        # built BEFORE ModelRunner so we must do the same init up front
-        # (no-op after ModelRunner init: the monkey-patched init skips
-        # duplicate calls).
-        _ensure_dist()
-
-        extra = dict(getattr(args, "extra", None) or {})
-        allow_hf = bool(extra.get("allow_hf_download", False))
-        self.device = getattr(args, "device", None) or "cuda"
-        dtype_str = getattr(args, "dtype", None) or "bfloat16"
-        if dtype_str not in _DTYPE_ALLOWED:
-            raise ValueError(
-                f"smolvlm: dtype {dtype_str!r} not in supported {list(_DTYPE_ALLOWED)}"
-            )
-        self.dtype = getattr(torch, dtype_str)
-        model_id = getattr(args, "model", None) or _MODEL_ID
-
-        kwargs: dict[str, Any] = {"dtype": self.dtype}
-        if not allow_hf:
-            kwargs["local_files_only"] = True
-
-        # The image token and eos live on the top-level Idefics3 shell
-        # config; the fork mounts the text fields over it but keeps
-        # ``vision_config`` / ``text_config`` intact.
-        hf_config = AutoConfig.from_pretrained(model_id, **kwargs)
-
-        # 1) Build the fork StageRunner. Its ModelRunner constructs and
-        # loads the whole ``SmolVLMForConditionalGeneration`` (vision +
-        # connector + text), because that is the model_class; the stage
-        # reuses that copy for vision prefill instead of holding a
-        # second one. A duplicate costs ~1 GiB, and the fork sizes the
-        # paged KV cache from the memory PyTorch has left, so the copy
-        # used to shrink the cache to a single 256-token block -- too
-        # little for one image request (1088 image tokens).
-        #
-        # The decode loop runs under a CUDA graph: eager spends most of
-        # the wall time in kernel launches, not in the GPU. The fork
-        # falls back to eager when the capture fails on the device, so
-        # the graph is on by default and ``extra["use_cuda_graph"] =
-        # False`` turns it off.
-        # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
-        # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
-        from huggingface_hub import snapshot_download
-
-        try:
-            model_dir = snapshot_download(model_id, local_files_only=not allow_hf)
-        except Exception:  # pragma: no cover - rely on load_model to fail loud
-            model_dir = model_id
-        backend = get_backend(
-            extra.get("backend", "torch"),
-            device=self.device,
-            dtype=dtype_str,
-        )
-        config = backend.make_config(
-            model_path=model_dir,
-            **stage_kwargs_from_args(args),
-        )
-        config.enforce_eager = not extra.get("use_cuda_graph", True)
-        # A stage call schedules exactly one Sequence, so only the bs=1
-        # decode graph is ever replayed and the bs=2/4/8 graphs cost
-        # memory the KV cache needs more.
-        config.max_capture_bs = 1
-        # An image request is 1088 vision tokens before the prompt, so
-        # the fork default (512) sends every image decode step to the
-        # eager path. 2048 covers one image plus 512 generated tokens.
-        config.graph_max_seq_len = 2048
-        self.stage_runner = backend.make_stage_runner(
-            model_class=model_class or SmolVLMForConditionalGeneration,
-            config=config,
-        )
-        self.model = self.stage_runner.model
-        self.model.eval()
-
-        # 2) Processor + image-token metadata
-        self.processor = AutoProcessor.from_pretrained(model_id, **kwargs)
-        image_token_id = getattr(hf_config, "image_token_id", None)
-        if image_token_id is None:
-            tok = self.processor.tokenizer
-            try:
-                image_token_id = tok.convert_tokens_to_ids("<image>")
-            except KeyError:
-                image_token_id = None
-        self.image_token_id = image_token_id
-        eos = getattr(hf_config, "eos_token_id", None) or self.processor.tokenizer.eos_token_id
-        self.eos_token_id = eos if isinstance(eos, int) else int(eos[0])
-
-    def _build_merged_embeddings(
+    def __init__(
         self,
-        input_ids: torch.Tensor,
-        pixel_values: torch.Tensor | None,
-    ) -> torch.Tensor | None:
+        model: Any,
+        processor: Any,
+        image_token_id: int | None,
+        eos_token_id: int,
+        device: str,
+        dtype: Any,
+    ) -> None:
+        self.model = model
+        self.processor = processor
+        self.image_token_id = image_token_id
+        self.eos_token_id = eos_token_id
+        self.device = device
+        self.dtype = dtype
+
+    def seed(self, value: int) -> None:
+        """Seed torch's global RNG, which the fork sampler draws from."""
+        import torch
+
+        torch.manual_seed(int(value))
+
+    def encode(self, prompt_text: str, images: list[Any]) -> tuple[Any, Any]:
+        """The processor's ``input_ids`` and ``pixel_values`` for one request."""
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    *[{"type": "image"} for _ in images],
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
+        chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(self.device)
+        pixel_values = inputs.get("pixel_values")
+        if pixel_values is not None:
+            pixel_values = pixel_values.to(self.device, dtype=self.dtype)
+        return input_ids, pixel_values
+
+    def merged_embeddings(self, input_ids: Any, pixel_values: Any) -> Any:
         """Return [T, hidden] merged embeddings, or None for text-only.
 
         ``pixel_values`` arrives as ``[num_images, num_tiles, 3, H, W]``:
@@ -153,6 +97,8 @@ class SmolVLMStage(StageEngine):
         all ones for the 512x512 tiles this processor produces and the
         tower takes no mask, so the vision pass reads pixels only.
         """
+        import torch
+
         if pixel_values is None:
             return None
         if self.image_token_id is None:
@@ -181,6 +127,148 @@ class SmolVLMStage(StageEngine):
             merged[image_mask] = image_embeds
         return merged.flatten(0, 1)  # [T, t_dim]
 
+
+class SmolVLMStage(StageEngine):
+    """Vision prefill + fork AR decode loop for SmolVLM-500M-Instruct."""
+
+    def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
+        super().__init__()
+        # transformers stays a function-level import: the stage must be
+        # importable without it, and tests/test_smolvlm.py pins that.
+        import transformers
+
+        from nanovllm_omni.backend import get_backend
+        from nanovllm_omni.engine.stage_runner import (
+            _ensure_dist,
+            stage_kwargs_from_args,
+        )
+
+        extra = dict(getattr(args, "extra", None) or {})
+        allow_hf = bool(extra.get("allow_hf_download", False))
+        self.device = getattr(args, "device", None) or "cuda"
+        dtype_str = getattr(args, "dtype", None) or "bfloat16"
+        if dtype_str not in _DTYPE_ALLOWED:
+            raise ValueError(
+                f"smolvlm: dtype {dtype_str!r} not in supported {list(_DTYPE_ALLOWED)}"
+            )
+        self.dtype = dtype_str
+        model_id = getattr(args, "model", None) or _MODEL_ID
+        backend_name = str(extra.get("backend", "torch"))
+        backend_kwargs: dict[str, Any] = {"dtype": dtype_str}
+        if backend_name != "mlx-vlm":
+            # ``args.device`` is a torch knob and reads "cpu" on a host
+            # without CUDA, while MLX runs on the unified-memory GPU.
+            backend_kwargs["device"] = self.device
+
+        # 1) Build the fork StageRunner. Its ModelRunner constructs and
+        # loads the whole ``SmolVLMForConditionalGeneration`` (vision +
+        # connector + text), because that is the model_class; the stage
+        # reuses that copy for vision prefill instead of holding a
+        # second one. A duplicate costs ~1 GiB, and the fork sizes the
+        # paged KV cache from the memory PyTorch has left, so the copy
+        # used to shrink the cache to a single 256-token block -- too
+        # little for one image request (1088 image tokens).
+        #
+        # The decode loop runs under a CUDA graph: eager spends most of
+        # the wall time in kernel launches, not in the GPU. The fork
+        # falls back to eager when the capture fails on the device, so
+        # the graph is on by default and ``extra["use_cuda_graph"] =
+        # False`` turns it off.
+        # Fork Config.__post_init__ asserts os.path.isdir(self.model); resolve
+        # Hub ids (HuggingFaceTB/SmolVLM-500M-Instruct) to local snapshots.
+        from huggingface_hub import snapshot_download
+
+        try:
+            model_dir = snapshot_download(model_id, local_files_only=not allow_hf)
+        except Exception:  # pragma: no cover - rely on load_model to fail loud
+            model_dir = model_id
+        backend = get_backend(backend_name, **backend_kwargs)
+        if backend_name != "mlx-vlm":
+            # Fork layers (VocabParallelEmbedding, QKVParallelLinear, etc.)
+            # read ``dist.get_rank()`` at construction time. The fork's
+            # ModelRunner calls _ensure_dist() internally; SmolVLMModel is
+            # built BEFORE ModelRunner so we must do the same init up front
+            # (no-op after ModelRunner init: the monkey-patched init skips
+            # duplicate calls). The MLX track has no fork ModelRunner, and
+            # NCCL does not exist on a Mac.
+            _ensure_dist()
+        config = backend.make_config(
+            model_path=model_dir,
+            **stage_kwargs_from_args(args),
+        )
+        config.enforce_eager = not extra.get("use_cuda_graph", True)
+        # A stage call schedules exactly one Sequence, so only the bs=1
+        # decode graph is ever replayed and the bs=2/4/8 graphs cost
+        # memory the KV cache needs more.
+        config.max_capture_bs = 1
+        # An image request is 1088 vision tokens before the prompt, so
+        # the fork default (512) sends every image decode step to the
+        # eager path. 2048 covers one image plus 512 generated tokens.
+        config.graph_max_seq_len = 2048
+        self.stage_runner = backend.make_stage_runner(
+            model_class=model_class or SmolVLMForConditionalGeneration,
+            config=config,
+        )
+        self.model = self.stage_runner.model
+        self.model.eval()
+
+        # 2) Processor + image-token metadata. The MLX track takes both
+        # from mlx-vlm; the torch track keeps transformers'.
+        if backend.name == "mlx-vlm":
+            from nanovllm_omni.backend.mlx_vlm import MlxVlmSupport
+
+            self.vlm = MlxVlmSupport(self.stage_runner)
+        else:
+            self.vlm = self._make_torch_support(
+                model_id=model_id, dtype_str=dtype_str, allow_hf=allow_hf, transformers=transformers
+            )
+        self.processor = self.vlm.processor
+        self.image_token_id = self.vlm.image_token_id
+        self.eos_token_id = self.vlm.eos_token_id
+
+    def _make_torch_support(
+        self, model_id: str, dtype_str: str, allow_hf: bool, transformers: Any
+    ) -> Any:
+        """The transformers processor and the torch image merge."""
+        import torch
+
+        config_cls = transformers.AutoConfig
+        processor_cls = transformers.AutoProcessor
+
+        kwargs: dict[str, Any] = {"dtype": getattr(torch, dtype_str)}
+        if not allow_hf:
+            kwargs["local_files_only"] = True
+
+        # The image token and eos live on the top-level Idefics3 shell
+        # config; the fork mounts the text fields over it but keeps
+        # ``vision_config`` / ``text_config`` intact.
+        hf_config = config_cls.from_pretrained(model_id, **kwargs)
+        processor = processor_cls.from_pretrained(model_id, **kwargs)
+        image_token_id = getattr(hf_config, "image_token_id", None)
+        if image_token_id is None:
+            tok = processor.tokenizer
+            try:
+                image_token_id = tok.convert_tokens_to_ids("<image>")
+            except KeyError:
+                image_token_id = None
+        eos = getattr(hf_config, "eos_token_id", None) or processor.tokenizer.eos_token_id
+        return TorchVlmSupport(
+            model=self.model,
+            processor=processor,
+            image_token_id=image_token_id,
+            eos_token_id=eos if isinstance(eos, int) else int(eos[0]),
+            device=self.device,
+            dtype=getattr(torch, dtype_str),
+        )
+
+    def _build_merged_embeddings(
+        self,
+        input_ids: Any,
+        pixel_values: Any,
+    ) -> Any:
+        """Return [T, hidden] merged embeddings, or None for text-only."""
+        return self.vlm.merged_embeddings(input_ids, pixel_values)
+
     def __call__(self, payload: Any, sampling: Any) -> str:
         from nanovllm.engine.scheduler import Scheduler
         from nanovllm.engine.sequence import Sequence
@@ -208,9 +296,7 @@ class SmolVLMStage(StageEngine):
         # Seed the sampler so the same seed reproduces the same tokens.
         seed = getattr(sampling, "seed", None)
         if seed is not None:
-            import torch
-
-            torch.manual_seed(int(seed))
+            self.vlm.seed(int(seed))
         # Stop strings: stop as soon as one of them appears in the text
         # generated so far.
         stop_strings = list(getattr(sampling, "stop", None) or [])
@@ -226,21 +312,7 @@ class SmolVLMStage(StageEngine):
         with profile_range(":tokenize"):
             # Build chat-template input; processor expands <image> placeholders
             # into the right number of patch tokens per image.
-            messages: list[dict[str, Any]] = [
-                {
-                    "role": "user",
-                    "content": [
-                        *[{"type": "image"} for _ in images],
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }
-            ]
-            chat = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-            inputs = self.processor(text=chat, images=images or None, return_tensors="pt")
-            input_ids = inputs["input_ids"].to(self.device)
-            pixel_values = inputs.get("pixel_values")
-            if pixel_values is not None:
-                pixel_values = pixel_values.to(self.device, dtype=self.dtype)
+            input_ids, pixel_values = self.vlm.encode(prompt_text, images)
 
         with profile_range(":vlm-prefill"):
             # Vision + connector + merge (or None for text-only).
@@ -305,4 +377,4 @@ class SmolVLMStage(StageEngine):
         return self.processor.batch_decode([generated], skip_special_tokens=True)[0]
 
 
-__all__ = ["SmolVLMStage", "_vlm_stage"]
+__all__ = ["SmolVLMStage", "TorchVlmSupport", "_vlm_stage"]

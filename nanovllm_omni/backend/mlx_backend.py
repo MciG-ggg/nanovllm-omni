@@ -38,6 +38,35 @@ from typing import Any
 from .base import BackendCapabilities
 
 
+class _BridgeRecorder:
+    """A plain holder for the bridge rows; not an array framework module."""
+
+    def __init__(self) -> None:
+        self.rows: Any = None
+
+
+def _bridge_layer_index(model: Any) -> int:
+    """Which transformer layer the talker's bridge comes from.
+
+    The vendor default is ``num_hidden_layers // 2 - 1`` (3 for this
+    checkpoint); the fork reads ``bridge_layer`` from its config with the
+    same fallback. A converted model that carries the key wins.
+    """
+    args = getattr(model, "args", None)
+    config = getattr(model, "config", None)
+    for holder in (args, config):
+        if holder is None:
+            continue
+        value = getattr(holder, "bridge_layer", None)
+        if value is None and isinstance(holder, dict):
+            value = holder.get("bridge_layer")
+        if value is not None:
+            return int(value)
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    count = len(layers) if layers is not None else 0
+    return count // 2 - 1
+
+
 @dataclass
 class MlxConfig:
     """Per-stage config for the MLX backend.
@@ -80,6 +109,33 @@ class MlxStageRunner:
         self._cache: Any = None
         self._rng: Any = None
         self._left_padding: list[int] = [0]
+        self._bridge: Any = None
+        self._bridge_layer = _bridge_layer_index(self._model)
+        self._install_bridge_recorder()
+
+    def _install_bridge_recorder(self) -> None:
+        """Wrap the bridge layer so its output is recorded."""
+        body = getattr(self._model, "model", None)
+        layers = getattr(body, "layers", None)
+        if not layers or not 0 <= self._bridge_layer < len(layers):
+            return
+        from mlx import nn
+
+        recorder = _BridgeRecorder()
+        inner = layers[self._bridge_layer]
+
+        class _Recording(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.inner = inner
+
+            def __call__(self, x: Any, *args: Any, **kwargs: Any) -> Any:
+                out = inner(x, *args, **kwargs)
+                recorder.rows = out
+                return out
+
+        layers[self._bridge_layer] = _Recording()
+        self._bridge = recorder
 
     # -- batch preparation -------------------------------------------------
 
@@ -153,8 +209,13 @@ class MlxStageRunner:
         return self._mx.random.categorical(scaled, axis=-1, key=key)
 
     def bridge_hidden(self) -> Any:
-        """No bridge rows in the thinker-only milestone (ADR 0023)."""
-        return None
+        """The thinker's bridge rows, ``[B, T, hidden]``; ``None`` before the first forward.
+
+        The vendor takes the hidden states after layer ``bridge_layer`` and
+        before the final norm -- that is what the talker consumes, so the
+        recorder wraps that one layer instead of the model's output.
+        """
+        return self._bridge.rows if self._bridge is not None else None
 
     @property
     def model(self) -> Any:
@@ -345,9 +406,19 @@ def generate_mlx_batch(
 class MlxBackend:
     """MLX on Apple Silicon."""
 
-    device: str = "gpu"
-    dtype: str = "float16"
+    device: str | None = None
+    """The MLX device; ``None`` means the GPU (``mx.gpu``)."""
+
+    dtype: str | None = None
+    """The MLX dtype; ``None`` means float16, the dtype the weights ship in."""
+
     name: str = "mlx"
+
+    def __post_init__(self) -> None:
+        if self.device is None:
+            object.__setattr__(self, "device", "gpu")
+        if self.dtype is None:
+            object.__setattr__(self, "dtype", "float16")
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -366,6 +437,17 @@ class MlxBackend:
 
     def make_stage_runner(self, model_class: type, config: Any) -> MlxStageRunner:
         return MlxStageRunner(model_class=model_class, config=config)
+
+    def make_talker_runner(self, model_path: str, **kwargs: Any) -> Any:
+        """Build the runner that decodes MiniMind audio codes on MLX."""
+        from .mlx_talker import MlxTalkerRunner
+
+        return MlxTalkerRunner(
+            model_path,
+            dtype=kwargs.pop("dtype", None) or self.dtype,
+            device=kwargs.pop("device", None) or self.device,
+            **kwargs,
+        )
 
 
 __all__ = [

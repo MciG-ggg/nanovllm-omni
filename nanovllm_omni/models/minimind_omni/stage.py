@@ -10,7 +10,8 @@ only the MiniMind-O specific bits:
 
   - weight slicing for the thinker-only safetensors
     (``_THINKER_KEEP_PREFIX`` / ``_thinker_only_dir`` /
-    ``_resolve_model_path``)
+    ``_resolve_model_path``) and the converted ``mlx_lm`` directory
+    (``_resolve_mlx_model_path``)
   - HuggingFace tokenizer loader for the MiniMind-3o snapshot
   - ``ThinkerStage`` and ``TalkerStage`` high-level stage classes
     invoked by ``PipelineRunner``'s ``_stage_factory``.
@@ -43,6 +44,7 @@ from nanovllm_omni.engine.stage_runner import _ensure_dist, stage_kwargs_from_ar
 from nanovllm_omni.models.minimind_omni.hf_config import register_minimind_config
 from nanovllm_omni.models.minimind_omni.stage_runner import (
     decode_minimind,
+    decode_minimind_mlx,
     recapture_bridge_minimind,
 )
 
@@ -79,6 +81,29 @@ def _resolve_model_path(args: Any) -> str:
             "(fork Config validates the model path is a real directory)."
         )
     return _thinker_only_dir(_resolve_snapshot(model))
+
+
+def _resolve_mlx_model_path(args: Any, subdir: str = "mlx-thinker") -> str:
+    """A converted MLX directory next to the checkpoint.
+
+    ``scripts/convert_minimind_thinker_mlx.py`` writes ``<checkpoint>/mlx-thinker``
+    and ``scripts/convert_minimind_talker_mlx.py`` writes
+    ``<checkpoint>/mlx-talker``; the MLX backend loads those directories
+    instead of the torch checkpoint.
+    """
+    import os
+
+    from .bundle import _resolve_snapshot
+
+    model = getattr(args, "model", None)
+    if not model:
+        raise ValueError("OmniEngineArgs.model is required to construct a StageRunner")
+    path = os.path.join(_resolve_snapshot(model), subdir)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"no {subdir} at {path}; run scripts/convert_minimind_{subdir.split('-')[-1]}_mlx.py"
+        )
+    return path
 
 
 def _thinker_only_dir(src: str) -> str:
@@ -194,26 +219,27 @@ class ThinkerStage(StageEngine):
     The factory ``_thinker_stage`` (in ``thinker.py``) constructs this
     class; ``PipelineRunner`` then drives decoding by calling the
     instance with ``(payload, sampling)``.
+
+    ``extra["backend"]`` picks the track: ``"torch"`` (default) runs the
+    fork CUDA path, ``"mlx"`` runs the Apple Silicon path.
     """
 
     def __init__(self, deploy: Any, args: Any, model_class: Any = None) -> None:
         super().__init__()
-        from .thinker import MiniMindThinker
-
         self.deploy = deploy
         self.args = args
-        self.model_class = model_class or MiniMindThinker
-        # The decode graph is the default: on the RTX 3050 it cuts the
-        # thinker stage from ~2250 ms to ~595 ms per request (ADR-0007),
-        # and eager and graph produce byte-identical audio for the same
-        # seed (tests/test_minimind_graph_parity.py). The fork falls back
-        # to eager when capture fails, so a device that cannot capture
-        # still runs.
-        #
-        # ``extra["use_thinker_cuda_graph"] = False`` opts back out; that
-        # is the bench harness's comparison knob (ADR-0005 keeps the
-        # choice at the stage, out of DeployConfig).
         extra = dict(getattr(args, "extra", None) or {})
+        self._backend_name = str(extra.get("backend", "torch"))
+        if self._backend_name == "mlx":
+            # The MLX runner loads an ``mlx_lm`` directory and has no
+            # torch model class.
+            self.model_class = model_class
+            model_path = _resolve_mlx_model_path(args)
+        else:
+            from .thinker import MiniMindThinker
+
+            self.model_class = model_class or MiniMindThinker
+            model_path = _resolve_model_path(args)
         # The local config class replaces the hub's ``auto_map`` file, so
         # no remote code runs and the fork Config can ask for none.
         register_minimind_config()
@@ -243,22 +269,35 @@ class ThinkerStage(StageEngine):
         # Official eval_omni.py runs the released weights in fp16 (`.half()`).
         if stage_kwargs.get("dtype") is None:
             stage_kwargs["dtype"] = "float16"
-        backend = get_backend(
-            extra.get("backend", "torch"),
-            device=getattr(args, "device", None),
-            dtype=stage_kwargs["dtype"],
-        )
+        backend_kwargs = {"dtype": stage_kwargs["dtype"]}
+        if self._backend_name != "mlx":
+            # ``args.device`` is a torch knob and reads "cpu" on a host
+            # without CUDA, while MLX runs on the unified-memory GPU.
+            backend_kwargs["device"] = getattr(args, "device", None)
+        backend = get_backend(self._backend_name, **backend_kwargs)
         self.config = backend.make_config(
-            model_path=_resolve_model_path(args),
+            model_path=model_path,
             **stage_kwargs,
         )
-        self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
-        # Ensure NCCL process group exists before ModelRunner tries to init.
-        _ensure_dist()
+        if self._backend_name != "mlx":
+            # The decode graph is the default: on the RTX 3050 it cuts the
+            # thinker stage from ~2250 ms to ~595 ms per request (ADR-0007),
+            # and eager and graph produce byte-identical audio for the same
+            # seed (tests/test_minimind_graph_parity.py). The fork falls back
+            # to eager when capture fails, so a device that cannot capture
+            # still runs.
+            #
+            # ``extra["use_thinker_cuda_graph"] = False`` opts back out; that
+            # is the bench harness's comparison knob (ADR-0005 keeps the
+            # choice at the stage, out of DeployConfig).
+            self.config.enforce_eager = not extra.get("use_thinker_cuda_graph", True)
+            # Ensure NCCL process group exists before ModelRunner tries to init.
+            _ensure_dist()
         self.stage_runner = backend.make_stage_runner(
             model_class=self.model_class,
             config=self.config,
         )
+        self._tokenizer_path = model_path
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Decode one prompt end to end (direct-call form of ``step``)."""
@@ -287,31 +326,47 @@ class ThinkerStage(StageEngine):
 
         from .stage_processors import ThinkerStageOutput
 
-        tokenizer = _load_tokenizer(_resolve_model_path(self.args))
+        tokenizer = _load_tokenizer(self._tokenizer_path)
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is None:
-            eos_id = self.config.eos
+            eos_id = getattr(self.config, "eos", None)
 
         prepared = [
             self._prepare_decode(payload, sampling, tokenizer)
             for payload, sampling in zip(payloads, samplings, strict=True)
         ]
-        decoded = decode_minimind(
-            self.stage_runner,
-            prepared,
-            eos_id=eos_id,
-            enter_token=_THINKER_ENTER_TOKEN,
-            pad_token=_THINKER_PAD_TOKEN,
-            talker_tail=_TALKER_TAIL,
-        )
+        if self._backend_name == "mlx":
+            decoded = decode_minimind_mlx(
+                self.stage_runner,
+                prepared,
+                eos_id=eos_id,
+                enter_token=_THINKER_ENTER_TOKEN,
+                pad_token=_THINKER_PAD_TOKEN,
+                talker_tail=_TALKER_TAIL,
+            )
+            # The MLX driver re-runs the whole sequence, so its bridge rows
+            # are already the full-sequence ones.
+            bridges = [result.bridge_hidden for result in decoded]
+        else:
+            decoded = decode_minimind(
+                self.stage_runner,
+                prepared,
+                eos_id=eos_id,
+                enter_token=_THINKER_ENTER_TOKEN,
+                pad_token=_THINKER_PAD_TOKEN,
+                talker_tail=_TALKER_TAIL,
+            )
+            bridges = [
+                recapture_bridge_minimind(
+                    self.stage_runner,
+                    request.token_ids + list(result.generated),
+                    result.bridge_hidden,
+                )
+                for request, result in zip(prepared, decoded, strict=True)
+            ]
 
         outputs = []
-        for request, result in zip(prepared, decoded, strict=True):
-            bridge_hidden = recapture_bridge_minimind(
-                self.stage_runner,
-                request.token_ids + list(result.generated),
-                result.bridge_hidden,
-            )
+        for request, result, bridge_hidden in zip(prepared, decoded, bridges, strict=True):
             eos_index = next(
                 (i for i, token in enumerate(result.generated) if token == eos_id), None
             )
@@ -416,13 +471,18 @@ class TalkerStage(StageEngine):
         from .bundle import _resolve_snapshot
 
         extra = getattr(self.args, "extra", None) or {}
-        backend = get_backend(
-            extra.get("backend", "torch"),
-            device=getattr(self.args, "device", None),
-            dtype=getattr(self.args, "dtype", None),
-        )
+        backend_name = str(extra.get("backend", "torch"))
+        backend_kwargs: dict[str, Any] = {"dtype": getattr(self.args, "dtype", None)}
+        if backend_name == "mlx":
+            # The MLX runner loads the converted directory and runs on the
+            # unified-memory GPU, so the torch device does not apply.
+            model_path = _resolve_mlx_model_path(self.args, "mlx-talker")
+        else:
+            backend_kwargs["device"] = getattr(self.args, "device", None)
+            model_path = _resolve_snapshot(getattr(self.args, "model", None))
+        backend = get_backend(backend_name, **backend_kwargs)
         self._runner = backend.make_talker_runner(
-            _resolve_snapshot(getattr(self.args, "model", None)),
+            model_path,
             impl=self._impl,
             kv=self._kv,
         )

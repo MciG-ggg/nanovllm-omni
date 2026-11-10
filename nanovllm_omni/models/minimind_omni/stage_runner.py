@@ -22,6 +22,11 @@ We compose on top of ``StageRunner`` rather than subclassing, so the
 engine has one cohesive AR adapter and model families stay side-effect
 free at import time. The recipe is two top-level functions —
 ``decode_minimind`` and ``recapture_bridge_minimind``.
+
+The MLX track has its own driver, ``decode_minimind_mlx``: the vendor
+dance over one dense batch, with the same sampling recipe (the one
+``backend.mlx_backend.generate_mlx`` uses) so the two tracks draw from
+the same distribution.
 """
 
 from __future__ import annotations
@@ -65,6 +70,15 @@ class _SeqState:
     text_finished: bool = False
     emitted_filler: bool = False
     content_len: int | None = None
+    finished: bool = False
+
+
+@dataclass(frozen=True)
+class _MlxSampling:
+    """The sampling fields the backend's MLX sampler reads."""
+
+    top_p: float
+    extra: dict[str, Any]
 
 
 def _apply_repetition_penalty(logits: Any, token_ids: list[int], penalty: float) -> None:
@@ -302,4 +316,169 @@ def recapture_bridge_minimind(
     return bridge_hidden
 
 
-__all__ = ["ThinkerDecode", "ThinkerDecoded", "decode_minimind", "recapture_bridge_minimind"]
+def _mx_to_torch(array: Any) -> Any:
+    """An MLX array as a float32 torch tensor."""
+    import mlx.core as mx
+    import numpy as np
+    import torch
+
+    return torch.from_numpy(np.asarray(array.astype(mx.float32)))
+
+
+def _full_sequence_bridge_mlx(stage_runner: Any, token_ids: list[int]) -> Any:
+    """The bridge rows of one full sequence, ``[T, hidden]`` as a torch tensor.
+
+    The MLX recorder keeps the last forward's rows only, so the whole
+    bridge comes from one full-sequence forward with a fresh cache --
+    the same reason the CUDA path re-runs the sequence.
+    """
+    from nanovllm.engine.sequence import Sequence
+    from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
+
+    if not token_ids:
+        return None
+    sequence = Sequence(
+        token_ids,
+        ForkSamplingParams(temperature=1.0, max_tokens=1, ignore_eos=True),
+    )
+    # ``prepare_prefill`` also resets the runner's left padding, so the
+    # forward below builds the unpadded single-sequence cache.
+    input_ids, positions = stage_runner.prepare_prefill([sequence])
+    stage_runner.set_context(is_prefill=True)
+    stage_runner.forward(input_ids, positions, True)
+    rows = stage_runner.bridge_hidden()
+    if rows is None:
+        return None
+    return _mx_to_torch(rows[0])
+
+
+def decode_minimind_mlx(
+    stage_runner: Any,
+    requests: list[ThinkerDecode],
+    *,
+    eos_id: int | None = None,
+    enter_token: int = 0,
+    pad_token: int = 0,
+    talker_tail: int = 8,
+) -> list[ThinkerDecoded]:
+    """Run the vendor decode dance for ``requests`` on the MLX runner.
+
+    One dense batch: the MLX backend left-pads to the longest member and
+    masks the pad columns, so a short request pays for the longest one.
+    The sampling recipe is the CUDA thinker's -- temperature, full-history
+    repetition penalty, top-p, one RNG key per request -- the same one
+    ``backend.mlx_backend.generate_mlx`` uses.
+
+    The bridge rows come from a full-sequence re-run per request: the MLX
+    recorder keeps the last forward's rows only, and the talker
+    cross-attends to the whole sequence.
+    """
+    import mlx.core as mx
+    from nanovllm.engine.sequence import Sequence
+    from nanovllm.sampling_params import SamplingParams as ForkSamplingParams
+
+    from nanovllm_omni.backend.mlx_backend import _make_sampler, _seed_key
+
+    if not requests:
+        return []
+    if eos_id is None:
+        eos_id = min(int(token) for token in stage_runner.tokenizer.eos_token_ids)
+
+    sequences = []
+    states: list[_SeqState] = []
+    for request in requests:
+        sequence = Sequence(
+            request.token_ids,
+            ForkSamplingParams(
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                ignore_eos=True,
+            ),
+        )
+        sequences.append(sequence)
+        states.append(_SeqState(request=request))
+
+    samplings = [
+        _MlxSampling(
+            top_p=request.top_p,
+            extra={"repetition_penalty": request.repetition_penalty},
+        )
+        for request in requests
+    ]
+    sampler = _make_sampler(
+        mx,
+        sequences,
+        samplings,
+        [_seed_key(mx, request) for request in requests],
+    )
+
+    def _step(tokens: list[int], logits: Any, is_prefill: bool) -> None:
+        """Fold one step's tokens into the per-sequence state."""
+        for index, state in enumerate(states):
+            if state.finished:
+                # A finished row keeps feeding its last token so the dense
+                # batch stays rectangular; its logits are not read.
+                continue
+            sequence = sequences[index]
+            token = tokens[index]
+            if state.text_finished:
+                # Post-EOS filler: the talker tail needs a stable anchor.
+                effective = pad_token if state.emitted_filler else enter_token
+                state.emitted_filler = True
+            else:
+                effective = token
+                if token == eos_id:
+                    state.text_finished = True
+                    state.content_len = len(state.generated)
+            state.generated.append(effective)
+            sequence.append_token(effective)
+            if not is_prefill:
+                state.text_state = _mx_to_torch(logits[index])
+            request = state.request
+            if request.stop_hit is not None and request.stop_hit(state.generated):
+                state.finished = True
+            elif (
+                state.text_finished
+                and state.content_len is not None
+                and len(state.generated) >= state.content_len + talker_tail
+            ):
+                # The talker only needs ``content_len + tail`` bridge rows.
+                state.finished = True
+            elif len(state.generated) >= request.max_tokens:
+                state.finished = True
+
+    stage_runner.set_context(is_prefill=True)
+    input_ids, positions = stage_runner.prepare_prefill(sequences)
+    temperatures = stage_runner.prepare_sample(sequences)
+    logits = stage_runner.forward(input_ids, positions, True)
+    tokens = stage_runner.sample(logits, temperatures, sampler=sampler).tolist()
+    _step(tokens, logits, True)
+
+    while not all(state.finished for state in states):
+        stage_runner.set_context(is_prefill=False)
+        input_ids, positions = stage_runner.prepare_decode(sequences)
+        temperatures = stage_runner.prepare_sample(sequences)
+        logits = stage_runner.forward(input_ids, positions, False)
+        tokens = stage_runner.sample(logits, temperatures, sampler=sampler).tolist()
+        _step(tokens, logits, False)
+
+    results = []
+    for request, state in zip(requests, states, strict=True):
+        full_ids = request.token_ids + list(state.generated)
+        results.append(
+            ThinkerDecoded(
+                generated=state.generated,
+                bridge_hidden=_full_sequence_bridge_mlx(stage_runner, full_ids),
+                text_state=state.text_state,
+            )
+        )
+    return results
+
+
+__all__ = [
+    "ThinkerDecode",
+    "ThinkerDecoded",
+    "decode_minimind",
+    "decode_minimind_mlx",
+    "recapture_bridge_minimind",
+]

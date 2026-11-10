@@ -346,32 +346,25 @@ class MlxTalker(nn.Module):
         return self.lm_head(self.norm(hidden[:, -1:, :]))
 
 
-def _assign(model: nn.Module, key: str, value: mx.array) -> None:
-    """Set the array a dotted checkpoint key names on the model."""
-    parts = key.split(".")
-    node: Any = model
-    for part in parts[:-1]:
-        if isinstance(node, list):
-            node = node[int(part)]
-        elif isinstance(node, nn.Sequential):
-            node = node.layers[int(part)]
-        else:
-            node = getattr(node, part)
-    name = parts[-1]
-    if isinstance(node, list):
-        node[int(name)] = value
-    else:
-        setattr(node, name, value)
-
-
 def load_mlx_talker(model_dir: str, *, dtype: str = "float16", device: str = "gpu") -> MlxTalker:
     """Load the talker weights from a converted MiniMind-O talker directory."""
     mx.set_default_device(getattr(mx, device))
     target_dtype = getattr(mx, dtype)
     model = MlxTalker(MlxTalkerConfig.from_checkpoint(model_dir), dtype=target_dtype)
     weights = mx.load(os.path.join(model_dir, "model.safetensors"))
+    sequential_prefixes = ["codec_proj", "embed_proj"]
+    for index in range(NUM_CODEBOOKS):
+        sequential_prefixes.extend((f"embed_tokens.adapters.{index}", f"lm_head.adapters.{index}"))
+    normalized_weights = {}
     for key, value in weights.items():
-        _assign(model, key, value.astype(target_dtype))
+        for prefix in sequential_prefixes:
+            if key.startswith(f"{prefix}."):
+                key = key.replace(f"{prefix}.", f"{prefix}.layers.", 1)
+                break
+        normalized_weights[key] = value.astype(target_dtype)
+    normalized_weights.setdefault("freqs_cos", model.freqs_cos)
+    normalized_weights.setdefault("freqs_sin", model.freqs_sin)
+    model.load_weights(list(normalized_weights.items()), strict=True)
     mx.eval(model.parameters())
     return model
 

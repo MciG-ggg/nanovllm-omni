@@ -20,6 +20,8 @@ _FACTORIES: dict[str, Callable[..., Backend]] = {}
 
 def register_backend(name: str, factory: Callable[..., Backend]) -> None:
     """Register a backend factory under ``name``."""
+    if name in _FACTORIES:
+        raise ValueError(f"backend key {name!r} is already registered")
     _FACTORIES[name] = factory
 
 

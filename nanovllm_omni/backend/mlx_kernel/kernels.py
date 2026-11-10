@@ -4,20 +4,18 @@
 signatures ``mx.fast.metal_kernel`` asks for in Python and the per-step
 launch. Nothing here is wired into ``MlxStageRunner`` yet.
 
-The pool budget below is measured, not chosen. On an M2 Air a scatter of
-k/v into a paged pool costs one full pool copy -- MLX has no in-place
-scatter for an array that is still referenced -- so the write side is
-priced by pool size alone:
+ADR 0023, “KV 池跨 step 存活的真实成本”, measured store cost with eight
+independent layer pools, rebinding each result and evaluating once per step:
 
-    pool           write cost / layer     8 layers / step
-    8 blocks  (1.5 MB)     0.06 ms            0.45 ms
-    64 blocks (12 MB)      0.46 ms            3.7 ms
-    256 blocks (48 MB)     1.48 ms           11.9 ms
+    pool (8 layers)        eager store / step     compiled store / step
+    4 blocks (12.6 MB)          0.358 ms                 0.241 ms
+    16 blocks (50.3 MB)         0.443 ms                 0.430 ms
+    64 blocks (201 MB)          1.156 ms                 1.043 ms
 
-A whole decode step is 2.3-4.0 ms, so a pool larger than 64 blocks spends
-more on the cache than on the forward pass. ``DEFAULT_MAX_BLOCKS`` is that
-64-block row: at block_size 256 it holds 16k tokens, which is the point
-where paging stops paying for itself on this model.
+The 64-block ceiling is retained because decode attention scans the context:
+ADR 0023 measured 7.48 ms for a single-pool attention at 64 blocks, scaling
+approximately linearly with context length. At block_size 256 the ceiling
+holds 16k tokens.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ import mlx.core as mx
 SOURCE_PATH = Path(__file__).with_name("paged_attention.metal")
 
 DEFAULT_MAX_BLOCKS = 64
-"""Pool ceiling from the measured budget above, in blocks of ``block_size``."""
+"""Pool ceiling from ADR 0023's decode attention scan cost, in blocks."""
 
 BLOCK_SIZE = 256
 """Slots per block, matching the fork's ``Sequence.block_size``."""
@@ -85,6 +83,12 @@ class DecodeShape:
     head_dim: int
     block_size: int = BLOCK_SIZE
 
+    def __post_init__(self) -> None:
+        if self.head_dim % 32:
+            raise ValueError("head_dim must be a multiple of 32")
+        if self.num_kv_heads <= 0 or self.num_heads % self.num_kv_heads:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
+
     def template(self, dtype: object) -> list:
         """Template arguments: model constants as ints, plus the element dtype."""
         return [
@@ -105,6 +109,10 @@ def paged_decode_attention(
     shape: DecodeShape,
 ) -> mx.array:
     """Attend one query per sequence over the keys ``block_table`` names."""
+    capacity = block_table.shape[1] * shape.block_size
+    if any(context_len > capacity for context_len in context_lens.tolist()):
+        raise ValueError(f"context_lens exceeds block table capacity of {capacity} tokens")
+
     batch, num_heads, head_dim = q.shape
     scale = mx.array([head_dim**-0.5], dtype=mx.float32)
     meta = mx.array([block_table.shape[1]], dtype=mx.int32)
@@ -128,6 +136,12 @@ def store_kv(
 ) -> tuple[mx.array, mx.array]:
     """Return the pool with ``slot_mapping``'s rows replaced by ``k``/``v``."""
     pool_rows = k_cache.shape[0]
+    slots = slot_mapping.tolist()
+    if any(slot >= pool_rows for slot in slots):
+        raise ValueError(f"slot_mapping contains a slot >= pool_rows ({pool_rows})")
+    if any(slot < -1 for slot in slots):
+        raise ValueError("slot_mapping values must be -1 or non-negative")
+
     meta = mx.array([pool_rows, slot_mapping.shape[0]], dtype=mx.int32)
     k_out, v_out = store_kv_kernel(
         inputs=[k, v, k_cache, v_cache, slot_mapping, meta],

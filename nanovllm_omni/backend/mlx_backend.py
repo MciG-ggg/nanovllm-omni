@@ -182,6 +182,12 @@ class MlxStageRunner:
         if inputs_embeds is not None:
             raise NotImplementedError("the MLX backend has no inputs_embeds path")
         if is_prefill:
+            num_rows = input_ids.shape[0]
+            if num_rows != len(self._left_padding):
+                raise ValueError(
+                    f"input_ids has {num_rows} rows, but left_padding has "
+                    f"length {len(self._left_padding)}"
+                )
             from mlx_lm.models.cache import BatchKVCache
 
             new_cache = [BatchKVCache(self._left_padding) for _ in range(len(self._model.layers))]
@@ -470,7 +476,13 @@ class MlxBackend:
         )
 
     def make_config(self, model_path: str, **kwargs: Any) -> MlxConfig:
-        return MlxConfig(
+        # These shared stage kwargs belong to CUDA; MLX uses one device,
+        # loads a converted model, and does not capture CUDA graphs.
+        kwargs.pop("gpu_memory_utilization", None)
+        kwargs.pop("tensor_parallel_size", None)
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("max_capture_bs", None)
+        config = MlxConfig(
             model_path=model_path,
             dtype=kwargs.pop("dtype", None) or self.dtype,
             device=kwargs.pop("device", None) or self.device,
@@ -480,6 +492,9 @@ class MlxBackend:
             max_num_batched_tokens=kwargs.pop("max_num_batched_tokens", None) or 16384,
             eos=kwargs.pop("eos", None),
         )
+        if kwargs:
+            raise ValueError(f"unsupported MLX config kwargs: {', '.join(sorted(kwargs))}")
+        return config
 
     def make_stage_runner(self, model_class: type, config: Any) -> MlxStageRunner:
         return MlxStageRunner(model_class=model_class, config=config)

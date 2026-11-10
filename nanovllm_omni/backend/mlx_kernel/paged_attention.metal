@@ -137,14 +137,10 @@ if (context_len > 0) {
 //   meta              [2]           int32, [pool_rows, num_tokens]
 //   k_out, v_out      [S, H_kv, D]  the pool with those rows replaced
 //
-// The whole pool is rewritten because a ``metal_kernel`` cannot write in
-// place: MLX always allocates the output. Every untouched row is copied
-// through, which is why the write costs the pool size and why the pool has a
-// hard budget (docs/dev/mlx-varlen-kernel-interface.md).
-//
-// The pool is an input *and* an output so ``mx.compile`` can put this and the
-// attention that reads it in one graph; that is the only form MLX donates a
-// buffer for.
+// The whole pool is rewritten because ``mx.fast.metal_kernel`` cannot write
+// in place. The pool is both an input and an output so the caller can rebind
+// the returned array. ADR 0023 measured that ``mx.compile`` does not donate a
+// still-referenced pool, so compilation does not remove this copy.
 
 // BODY_BEGIN store_kv
 int pool_rows = meta[0];

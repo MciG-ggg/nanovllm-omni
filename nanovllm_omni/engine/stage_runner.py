@@ -60,14 +60,12 @@ def get_stage_config(model_path: str, **kwargs: Any) -> Any:
     # Without this the decode model runs in fp32 while the stage's
     # own copy of the weights runs in the requested dtype.
     dtype = kwargs.pop("dtype", None)
+    # The fork Config has no device field; ModelRunner selects CUDA during
+    # initialization instead of reading a device value from this config.
+    kwargs.pop("device", None)
     config = Config(model_path, **kwargs)
     if dtype is not None:
         config.hf_config.dtype = getattr(torch, dtype)
-    # Force a CUDA device probe on the config so a later
-    # ``ModelRunner(config)`` sees a consistent device. The fork's
-    # default is "cuda"; an explicit ``device`` kwarg wins.
-    if "device" in kwargs:
-        config.device = kwargs["device"]
     return config
 
 

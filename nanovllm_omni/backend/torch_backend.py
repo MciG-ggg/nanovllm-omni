@@ -50,8 +50,8 @@ class TorchBackend:
         """Build the fork ``Config`` for one stage."""
         from ..engine.stage_runner import get_stage_config
 
-        # Fork Config has no ``device`` field (its kernels are CUDA-only),
-        # so a caller's device cannot travel into it.
+        # The fork Config has no ``device`` field; ModelRunner selects CUDA
+        # during initialization, so discard this backend option here.
         kwargs.pop("device", None)
         return get_stage_config(model_path, **kwargs)
 

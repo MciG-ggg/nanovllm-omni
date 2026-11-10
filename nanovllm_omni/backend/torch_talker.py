@@ -45,6 +45,9 @@ class TorchTalkerRunner:
         self._impl = impl
         self._kv = kv
         self._device = device
+        import torch
+
+        self._generator = torch.Generator(device=device)
         self._model = self._load(model_path, device, dtype)
 
     def _load(self, model_path: str, device: str, dtype: str) -> Any:
@@ -80,7 +83,7 @@ class TorchTalkerRunner:
             },
             strict=True,
         )
-        return talker.half().to("cuda")
+        return talker.to(device=device, dtype=getattr(torch, dtype))
 
     def _logits(self, bridge: Any, audio_codes: Any, spk_emb: Any, cache: Any) -> Any:
         """Return the talker's eight logit tensors for the given columns."""
@@ -118,8 +121,10 @@ class TorchTalkerRunner:
 
         model = self._model
         device = self._device
-        if request.seed is not None:
-            torch.manual_seed(int(request.seed))
+        if request.seed is None:
+            self._generator.seed()
+        else:
+            self._generator.manual_seed(int(request.seed))
 
         bridge = request.bridge.unsqueeze(0).to(device=device, dtype=next(model.parameters()).dtype)
         spk_emb = request.speaker_embedding
@@ -204,7 +209,9 @@ class TorchTalkerRunner:
                     for previous_code in audio_codes[i][-3:]:
                         logits_i[previous_code] /= request.repetition_penalty
                     top_value, top_index = logits_i.topk(50)
-                    sampled = torch.multinomial(torch.softmax(top_value, dim=-1), 1)
+                    sampled = torch.multinomial(
+                        torch.softmax(top_value, dim=-1), 1, generator=self._generator
+                    )
                     code = top_index[sampled].item()
                     audio_codes[i].append(code)
                     if audio_stop_pos[i] is None and code >= 2048:

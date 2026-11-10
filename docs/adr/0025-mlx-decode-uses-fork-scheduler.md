@@ -160,6 +160,33 @@ CUDA 轨早就有这个问题的解法（`recapture_bridge_minimind`）：decode
 - `MlxStageRunner` 多一个 `recapture_bridge` 方法：整条序列重跑一次 prefill，
   用独立的 cache，不影响正在跑的 decode。
 
+## 实测数字（2026-11-10）
+
+M2 Air / mlx 0.32.4 / 8 层 checkpoint，`decode_minimind_mlx` 走完整入口，
+16 token，9 runs / 3 warmup：
+
+| 形状 | 批行数 | prompt 长度 | wall p50 |
+|---|---|---|---:|
+| single | 1 | 28 | 26.83 ms |
+| ragged | 4 | 2+28+5+36 | 82.25 ms（3.1× single） |
+| uneven | 4 → 3 | 2+28+5+36 | 50.40 ms |
+
+`uneven` 的行回收逐次核对过：`filter_cache_rows` 被调用两次，
+(4 → 3) 删掉退出的那一行，(3 → 0) 在 decode 结束时清空。
+
+**这些是 MLX 轨的单机数字，不与 CUDA 轨相减**（ADR 0014）。
+
+完整记录在 `docs/perf/minimind-thinker-mlx-scheduler-2026-11-10.md`
+（`docs/perf/` 不进 git，按仓库约定）。
+
+### 还没做到的：真正的中途 join
+
+fork `Scheduler.schedule()` 一次就把 waiting 队列清空，所以一批请求是一起
+prefill 的。`BatchKVCache.extend`——把新来的请求追加到正在跑的 cache 上——
+**目前没有调用方**，只有单测覆盖。「请求在 decode 中途到达」这个场景，
+MLX 轨现在做不到。ADR 0014 想要的「加一个请求让 p99 怎么变」这类数字，
+要等这条路径接上。
+
 ## 边界
 
 - 本 ADR **不**做 varlen attention。补齐仍然存在，省不掉的成本还在。

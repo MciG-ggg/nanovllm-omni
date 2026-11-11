@@ -2,7 +2,7 @@
 
 还没做的事。每条带证据（`file:line` 或 ADR 章节），按「影响双轨可比性 > 教学价值 > 清理」排序。
 
-最后更新：2026-11-10（20:15）。
+最后更新：2026-11-11（08:05）。
 
 `[x]` 已完成，`[~]` 部分完成，`[ ]` 未做。
 
@@ -189,6 +189,14 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
   ADR 0006 自己标了「尚未解释」。
   证据：`docs/adr/0006-four-family-vram-2026-10-30.md:77`
 
+- [x] **DR-5 ADR 0022 的 P1 判据「逐位相同」与同一份 ADR 的技术结论冲突** —— 已修（`384b488`）
+  原 P1 要求两臂 `audio_codes` 逐位相同，但 ADR 0022 自己的修正段承认重写版只算最后
+  位置的 `lm_head`，GEMM 从 `[T,H]×[H,V]` 变成 `[1,H]×[H,V]`，cuBLAS 可能选到不同的
+  kernel 导致 bit 漂移——**一个正确实现可能过不了这个 P1**。改成 ADR 0021 已定的三档
+  （EXACT / TOP_K_MATCH / FAIL）：逐位相同仍是 EXACT 档，是首选结果，放宽的是通过条件
+  不是期望值。测试同步，并补了纯 CPU 的合成 logits 用例验证判据本身。
+  证据：`docs/adr/0022-talker-rewrite-parity-gate.md:20`、`docs/adr/0021-mlx-kernel-write-our-own.md:44`
+
 ## 六、环境阻塞（不是代码问题，但挡住了好几件事）
 
 - [ ] **EN-1 air-1 上还没有 nanovllm-omni 项目和 minimind-3o 权重**
@@ -207,5 +215,50 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
 
 - [ ] **EN-3 文档里引用了 `/home/mcig/...` 这种 Linux 路径**
   `tests/test_optim_bench.py` 等测试在 Mac 上因为这个失败。全量 pytest 的失败集合里
-  有这一类，是环境问题不是代码问题，但会让 CI 判红。
-  证据：`HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name'`
+  有这一类，是环境问题不是代码问题。
+  **不会让 CI 判红**（原文这里写错了）：这 8 个失败全部是 `mark.smoke`，而 CI 跑的是
+  `-m "not smoke"`，全被 deselect——CI 那 13 个 deselected 就是它们。但它们让**本地**
+  全量 pytest 永远红，也逼得「失败集合逐条一致」这个基线比对每次都要额外做一遍
+  worktree 对照（editable 安装是 meta-path finder，worktree 会静默 import 主目录的代码）。
+  证据：`HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name'`、
+  `.github/workflows/ci.yml:73`
+
+## 七、CI 与流程
+
+CI 是唯一的跨机器闸门。之前它对 MLX 轨完全瞎着。
+
+- [x] **CI-1 MLX 轨在 CI 里一行都跑不到** —— 已修（`6b9c3ff`，`e7c0815`）
+  三个 job 全是 `ubuntu-latest`，而所有 MLX 测试都是模块级 `importorskip("mlx")` → 在 CI 上
+  整个跳过。ADR 0014 要求的「两套 backend 都要过同一批测试」只靠手工成立。
+  新增 `macos-15` job 跑 11 个 MLX 相关测试文件。**为什么不用全量**：这个 job 不带
+  `-m "not smoke"`（ubuntu 那两个 job 都带），全量跑会撞上 8 个需要真权重 + GPU 的 smoke
+  测试，它们在 Mac 上必然失败。要么给这个 job 也加 `-m "not smoke"`，要么就只跑 MLX 这批。
+  实际跑 71 个测试：**41 passed / 30 skipped**（跳过的都是需要真权重的，runner 上没有
+  checkpoint）。`continue-on-error` 已摘掉，现在是必过项。
+  证据：`.github/workflows/ci.yml:141`、CI run 42818133982
+
+- [x] **CI-2 Docs build smoke 从 11 月 1 日起一直红** —— 已修（`3aef1af`）
+  `uv pip install mkdocs mkdocs-material` 找不到 venv → 退出码 2，错误信息自己写着
+  "run `uv venv` to create an environment, or pass `--system`"。加 `--system`；后面那步
+  `uv run` 改 `python`——它只要 `yaml`（mkdocs 的依赖就带上了），而 `uv run` 会去同步
+  整个项目环境含 torch，没必要。
+  **这条是先前就坏的，不是这个分支引入的**（main 上最后一次 run 41290574315 也是它 failure，
+  其它三个 job 全绿）。修完 main 自 11 月 1 日起第一次全绿。
+  证据：`.github/workflows/ci.yml:134`
+
+- [ ] **CI-3 MLX job 里 30 个测试仍然是 skip 的——runner 上没有权重**
+  进 CI 的是逻辑闸门（Metal kernel 的数值与性质、backend wiring、parity 判据、依赖分层）。
+  需要真权重的那些（talker / thinker / SmolVLM）仍然只在本地跑，CI 上是
+  `talker checkpoint not found in /Users/runner/models/minimind-3o`。
+  要么把转换后的 MLX 权重进 CI 缓存（但 minimind-3o 权重不是开源的，进不了公开仓库的 CI），
+  要么把「MLX 轨的数值验证只在有权重的地方跑」这条覆盖边界写进 ADR 0021/0023，别让人
+  以为 CI 覆盖了整条 MLX 轨。
+  证据：CI run 42818133982 的 skip 原因、`.github/workflows/ci.yml:163`
+
+- [ ] **CI-4 runner 标签会退役，写死在 workflow 里的东西要当会腐烂的东西看**
+  `macos-14` 在 2026 年已经不可用（`The configuration 'macos-14-arm64-us-default' is not
+  supported`），PR 第一轮 0 秒就挂在上面。现在 arm64 只有 `macos-latest` / `macos-15` /
+  `macos-26` / `xcode-27`。
+  → 建议在 AGENTS.md 或 CONTRIBUTING 里加一句「runner 标签会退役，改之前查一下当前可用的
+  标签」，或者用 `macos-latest` 少踩坑（代价是不 pinning）。
+  证据：docs.github.com 的 GitHub-hosted runners reference 那张表

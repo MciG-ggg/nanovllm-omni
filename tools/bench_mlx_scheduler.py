@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Bench: the fork Scheduler on the MLX backend (Mac track).
 
-Drives ``decode_minimind_mlx`` — the same entry point the thinker stage
+Drives ``ThinkerDecodeSession`` — the same entry point the thinker stage
 uses — so the numbers include what production pays.
 
-Three shapes:
+Four shapes:
 
 - ``single``  one request.
 - ``ragged``  four requests of different prompt lengths, one batch.
 - ``uneven``  four requests where one finishes long before the others.
   The finished one leaves the batch, so its cache row is recycled and the
   remaining rows keep decoding.
+- ``join``    one request runs for a few steps, then a second arrives.
+  It is prefilled on the next step and ``BatchKVCache.extend``-ed onto the
+  running cache; the step after that decodes both. The table reports the
+  new request's latency from arrival, next to its standalone wall — the
+  number the snapshot batch could not produce because it only picked up
+  new arrivals after the batch drained.
 
 The numbers are MLX-track only. ADR 0014 forbids subtracting them from
 CUDA numbers: the two tracks live on different machines.
-
-Note on the join path: the fork Scheduler empties its waiting queue in
-one ``schedule()`` call, so a batch of requests is prefilled together.
-``BatchKVCache.extend`` — the path that appends a newcomer to a running
-cache — has no caller yet, because nothing enters the scheduler after
-the decode loop starts. It is exercised by the unit test, not here.
 
 Usage (from the repo root):
     PYTHONPATH=$PWD:$PWD/third_party/nano-vllm \
@@ -174,6 +174,64 @@ def _bench_uneven(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _bench_join(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """A newcomer arrives after the first request has started decoding.
+
+    The old snapshot batch could not pick it up until the running batch
+    drained, so its baseline is "decode alone afterwards". The join path
+    reports its latency from arrival instead.
+    """
+    from nanovllm_omni.models.minimind_omni.stage_runner import (
+        ThinkerDecodeSession,
+        decode_minimind_mlx,
+    )
+
+    ids_a = _tokenize(runner, args.prompt_id)
+    ids_b = _tokenize(runner, args.join_prompt_id)
+
+    def run_once() -> tuple[float, float]:
+        """One join scenario: (newcomer latency, whole wall), in ms."""
+        start = time.perf_counter()
+        session = ThinkerDecodeSession(runner, backend="mlx")
+        session.add(_think(ids_a, args.max_tokens), "a")
+        for _ in range(args.join_after):
+            session.step()
+        arrived = time.perf_counter()
+        session.add(_think(ids_b, args.max_tokens), "b")
+        b_done = None
+        while session.has_work():
+            for request_id, _, _ in session.step():
+                if request_id == "b":
+                    b_done = time.perf_counter()
+        return (b_done - arrived) * 1000, (time.perf_counter() - start) * 1000
+
+    def run_alone() -> float:
+        start = time.perf_counter()
+        decode_minimind_mlx(runner, [_think(ids_b, args.max_tokens)])
+        return (time.perf_counter() - start) * 1000
+
+    run_once()
+    run_alone()
+
+    times = []
+    b_after_join = []
+    for _ in range(args.runs):
+        newcomer_ms, wall_ms = run_once()
+        b_after_join.append(newcomer_ms)
+        times.append(wall_ms)
+
+    b_alone = [run_alone() for _ in range(args.runs)]
+
+    return {
+        "shape": "join",
+        "rows": "1 -> 2",
+        "prompt_len": f"{len(ids_a)}+{len(ids_b)}",
+        "wall_ms": _stats(times),
+        "b_after_join_ms": _stats(b_after_join),
+        "b_alone_ms": _stats(b_alone),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -191,6 +249,12 @@ def main() -> None:
         help="comma-separated bench prompt ids; runs one ragged batch",
     )
     parser.add_argument("--max-tokens", type=int, default=16)
+    parser.add_argument(
+        "--join-after",
+        type=int,
+        default=3,
+        help="decode steps the first request runs before the join scenario adds the second",
+    )
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--runs", type=int, default=5)
@@ -218,13 +282,22 @@ def main() -> None:
 
     header = f"{'shape':<8} {'rows':<8} {'prompt len':<14} {'steps':<6} wall"
     print(header)
-    for bench in (_bench_single, _bench_ragged, _bench_uneven):
+    for bench in (_bench_single, _bench_ragged, _bench_uneven, _bench_join):
         result = bench(runner, args)
         steps = result.get("steps", "-")
         print(
             f"{result['shape']:<8} {result['rows']:<8} {result['prompt_len']:<14} "
             f"{steps:<6} {result['wall_ms']}"
         )
+        if "b_after_join_ms" in result:
+            print(
+                f"{'':<8} {'':<8} B after join {result['b_after_join_ms']}; "
+                f"B alone {result['b_alone_ms']}"
+            )
+
+    print()
+    print(f"peak memory   {mx.get_peak_memory() / 2**20:.1f} MiB")
+    print(f"active memory {mx.get_active_memory() / 2**20:.1f} MiB")
 
 
 if __name__ == "__main__":

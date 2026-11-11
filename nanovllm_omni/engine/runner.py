@@ -64,6 +64,7 @@ class _InFlight:
     prompt: Any
     sampling: SamplingParams | None
     stage_ms: dict[str, float] = field(default_factory=dict)
+    stage_started_at: float = 0.0
 
 
 class PipelineRunner:
@@ -183,6 +184,7 @@ class PipelineRunner:
                 sampling=self._stage_sampling(stage_defaults, request.sampling),
             )
         )
+        request.stage_started_at = time.perf_counter()
 
     def retire_all(self) -> None:
         """Drop every in-flight request.
@@ -247,15 +249,12 @@ class PipelineRunner:
                 continue
             self._next_stage = (index + 1) % count
             stage_cfg = self._merged[index][0]
-            t0 = time.perf_counter()
             try:
                 outputs = stage.step()
-                # Every request the stage served waited for the whole batch.
-                batch_ms = (time.perf_counter() - t0) * 1000.0
                 # ``_advance`` is inside the guard as well: its
                 # ``process_input`` hook and the next stage's construction are
                 # model code and can raise mid-route.
-                return self._advance(index, stage_cfg, outputs, batch_ms)
+                return self._advance(index, stage_cfg, outputs)
             except BaseException:
                 self.retire_all()
                 raise
@@ -266,15 +265,18 @@ class PipelineRunner:
         stage_index: int,
         stage_cfg: StageConfig,
         outputs: list[tuple[str, Any]],
-        batch_ms: float,
     ) -> list[FinishedRequest]:
         """Record a stage's outputs and push each request one stage forward."""
         finished = []
+        now = time.perf_counter()
         for request_id, payload in outputs:
             request = self._in_flight[request_id]
             if stage_cfg.is_terminal and stage_cfg.final_output_type is not None:
                 payload = adapt_terminal_output(payload, stage_cfg.final_output_type)
-            request.stage_ms[stage_cfg.name] = batch_ms
+            # Residency in this stage, not the wall of the one step that
+            # finished the request: an incremental stage may have advanced
+            # this request over many steps.
+            request.stage_ms[stage_cfg.name] = (now - request.stage_started_at) * 1000.0
             if stage_index + 1 == len(self._merged):
                 del self._in_flight[request_id]
                 finished.append(

@@ -141,6 +141,46 @@ def batching_simple(deploy: Any, args: Any) -> Any:
     return _BatchingStage()
 
 
+class _IncrementalStage(StageEngine):
+    """Stage stub that holds in-flight work across steps.
+
+    Every step re-selects its batch from whatever is in flight, so a
+    request added after the first step shows up in a later batch.
+    """
+
+    steps_per_request = 3
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active: dict[str, int] = {}
+        self._payloads: dict[str, Any] = {}
+        self.batch_sizes: list[int] = []
+
+    def has_pending(self) -> bool:
+        return bool(self._pending) or bool(self._active)
+
+    def step(self) -> list[tuple[str, Any]]:
+        while self._pending:
+            request = self._pending.popleft()
+            self._active[request.request_id] = self.steps_per_request
+            self._payloads[request.request_id] = request.payload
+        if not self._active:
+            return []
+        self.batch_sizes.append(len(self._active))
+        finished = []
+        for request_id in list(self._active):
+            self._active[request_id] -= 1
+            if self._active[request_id] == 0:
+                del self._active[request_id]
+                finished.append((request_id, f"done|{self._payloads.pop(request_id)}"))
+        return finished
+
+
+def incremental_simple(deploy: Any, args: Any) -> Any:
+    """One-stage stub that advances every in-flight request each step."""
+    return _IncrementalStage()
+
+
 class _OverlapStage(StageEngine):
     """Stage stub that records the deepest overlap it observed."""
 

@@ -272,7 +272,7 @@ def test_a_first_stage_that_fails_to_build_retires_the_request(monkeypatch):
     assert not runner.has_unfinished()
 
 
-def test_stage_ms_carries_the_batch_wall_to_every_request_in_it():
+def test_stage_ms_is_each_requests_residency_in_the_stage():
     runner = PipelineRunner(_two_stage(), DeployConfig(), _make_args())
     runner.add_request("a")
     runner.add_request("b")
@@ -285,3 +285,4 @@ def test_stage_ms_carries_the_batch_wall_to_every_request_in_it():
         {"thinker", "talker"},
         {"thinker", "talker"},
     ]
+    assert all(value > 0.0 for out in finished for value in out.stage_ms.values())

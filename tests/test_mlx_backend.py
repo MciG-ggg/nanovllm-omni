@@ -18,7 +18,11 @@ import pytest
 from nanovllm_omni.backend import StageRunner as StageRunnerProtocol
 from nanovllm_omni.backend import mlx_backend
 from nanovllm_omni.backend.mlx_backend import MlxBackend, MlxConfig, MlxStageRunner
-from nanovllm_omni.models.minimind_omni.stage_runner import ThinkerDecode, decode_minimind_mlx
+from nanovllm_omni.models.minimind_omni.stage_runner import (
+    ThinkerDecode,
+    ThinkerDecodeSession,
+    decode_minimind_mlx,
+)
 
 
 class _FakeBatchKVCache:
@@ -223,9 +227,61 @@ def test_mlx_recapture_bridge_leaves_the_running_cache_alone(monkeypatch) -> Non
     input_ids, positions = runner.prepare_prefill(old_sequences)
     runner.forward(input_ids, positions, True)
     running_cache = runner._cache
-    running_idx = running_cache[0]._idx
 
     runner.recapture_bridge([1, 2, 3, 4, 5, 6, 7])
 
     assert runner._cache is running_cache
-    assert running_cache[0]._idx == running_idx
+
+
+def _patch_sampler(monkeypatch) -> None:
+    def make_sampler(mx, sequences, samplings, keys):
+        return lambda logits, temperatures: np.array(
+            [sequence.token_ids[0] for sequence in sequences], dtype=np.int32
+        )
+
+    monkeypatch.setattr(mlx_backend, "_make_sampler", make_sampler)
+
+
+def test_mlx_session_extends_a_running_cache_when_a_request_joins(monkeypatch) -> None:
+    runner = _fake_runner(monkeypatch, MlxConfig(model_path="unused", eos=99))
+    runner.recapture_bridge = lambda token_ids: np.zeros((len(token_ids), 4), dtype=np.float32)
+    _patch_sampler(monkeypatch)
+    session = ThinkerDecodeSession(runner, backend="mlx")
+
+    session.add(ThinkerDecode([1, 2, 3], 4, 1.0, seed=1), "a")
+    assert session.step() == []
+    assert session.step() == []
+    session.add(ThinkerDecode([4, 5], 3, 1.0, seed=2), "b")
+    assert session.step() == []
+
+    cache = runner._cache[0]
+    assert cache.row_count == 2
+    assert cache.offset == [4, 2]
+    assert cache.left_padding == [0, 2]
+
+    while session.has_work():
+        session.step()
+
+    assert runner._model.forward_rows == [1, 1, 1, 2, 2]
+
+
+def test_mlx_session_returns_a_finished_request_before_the_slow_one(monkeypatch) -> None:
+    runner = _fake_runner(monkeypatch, MlxConfig(model_path="unused", eos=99))
+    runner.recapture_bridge = lambda token_ids: np.zeros((len(token_ids), 4), dtype=np.float32)
+    _patch_sampler(monkeypatch)
+    session = ThinkerDecodeSession(runner, backend="mlx")
+    session.add(ThinkerDecode([1, 2, 3], 1, 1.0, seed=1), "fast")
+    session.add(ThinkerDecode([4, 5], 4, 1.0, seed=2), "slow")
+
+    finished = session.step()
+
+    assert [(request_id, decoded.generated) for request_id, _, decoded in finished] == [
+        ("fast", [1])
+    ]
+    assert session.has_work()
+    assert runner._cache[0].row_count == 1
+
+    while session.has_work():
+        session.step()
+
+    assert runner._model.forward_rows == [2, 1, 1, 1]

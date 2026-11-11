@@ -43,11 +43,7 @@ from nanovllm_omni.backend import get_backend
 from nanovllm_omni.engine.stage_engine import StageEngine
 from nanovllm_omni.engine.stage_runner import _ensure_dist, stage_kwargs_from_args
 from nanovllm_omni.models.minimind_omni.hf_config import register_minimind_config
-from nanovllm_omni.models.minimind_omni.stage_runner import (
-    decode_minimind,
-    decode_minimind_mlx,
-    recapture_bridge_minimind,
-)
+from nanovllm_omni.models.minimind_omni.stage_runner import ThinkerDecodeSession
 
 # ---------------------------------------------------------------------------
 # ThinkerStage / TalkerStage.
@@ -313,92 +309,118 @@ class ThinkerStage(StageEngine):
             config=self.config,
         )
         self._tokenizer_path = model_path
+        self._tokenizer: Any = None
+        self._session: ThinkerDecodeSession | None = None
 
     def __call__(self, payload: Any, sampling: Any) -> Any:
         """Decode one prompt end to end (direct-call form of ``step``)."""
         return self._decode([payload], [sampling])[0]
 
+    def has_pending(self) -> bool:
+        """Queued requests plus the session's running sequences."""
+        return bool(self._pending) or (self._session is not None and self._session.has_work())
+
     def step(self) -> list[tuple[str, Any]]:
-        """Decode every request this stage is holding in one batched pass."""
-        if not self._pending:
+        """Advance the decode by one scheduler round.
+
+        Returns only the requests that finished in this round. Requests
+        queued since the last round are moved into the session first; the
+        fork scheduler prefills them ahead of the running decode, so a
+        newcomer joins the live batch instead of waiting for it to drain.
+        """
+        if not self.has_pending():
             return []
-        requests = list(self._pending)
-        outputs = self._decode(
-            [request.payload for request in requests],
-            [request.sampling for request in requests],
-        )
-        # Clear only after the decode returns: a failure leaves the queue
-        # intact so ``drop_pending`` can retire these requests instead of
-        # leaving the runner waiting on them forever.
-        self._pending.clear()
+        tokenizer = self._get_tokenizer()
+        if self._session is None:
+            self._session = self._new_session(tokenizer)
+        while self._pending:
+            request = self._pending.popleft()
+            self._session.add(
+                self._prepare_decode(request.payload, request.sampling, tokenizer),
+                request.request_id,
+            )
+        finished = self._session.step()
+        if not self._session.has_work():
+            self._session = None
         return [
-            (request.request_id, output) for request, output in zip(requests, outputs, strict=True)
+            (request_id, self._stage_output(request, decoded, tokenizer))
+            for request_id, request, decoded in finished
         ]
 
-    def _decode(self, payloads: list[Any], samplings: list[Any]) -> list[Any]:
-        """Tokenize every prompt, run one batched decode, re-capture bridges."""
-        import torch
+    def drop_pending(self) -> list[str]:
+        """Forget queued and in-flight requests; returns their ids."""
+        request_ids = super().drop_pending()
+        if self._session is not None:
+            request_ids.extend(self._session.active_request_ids())
+            self._session = None
+        return request_ids
 
-        from .stage_processors import ThinkerStageOutput
+    def _get_tokenizer(self) -> Any:
+        if self._tokenizer is None:
+            self._tokenizer = _load_tokenizer(self._tokenizer_path)
+        return self._tokenizer
 
-        tokenizer = _load_tokenizer(self._tokenizer_path)
+    def _new_session(self, tokenizer: Any) -> ThinkerDecodeSession:
         eos_id = getattr(tokenizer, "eos_token_id", None)
         if eos_id is None:
             eos_id = getattr(self.config, "eos", None)
+        return ThinkerDecodeSession(
+            self.stage_runner,
+            backend=self._backend_name,
+            eos_id=eos_id,
+            enter_token=_THINKER_ENTER_TOKEN,
+            pad_token=_THINKER_PAD_TOKEN,
+            talker_tail=_TALKER_TAIL,
+        )
 
+    def _decode(self, payloads: list[Any], samplings: list[Any]) -> list[Any]:
+        """Tokenize every prompt and drain one isolated session."""
+        tokenizer = self._get_tokenizer()
         prepared = [
             self._prepare_decode(payload, sampling, tokenizer)
             for payload, sampling in zip(payloads, samplings, strict=True)
         ]
-        if self._backend_name == "mlx":
-            decoded = decode_minimind_mlx(
-                self.stage_runner,
-                prepared,
-                eos_id=eos_id,
-                enter_token=_THINKER_ENTER_TOKEN,
-                pad_token=_THINKER_PAD_TOKEN,
-                talker_tail=_TALKER_TAIL,
-            )
-            # Every forwarded position contributes one bridge row; the last
-            # sampled token is never forwarded, so it has none (ADR 0025).
-            bridges = [result.bridge_hidden for result in decoded]
-        else:
-            decoded = decode_minimind(
-                self.stage_runner,
-                prepared,
-                eos_id=eos_id,
-                enter_token=_THINKER_ENTER_TOKEN,
-                pad_token=_THINKER_PAD_TOKEN,
-                talker_tail=_TALKER_TAIL,
-            )
-            bridges = [
-                recapture_bridge_minimind(
-                    self.stage_runner,
-                    request.token_ids + list(result.generated),
-                    result.bridge_hidden,
-                )
-                for request, result in zip(prepared, decoded, strict=True)
-            ]
+        session = self._new_session(tokenizer)
+        request_ids = [str(index) for index in range(len(prepared))]
+        for request, request_id in zip(prepared, request_ids, strict=True):
+            session.add(request, request_id)
+        decoded: dict[str, Any] = {}
+        while session.has_work():
+            for request_id, _, result in session.step():
+                decoded[request_id] = result
+        return [
+            self._stage_output(request, decoded[request_id], tokenizer)
+            for request, request_id in zip(prepared, request_ids, strict=True)
+        ]
 
-        outputs = []
-        for request, result, bridge_hidden in zip(prepared, decoded, bridges, strict=True):
-            eos_index = next(
-                (i for i, token in enumerate(result.generated) if token == eos_id), None
-            )
-            content_len = len(result.generated) if eos_index is None else eos_index
-            outputs.append(
-                ThinkerStageOutput(
-                    bridge_states=bridge_hidden if bridge_hidden is not None else torch.empty(0),
-                    prompt_token_ids=tuple(request.token_ids),
-                    output_token_ids=tuple(result.generated),
-                    text_token_ids=tuple(request.token_ids + result.generated),
-                    text=tokenizer.decode(result.generated[:content_len], skip_special_tokens=True),
-                    text_state=result.text_state,
-                    request_id=getattr(request, "request_id", None),
-                    metadata={"content_len": content_len, "talker_tail": _TALKER_TAIL},
-                )
-            )
-        return outputs
+    def _stage_output(
+        self,
+        request: Any,
+        result: Any,
+        tokenizer: Any,
+    ) -> Any:
+        """Build the talker-facing output from one finished decode."""
+        import torch
+
+        from .stage_processors import ThinkerStageOutput
+
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            eos_id = getattr(self.config, "eos", None)
+        eos_index = next((i for i, token in enumerate(result.generated) if token == eos_id), None)
+        content_len = len(result.generated) if eos_index is None else eos_index
+        return ThinkerStageOutput(
+            bridge_states=(
+                result.bridge_hidden if result.bridge_hidden is not None else torch.empty(0)
+            ),
+            prompt_token_ids=tuple(request.token_ids),
+            output_token_ids=tuple(result.generated),
+            text_token_ids=tuple(request.token_ids + result.generated),
+            text=tokenizer.decode(result.generated[:content_len], skip_special_tokens=True),
+            text_state=result.text_state,
+            request_id=getattr(request, "request_id", None),
+            metadata={"content_len": content_len, "talker_tail": _TALKER_TAIL},
+        )
 
     def _prepare_decode(
         self,

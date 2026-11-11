@@ -5,9 +5,12 @@ A stage owns its queue and decides how many requests it serves per
 each stage's queue and that stage's own scheduler picks the batch —
 reduced to one process, because a single GPU runs one stage at a time.
 
-The default policy serves one request per step. A stage whose backend
-batches overrides ``step`` and takes its whole queue at once; how many
-the backend can really run together is its own ``max_num_seqs``.
+Every ``step`` is incremental: it advances the work it already holds by
+one unit and returns only the requests that finished in that unit. A stage
+whose backend batches keeps its own scheduler across steps and re-selects
+the batch every step, so a request added between steps joins the running
+batch. The default policy serves one request per step to completion; how
+many a batching stage can really run together is its own ``max_num_seqs``.
 """
 
 from __future__ import annotations
@@ -41,15 +44,22 @@ class StageEngine:
         self._pending.append(request)
 
     def has_pending(self) -> bool:
-        """Whether a request is waiting for this stage."""
+        """Whether the stage holds unfinished work.
+
+        A batching stage has in-flight work after its queue drains, so it
+        overrides this to report it. The runner skips a stage that returns
+        False, and a skipped in-flight batch would never advance.
+        """
         return bool(self._pending)
 
     def step(self) -> list[tuple[str, Any]]:
-        """Serve the queued requests this stage takes per step.
+        """Advance this stage by one increment; return what finished in it.
 
-        Returns ``(request_id, payload)`` pairs in queue order. The request
-        is popped only after ``__call__`` returns, so a failure leaves it
-        queued for ``drop_pending`` to clean up instead of stranding it.
+        Returns ``(request_id, payload)`` pairs. The base increment is one
+        whole request: it is popped only after ``__call__`` returns, so a
+        failure leaves it queued for ``drop_pending`` to clean up instead
+        of stranding it. A batching stage overrides this and returns only
+        the subset that reached completion in this step.
         """
         if not self._pending:
             return []

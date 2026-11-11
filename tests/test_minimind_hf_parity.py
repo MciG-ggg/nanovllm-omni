@@ -103,20 +103,20 @@ def _ours_text_bridge_and_codes(torch, prompt: str):
 
     thinker_outputs: list = []
     audio_codes: list = []
-    original_decode = ThinkerStage._decode
+    original_output = ThinkerStage._stage_output
     original_talker = TalkerStage.__call__
 
-    def _spy_decode(self, payloads, samplings):
-        outputs = original_decode(self, payloads, samplings)
-        thinker_outputs.extend(outputs)
-        return outputs
+    def _spy_output(self, request, result, tokenizer):
+        output = original_output(self, request, result, tokenizer)
+        thinker_outputs.append(output)
+        return output
 
     def _spy_talker(self, payload, sampling):
         output = original_talker(self, payload, sampling)
         audio_codes.append(output.audio_codes.detach().cpu().clone())
         return output
 
-    ThinkerStage._decode = _spy_decode
+    ThinkerStage._stage_output = _spy_output
     TalkerStage.__call__ = _spy_talker
     try:
         omni.generate(
@@ -129,7 +129,7 @@ def _ours_text_bridge_and_codes(torch, prompt: str):
             ),
         )
     finally:
-        ThinkerStage._decode = original_decode
+        ThinkerStage._stage_output = original_output
         TalkerStage.__call__ = original_talker
 
     first = thinker_outputs[0]

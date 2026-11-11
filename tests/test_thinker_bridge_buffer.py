@@ -174,6 +174,9 @@ def test_recapture_bridge_returns_only_the_sequence_rows() -> None:
         def get_bridge_hidden(self):
             return buffer
 
+        def modules(self):
+            return iter(())
+
     class _StageRunner:
         model = _Model()
 

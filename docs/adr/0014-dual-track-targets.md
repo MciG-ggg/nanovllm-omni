@@ -10,7 +10,9 @@
 backend 抽象做完之后，两条路摆在面前：
 
 - **3050（WSL，4 GB 独显）**：fork 的 flash_attn 已经是 varlen，CUDA Graph 能捕获，
-  ADR 0007/0012 的全部实测都在这台。它能给的是**真 continuous batching + 图捕获**。
+  ADR 0007/0012 的全部实测都在这台。它能给的是**真 continuous batching**（调度器
+  每步重选，请求可中途加入、完成即离场，ADR 0026）**+ bs=1 图捕获**。CB 默认关闭
+  （`max_num_seqs: 1`），原因见 ADR 0012/0026。
 - **M2 Air（16 GB 统一内存）**：有 `mx.compile`，但 MPS 与 MLX 都没有 flash attention，
   没有 varlen；triton 无 macOS wheel，所以连 torch backend 都 import 不了。
   它能给的是**统一内存的容量**（11.84 GiB 工作集）和**无 CUDA 依赖的本地推理**。

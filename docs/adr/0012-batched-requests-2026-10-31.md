@@ -77,6 +77,10 @@
 不会和已经在跑的请求拼批（与参考实现默认 `request_batch_max_wait_ms == 0` 同义）。
 `py_generator=True` 仍然逐条执行，因此不批。
 
+> 2026-11-11 更新：这条边界已由 ADR 0026 的增量式 step 取消。请求可以在两步之间
+> `add_request`，下一步就被 prefill 并加入运行中的批。默认仍 `max_num_seqs: 1`，
+> 所以以上描述只在显式开批时不成立。
+
 ### 5. 部署形状：能力就位，默认仍是每步一个
 
 `nanovllm_omni/deploy/minimind_omni.yaml` 的 thinker 保持 `max_num_seqs: 1`。
@@ -184,6 +188,7 @@ bench 的 `same_audio` 列现在只能部分覆盖这件事：它拿每个请求
 
 - **晚到的请求不拼批**：`add_request` 发生在第一个 step 之后，就只能自己跑。
   与参考实现默认不设等待窗口一致；要攒批就得引入等待窗口，代价是首请求延迟。
+  （2026-11-11：已由 ADR 0026 取消，保留原文作当时的记录。）
 - **HTTP 入口不会批**：`serving/openai_adapter.py` 每个请求只带一个 prompt，
   所以服务路径永远 `bs=1`。批只出现在 `Omni.generate(list)` / `run_many`。
 - **talker / code2wav 不批**：`max_num_seqs: 1`，每步一个请求。

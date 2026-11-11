@@ -2,57 +2,60 @@
 
 还没做的事。每条带证据（`file:line` 或 ADR 章节），按「影响双轨可比性 > 教学价值 > 清理」排序。
 
-最后更新：2026-11-11（08:05）。
+最后更新：2026-11-11（08:40）。
 
 `[x]` 已完成，`[~]` 部分完成，`[ ]` 未做。
 
 ## 一、Continuous batching
 
-**现在的批是快照式的，步内加不了人。** 这是 ADR 0014 承诺「真 continuous batching」但
-我们给不了的东西。
+**已完成（2026-11-11）。** 批不再是快照式：stage 自己持有请求队列与 scheduler，
+每步从队列里重选批；`add_request` 可以发生在两步之间，下一轮 prefill 并加入正在
+跑的批；完成的序列当步离场。设计、验证与实测都在 ADR 0026。
+
+现状（行号对应当前代码）：
 
 | 位置 | 现状 |
 |---|---|
-| `engine/stage_engine.py` | 基类 `step()` 一次服务一个请求 |
-| `nanovllm_omni/models/minimind_omni/stage.py:321` | `ThinkerStage.step()` 覆写为 `list(self._pending)` 快照，decode 跑完才 `clear()` |
-| `nanovllm_omni/models/minimind_omni/stage_runner.py:99` | `decode_minimind` 把整个生成循环包在一个函数里（`while not scheduler.is_finished()`） |
-| `nanovllm_omni/engine/executor.py:79` | `run_many` 先把全部请求入队再 drain——**这是批能形成的唯一入口**，晚到的请求不与在跑的拼批 |
-| `docs/adr/0012-batch-lifecycle.md` §4 | 明确记录：「晚到的请求不会和已经在跑的请求拼批（与参考实现默认 `request_batch_max_wait_ms == 0` 同义）」 |
+| `nanovllm_omni/engine/stage_engine.py:46` | `has_pending()` 含在飞工作 |
+| `nanovllm_omni/engine/stage_engine.py:55` | `step()` 是增量语义，只推进一个单位 |
+| `nanovllm_omni/models/minimind_omni/stage.py:323` | `ThinkerStage.step()` 每次推进一个 `schedule()` 轮次，返回本步完成的请求 |
+| `nanovllm_omni/models/minimind_omni/stage_runner.py:160` | `ThinkerDecodeSession` 持有 scheduler 与每序列状态，跨 step 存活 |
+| `nanovllm_omni/engine/runner.py:233` | runner 用 `has_pending()` 调度，不再需要「队列空即完成」 |
 
-参考实现 `vllm_omni` 的形状是「每个 stage 自己持有请求队列，批由那个 stage 的 scheduler
-从队列里选」（ADR 0012 引）。我们做到了「stage 持有队列」，但 `step()` 是快照式，
-不是每步重选。
+### 已完成
 
-### 待办
+- [x] **CB-1 把 decode 循环提成增量式 step**
+  `ThinkerDecodeSession.step()`（`stage_runner.py:255`）每步跑一个 `schedule()`
+  轮次，只返回本步完成的请求；`decode_minimind` / `decode_minimind_mlx`
+  （`stage_runner.py:453` / `:557`）保留为一次性 drain，供 `Omni.generate` 单请求路径用。
+  证据：以上三处；`tests/test_continuous_batching.py` 的 join 用例。
 
-- [ ] **CB-1 把 decode 循环从 `decode_minimind` 里提出来，变成增量式 step**
-  `decode_minimind` 现在是一个函数跑完整个生成。要做 CB，生成循环得活到
-  `StageEngine.step()` 的粒度上：每一步返回增量，而不是最终输出。
-  依赖：先有 CB-2。
-  证据：`nanovllm_omni/models/minimind_omni/stage_runner.py:99`、`nanovllm_omni/models/minimind_omni/stage.py:321`
+- [x] **CB-2 `StageEngine.step()` 改成增量式**
+  基类契约已改（`stage_engine.py:55`）。**实际只有 `ThinkerStage` 覆写**
+  （`stage.py:323`）——其余 5 个子类的正确增量就是「一次一个请求」，继承基类即可，
+  不需要改代码。这与原条目「基类和所有子类都要改」的措辞不同，以代码为准。
+  证据：`rg -n "class .*\(StageEngine\)" nanovllm_omni/` 列 6 个子类，
+  `rg -n "def step\("` 只有基类与 `ThinkerStage` 两个实现。
 
-- [ ] **CB-2 `StageEngine.step()` 的语义从「快照式批」改成「增量式」**
-  基类和所有子类都要改：`ThinkerStage`、`TalkerStage`、`SmolVLMStage`、
-  `SmolVLAVlmStage`、`DiffusionRunner`、`MiniMindOmniCode2Wav`
-  （6 个子类，`rg "StageEngine\)"` 可列全）。
-  证据：`engine/stage_engine.py`、`models/*/stage.py`
+- [x] **CB-3 接上 `BatchKVCache.extend`**
+  新请求单独 prefill，`MlxStageRunner.forward` 在 `is_prefill` 且已有 cache 时
+  走 extend（`backend/mlx_backend.py:199`）；右对齐补齐由 MLX 的 `extend` 完成。
+  调用方是 `ThinkerDecodeSession`。测试：
+  `tests/test_mlx_backend.py::test_mlx_session_extends_a_running_cache_when_a_request_joins`
+  （extend 后 2 行，offset `[4,2]`，left_padding `[0,2]`）。
 
-- [ ] **CB-3 接上 `BatchKVCache.extend`——中途进来的新请求**
-  MLX 侧 `extend` 会自动右对齐补齐新行（实测：`_idx` 取 max、每行自己的
-  `offset`、`left_padding` 补差），但**目前没有调用方**。它就是 CB 最后一块拼图：
-  新请求单独 prefill，再 extend 进正在跑的 cache。
-  证据：`backend/mlx_backend.py` 的 `forward`（`is_prefill` 且 `self._cache` 已存在时走 extend）、
-  ADR 0025「还没做到：真正的中途 join」一节
+- [x] **CB-4 完成的序列提前离场**
+  session 在同一步 `postprocess` 后调 `_filter_inactive_cache_rows`
+  （`stage_runner.py:350`），MLX 侧回收 cache 行；CUDA 侧 scheduler 的
+  `BlockManager.deallocate` 回收块。测试：
+  `test_a_finished_request_leaves_before_the_slow_one`（decode 行数 `[2,1,1,1]`）、
+  `test_mlx_session_returns_a_finished_request_before_the_slow_one`。
 
-- [ ] **CB-4 退出的序列要能提前离场，不再让整批等最慢的**
-  `filter_cache_rows` 已经能回收行（实测 `(4 → 3)`、`(3 → 0)`），但
-  `ThinkerStage.step()` 的批是一次性定死的，退出的序列仍占着批。
-  证据：`backend/mlx_backend.py::filter_cache_rows`、ADR 0025
-
-- [ ] **CB-5 修 ADR 0014 的措辞**
-  它现在写「它能给的是**真 continuous batching + 图捕获**」，但两边都给不了真 CB。
-  在 CB-1..4 做完之前，这句话应该改成「有 CB 的零件，还没接线」。
-  证据：`docs/adr/0014-dual-track-targets.md:13`
+- [x] **CB-5 修 ADR 0014 的措辞**
+  `docs/adr/0014-dual-track-targets.md:13-15` 现在写「真 continuous batching
+  （调度器每步重选，请求可中途加入、完成即离场，ADR 0026）+ bs=1 图捕获」，
+  并注明 CB 默认关闭。ADR 0025 的「还没做到」一节同步改成「已接上」，
+  ADR 0012 §4 与「边界」加了更新注记。
 
 ## 二、Offload
 

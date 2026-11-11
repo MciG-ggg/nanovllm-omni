@@ -84,6 +84,10 @@ extended -> keys (3,2,256,4)
 `extend`（`cache.py:1012`）对每行算 `left = max_idx - c._idx` 再 `mx.pad`。所以新请求
 单独 prefill 成只含自己的 `BatchKVCache`，再 `extend` 进正在跑的那个即可，不用手工补。
 
+这条路径现在有调用方：`ThinkerDecodeSession` 在 decode 中途 `add()` 新请求，下一轮
+`schedule()` 先 prefill 它，`MlxStageRunner.forward` 检测到 `is_prefill` 且已有
+cache 时调用 `extend`。见 ADR 0026。
+
 **四、`Scheduler` 的构造契约比 `MlxConfig` 现在给的多。**
 
 `Scheduler.__init__` 读 `config.max_num_seqs`、`config.max_num_batched_tokens`、
@@ -179,13 +183,14 @@ M2 Air / mlx 0.32.4 / 8 层 checkpoint，`decode_minimind_mlx` 走完整入口�
 完整记录在 `docs/perf/minimind-thinker-mlx-scheduler-2026-11-10.md`
 （`docs/perf/` 不进 git，按仓库约定）。
 
-### 还没做到的：真正的中途 join
+### 中途 join（2026-11-11 已接上）
 
-fork `Scheduler.schedule()` 一次就把 waiting 队列清空，所以一批请求是一起
-prefill 的。`BatchKVCache.extend`——把新来的请求追加到正在跑的 cache 上——
-**目前没有调用方**，只有单测覆盖。「请求在 decode 中途到达」这个场景，
-MLX 轨现在做不到。ADR 0014 想要的「加一个请求让 p99 怎么变」这类数字，
-要等这条路径接上。
+fork `Scheduler.schedule()` 在 decode 阶段每轮只取仍在 `running` 的序列；新 `add()`
+的序列留在 `waiting`，下一轮先被 prefill（prefill 优先），随后 `extend` 进运行中的
+cache，再下一轮与原来的序列同批 decode。`ThinkerDecodeSession.step()` 就是这个粒度。
+ADR 0014 要的「加一个请求让 p99 怎么变」现在能测；本轮测到的方向是**没有收益**
+（CUDA 因 bs>1 走 eager 明显变慢，MLX 约 1.1–1.3 倍），数字见 ADR 0026。
+默认部署仍是 `max_num_seqs: 1`。
 
 ## 边界
 

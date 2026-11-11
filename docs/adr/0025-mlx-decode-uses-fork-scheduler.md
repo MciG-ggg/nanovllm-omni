@@ -188,9 +188,9 @@ M2 Air / mlx 0.32.4 / 8 层 checkpoint，`decode_minimind_mlx` 走完整入口�
 fork `Scheduler.schedule()` 在 decode 阶段每轮只取仍在 `running` 的序列；新 `add()`
 的序列留在 `waiting`，下一轮先被 prefill（prefill 优先），随后 `extend` 进运行中的
 cache，再下一轮与原来的序列同批 decode。`ThinkerDecodeSession.step()` 就是这个粒度。
-ADR 0014 要的「加一个请求让 p99 怎么变」现在能测；本轮测到的方向是**没有收益**
-（CUDA 因 bs>1 走 eager 明显变慢，MLX 约 1.1–1.3 倍），数字见 ADR 0026。
-默认部署仍是 `max_num_seqs: 1`。
+ADR 0014 要的「加一个请求让 p99 怎么变」现在能测；本轮测到的方向是：CUDA 明显
+变慢，MLX 比「等旧批排空」好 9–23%，但整段 wall 与串行之和的差距在波动范围内。
+数字见 ADR 0026。默认部署仍是 `max_num_seqs: 1`。
 
 ## 边界
 

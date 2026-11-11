@@ -34,8 +34,9 @@
   基类契约已改（`stage_engine.py:55`）。**实际只有 `ThinkerStage` 覆写**
   （`stage.py:323`）——其余 5 个子类的正确增量就是「一次一个请求」，继承基类即可，
   不需要改代码。这与原条目「基类和所有子类都要改」的措辞不同，以代码为准。
-  证据：`rg -n "class .*\(StageEngine\)" nanovllm_omni/` 列 6 个子类，
-  `rg -n "def step\("` 只有基类与 `ThinkerStage` 两个实现。
+  证据：`rg -n "class .*\(StageEngine\)" nanovllm_omni/` 列 6 个子类；
+  其中只有 `ThinkerStage` 覆写 `step`/`has_pending`（`stage.py:319`/`:323`），
+  其余 5 个继承基类。
 
 - [x] **CB-3 接上 `BatchKVCache.extend`**
   新请求单独 prefill，`MlxStageRunner.forward` 在 `is_prefill` 且已有 cache 时

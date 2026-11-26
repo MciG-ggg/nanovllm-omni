@@ -89,6 +89,10 @@ for raw_path in paths:
     if parts[-1].endswith(".md"):
         # Prose has no functions to split by; the gate is for source files.
         continue
+    mode = subprocess.check_output(["git", "ls-files", "-s", "--", path]).split(b" ")[0]
+    if mode == b"160000":
+        # A submodule pointer; the size lives in the submodule's own repo.
+        continue
     content = subprocess.check_output(["git", "show", ":" + path])
     if b"\0" in content:
         continue

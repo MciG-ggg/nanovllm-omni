@@ -2,7 +2,7 @@
 # nanovllm-omni pre-commit hook.
 #
 # Runs the same lint + format + public-API checks the CI does, but
-# only on the files staged for commit (so the hook is fast). Heavy
+# across the source tree; file size checks use staged content. Heavy
 # checks (pytest, torch-requiring unit tests) are NOT run here -- they
 # are too slow for a commit-time hook and live in the GitHub Actions
 # workflow instead.
@@ -68,4 +68,34 @@ run_python() {
     return 1
   fi
 }
+run_python - <<'PY'
+import subprocess
+import sys
+from pathlib import PurePosixPath
+
+paths = subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"]
+).split(b"\0")
+failed = False
+for raw_path in paths:
+    if not raw_path:
+        continue
+    path = raw_path.decode("utf-8", errors="surrogateescape")
+    parts = PurePosixPath(path).parts
+    if any(part in {"build", "dist", "_build", "generated"} for part in parts):
+        continue
+    if parts[-1].endswith(".lock") or parts[-1] in {"package-lock.json", "yarn.lock"}:
+        continue
+    if parts[-1].endswith(".md"):
+        # Prose has no functions to split by; the gate is for source files.
+        continue
+    content = subprocess.check_output(["git", "show", ":" + path])
+    if b"\0" in content:
+        continue
+    if len(content) > 20_000:
+        print(f"[pre-commit] {path}: {len(content)} bytes; split by function before committing", file=sys.stderr)
+        failed = True
+if failed:
+    sys.exit(1)
+PY
 run_python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"

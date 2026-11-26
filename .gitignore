@@ -81,7 +81,6 @@ logs/
 *.log
 *.pid
 *.sock
-!docs/perf/**/*.log
 
 # Generated docs
 docs/_build/
@@ -100,8 +99,15 @@ docs/site/
 docs/design-grill.md
 docs/specs/
 docs/review/
-docs/dev/
-docs/perf/
+
+# Implementation docs and measured-result docs are tracked -- ADRs link to
+# them. Their raw artifacts (csv, json, traces, audio) stay local.
+docs/dev/**
+!docs/dev/*.md
+docs/perf/**
+!docs/perf/**/
+!docs/perf/**/*.md
+!docs/perf/**/*.log
 
 # OS
 Thumbs.db

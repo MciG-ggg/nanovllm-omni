@@ -22,11 +22,6 @@ from typing import Any
 from .prompts import BENCH_PROMPTS, BenchPrompt
 from .report import markdown_table, markdown_table_detail, write_csv
 from .runner import RunResult, run_n
-from .trace import (
-    parse_kineto_trace,
-    trace_profile_markdown,
-    trace_profile_top_kernels,
-)
 
 
 def _load_bundle(args: argparse.Namespace):
@@ -359,54 +354,15 @@ def cmd_trace_torch(args: argparse.Namespace) -> int:
 
 def cmd_profile_detail(args: argparse.Namespace) -> int:
     """Capture a torch.profiler trace AND a parsed per-stage kernel breakdown."""
-    from torch.profiler import ProfilerActivity, profile
+    from .profile_cli import profile_detail
 
-    bundle = _load_bundle(args)
-    prompts = _resolve_prompts(args.prompts)
-
-    out_prefix = Path(args.out)
-    out_prefix.parent.mkdir(parents=True, exist_ok=True)
-    trace_path = out_prefix.with_suffix(".trace.json")
-    detail_path = out_prefix.with_suffix(".detail.md")
-
-    # Warmup runs OUTSIDE the profiler so JIT compilation, CUDA kernel
-    # autotune, and cuDNN benchmark heuristics do not bloat the trace.
-    if args.warmup:
-        for prompt in prompts:
-            run_n(
-                bundle,
-                prompt,
-                n=0,
-                warmup=args.warmup,
-                **_kwargs(args),
-            )
-
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=False,
-    ) as prof:
-        _run_all(
-            bundle,
-            prompts,
-            n=args.runs,
-            warmup=0,
-            run_kwargs=_kwargs(args),
-        )
-    prof.export_chrome_trace(str(trace_path))
-
-    profile_data = parse_kineto_trace(trace_path)
-    summary = trace_profile_markdown(profile_data)
-    detail = trace_profile_top_kernels(profile_data, per_stage=5)
-    detail_md = f"# Per-stage kernel breakdown ({trace_path})\n\n" f"{summary}\n\n" f"{detail}\n"
-    detail_path.write_text(detail_md, encoding="utf-8")
-
-    print(f"trace:        {trace_path}")
-    print(f"detail md:    {detail_path}")
-    print()
-    print(summary)
-    print()
-    print(detail)
-    return 0
+    return profile_detail(
+        args,
+        load_bundle=_load_bundle,
+        resolve_prompts=_resolve_prompts,
+        run_all=_run_all,
+        kwargs_for=_kwargs,
+    )
 
 
 def cmd_trace_nsys(args: argparse.Namespace) -> int:

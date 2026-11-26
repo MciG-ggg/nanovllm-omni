@@ -20,11 +20,11 @@ pip install -e ".[dev]"            # lint + test, no torch
 pip install -e ".[dev,cuda]"       # Linux/WSL: torch + triton + flash-attn
 #   pip install -e ".[dev,mlx]"      # Apple Silicon: mlx + mlx-lm
 
-# Run the fast feedback loop (same checks as pre-push):
-scripts/pre-commit
-# Or, equivalently:
-ruff check nanovllm_omni/ tests/
-black --check nanovllm_omni/ tests/
+# Run the full pre-push checks:
+scripts/pre-push
+# Or run the equivalent checks individually:
+ruff check nanovllm_omni/ tests/ tools/
+black --check nanovllm_omni/ tests/ tools/
 python -m pytest -m "not smoke" -v
 python -c "from nanovllm_omni import Omni, AsyncOmni, SamplingParams, OmniRequestOutput"
 python -m compileall -q nanovllm_omni
@@ -72,28 +72,37 @@ wire an `examples/offline_inference/<family>/` smoke.
 
 ## Naming conventions
 
-Lifted from AGENTS.md; applies to all new code:
+See [AGENTS.md](AGENTS.md#命名约定) for naming rules and exceptions.
 
-- **Counts**: `num_*` (`num_heads`, `num_layers`, `num_requests`,
-  `num_positions`, `num_steps`). No `n_*`. The only exception is
-  `SamplingParams.n`, which vLLM locks the name of.
-- **Sequences**: `sequence` / `sequence_len` / `max_sequence_len`. No
-  `seq` abbreviation.
-- **Full words preferred**: `token`, `config`, `max_embeddings`. No
-  `tok`, `cfg`, `max_emb`.
+## 贡献卫生
 
-**Out of rename scope** (do not change these even if you spot them in
-new code):
+**不重复劳动，不开琐碎 PR，不提交没人看过一遍的 agent 输出。**
 
-- Remote-model attributes accessed via
-  `AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True)`
-  (e.g. `n_rep`, `n_local_heads`, `n_local_kv_heads`).
-- String / comment / docstring / shape notations like `[B, seq, kv, d]`.
-- Serialization-format keys (JSON keys, markdown table headers) — these
-  are external schema.
-- Public-aligned symbols (`Omni`, `SamplingParams` fields,
-  `OmniRequestOutput` fields, etc.) — go through the interface-change
-  workflow.
+提 PR 之前：
+
+- 查相关 issue、开着的 PR 和区域关键词，确认没人在做同一件事。
+- 已经有 PR 在修同一个问题，就不再开一个。
+- 你的做法和别人实质性不同时，先说明不同在哪。
+
+不为低价值琐事开 PR：
+
+- 一次性的 typo、孤立的格式抖动、没有实质工作的机械清理，都不单独开。
+- 机械清理只有在直接支撑一个有意义的改动时才一起带上。
+
+AI 辅助的工作：
+
+- 提交的人必须理解，并能为每一行改动辩护。
+- 提交的人要看过完整 diff，并在发布前跑过相关测试。
+- PR 描述里写明用了 AI 辅助、做过重复工作检查、测试命令和结果。
+
+没准备好就停在门口（fail closed）：
+
+- 改动重复、过于琐碎、缺上下文、或拿不出可信的验证路径时，停下来说明缺什么。
+- 不要为了继续推进而发明流程例外。
+
+验证脚手架：
+
+- 为证明某个 PR 正确而写的一次性脚本，跑完把命令和结果贴进 PR 的测试记录，**不提交**。仓库的 `tests/` 是长期契约测试，不要把一次性 harness 塞进去。
 
 ## Where to ask
 

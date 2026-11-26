@@ -76,7 +76,7 @@ def _build_runner(model_dir: str, dtype: str, max_num_seqs: int, num_blocks: int
     import mlx.core as mx
     from mlx_lm.utils import load as mlx_load
 
-    from nanovllm_omni.backend.mlx_backend import MlxConfig, MlxStageRunner
+    from nanovllm_omni.backend.mlx_runner import MlxConfig, MlxStageRunner
 
     model, tokenizer = mlx_load(model_dir)
     model.set_dtype(getattr(mx, dtype))
@@ -114,7 +114,7 @@ def _think(ids: list[int], max_tokens: int) -> Any:
 
 
 def _bench_single(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
-    from nanovllm_omni.models.minimind_omni.stage_runner import decode_minimind_mlx
+    from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
 
     ids = _tokenize(runner, args.prompt_id)
     times = []
@@ -131,7 +131,7 @@ def _bench_single(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _bench_ragged(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
-    from nanovllm_omni.models.minimind_omni.stage_runner import decode_minimind_mlx
+    from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
 
     ids = [_tokenize(runner, one) for one in args.ragged_prompts.split(",")]
     times = []
@@ -154,7 +154,7 @@ def _bench_uneven(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
     and the remaining rows keep decoding. This is the shape that exercises
     the row-recycling path.
     """
-    from nanovllm_omni.models.minimind_omni.stage_runner import decode_minimind_mlx
+    from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
 
     ids = [_tokenize(runner, one) for one in args.ragged_prompts.split(",")]
     # The first request stops early; the rest run to the common length.
@@ -181,9 +181,9 @@ def _bench_join(runner: Any, args: argparse.Namespace) -> dict[str, Any]:
     drained, so its baseline is "decode alone afterwards". The join path
     reports its latency from arrival instead.
     """
+    from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
     from nanovllm_omni.models.minimind_omni.stage_runner import (
         ThinkerDecodeSession,
-        decode_minimind_mlx,
     )
 
     ids_a = _tokenize(runner, args.prompt_id)
@@ -268,7 +268,7 @@ def main() -> None:
     runner = _build_runner(args.model, args.dtype, args.max_num_seqs, args.num_kvcache_blocks)
     load_ms = (time.perf_counter() - load_start) * 1000
 
-    from nanovllm_omni.models.minimind_omni.stage_runner import decode_minimind_mlx
+    from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
 
     for _ in range(args.warmup):
         decode_minimind_mlx(runner, [_think(_tokenize(runner, args.prompt_id), args.max_tokens)])

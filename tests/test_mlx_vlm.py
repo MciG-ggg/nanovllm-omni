@@ -21,8 +21,8 @@ import os
 import pytest
 
 from nanovllm_omni.backend import get_backend
-from nanovllm_omni.backend.mlx_vlm import MlxVlmBackend
 from nanovllm_omni.config.params import OmniEngineArgs, SamplingParams
+from nanovllm_omni.models.smolvlm.vlm_mlx import MlxVlmBackend
 
 MODEL_DIR = os.environ.get(
     "SMOLVLM_MLX_MODEL_DIR", os.path.expanduser("~/models/smolvlm-500m-instruct")
@@ -72,9 +72,9 @@ def test_a_cuda_device_request_lands_on_the_mlx_gpu() -> None:
 
 
 def test_the_vlm_backend_has_no_talker_runner() -> None:
-    # SmolVLM is one stage; a talker request is a wiring mistake to fail loudly.
-    with pytest.raises(NotImplementedError):
-        get_backend("mlx-vlm").make_talker_runner(MODEL_DIR)
+    # SmolVLM is one stage; the talker contract belongs to the MiniMind
+    # family, so the MLX VLM track carries none.
+    assert not hasattr(get_backend("mlx-vlm"), "make_talker_runner")
 
 
 def test_prefill_returns_one_full_vocabulary_logit_row(stage) -> None:

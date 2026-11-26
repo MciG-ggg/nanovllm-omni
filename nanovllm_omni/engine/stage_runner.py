@@ -173,6 +173,7 @@ class StageRunner:
         model_class: type,
         config: Any,
         rank: int = 0,
+        device: str | None = None,
     ) -> None:
         # Lazy: importing ``ModelRunner`` pulls in
         # ``nanovllm.layers.attention`` which requires ``triton``.
@@ -182,6 +183,9 @@ class StageRunner:
 
         self.model_class = model_class
         self.config = config
+        # ``device`` is forwarded only when a backend sets it, so the torch
+        # track keeps the fork's own ``cuda`` default byte-for-byte.
+        runner_kwargs = {} if device is None else {"device": device}
         # ``ModelRunner.__init__`` is heavy: ``dist.init_process_group``,
         # model load, weight loader, KV allocate, optional CUDA graph
         # capture. Side effects all live here.
@@ -190,6 +194,7 @@ class StageRunner:
             rank=rank,
             event=None,
             model_class=model_class,
+            **runner_kwargs,
         )
         # Per-stage vocab sampler; thinker (text) and talker (audio
         # codebook heads) cannot share.

@@ -89,7 +89,7 @@ same three stages, split by framework:
 | stage | backend | why |
 |---|---|---|
 | thinker | MLX (`mlx-lm`) | converted by `scripts/convert_minimind_thinker_mlx.py` |
-| talker | MLX (in-repo port) | `backend/mlx_talker.py`, converted by `scripts/convert_minimind_talker_mlx.py` |
+| talker | MLX (in-repo port) | `models/minimind_omni/talker_mlx.py`, converted by `scripts/convert_minimind_talker_mlx.py` |
 | code2wav | torch on MPS | ADR 0024: MLX's transposed conv is not faster (21.98 vs 20.56 ms) |
 
 ### Setup

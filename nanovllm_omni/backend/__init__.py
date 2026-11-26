@@ -6,6 +6,12 @@ importing this package pulls in neither torch nor mlx.
 
 The default is ``torch``, and selecting it must leave the pipeline
 byte-identical to the pre-backend code path.
+
+This package holds the seam and nothing else: a backend answers "which
+device, which dtype, which shapes can one forward carry". Model-family
+code -- a family's own runner, its payload, its recipe -- lives in
+``nanovllm_omni/models/<family>/`` and is reached from here only by
+name.
 """
 
 from __future__ import annotations
@@ -45,12 +51,18 @@ def get_backend(name: str | None = None, **kwargs: Any) -> Backend:
 
 def _register_builtin_backends() -> None:
     from .mlx_backend import MlxBackend
-    from .mlx_vlm import MlxVlmBackend
     from .torch_backend import TorchBackend
 
     register_backend("torch", TorchBackend)
     register_backend("mlx", MlxBackend)
-    register_backend("mlx-vlm", MlxVlmBackend)
+    register_backend("mlx-vlm", _mlx_vlm_backend)
+
+
+def _mlx_vlm_backend(**kwargs: Any) -> Backend:
+    """The SmolVLM MLX track; it lives in the family, the registry only names it."""
+    from ..models.smolvlm.vlm_mlx import MlxVlmBackend
+
+    return MlxVlmBackend(**kwargs)
 
 
 _register_builtin_backends()

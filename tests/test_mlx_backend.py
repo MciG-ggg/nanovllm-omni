@@ -16,12 +16,13 @@ import numpy as np
 import pytest
 
 from nanovllm_omni.backend import StageRunner as StageRunnerProtocol
-from nanovllm_omni.backend import mlx_backend
-from nanovllm_omni.backend.mlx_backend import MlxBackend, MlxConfig, MlxStageRunner
+from nanovllm_omni.backend import mlx_runner
+from nanovllm_omni.backend.mlx_backend import MlxBackend
+from nanovllm_omni.backend.mlx_runner import MlxConfig, MlxStageRunner
+from nanovllm_omni.models.minimind_omni.decode_mlx import decode_minimind_mlx
 from nanovllm_omni.models.minimind_omni.stage_runner import (
     ThinkerDecode,
     ThinkerDecodeSession,
-    decode_minimind_mlx,
 )
 
 
@@ -193,7 +194,7 @@ def test_mlx_decode_filters_finished_cache_rows_before_next_step(monkeypatch) ->
             [sequence.token_ids[0] for sequence in sequences], dtype=np.int32
         )
 
-    monkeypatch.setattr(mlx_backend, "_make_sampler", make_sampler)
+    monkeypatch.setattr(mlx_runner, "_make_sampler", make_sampler)
     requests = [
         ThinkerDecode(ids, limit, 1.0)
         for ids, limit in (([1, 2, 3, 4, 5], 2), ([6, 7, 8], 3), ([9, 10, 11, 12, 13], 4))
@@ -239,7 +240,7 @@ def _patch_sampler(monkeypatch) -> None:
             [sequence.token_ids[0] for sequence in sequences], dtype=np.int32
         )
 
-    monkeypatch.setattr(mlx_backend, "_make_sampler", make_sampler)
+    monkeypatch.setattr(mlx_runner, "_make_sampler", make_sampler)
 
 
 def test_mlx_session_extends_a_running_cache_when_a_request_joins(monkeypatch) -> None:

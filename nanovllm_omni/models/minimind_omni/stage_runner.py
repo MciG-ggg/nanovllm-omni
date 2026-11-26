@@ -1,12 +1,7 @@
-"""MiniMind-O decode recipe on top of the unified fork-AR engine.
+"""MiniMind-O continuous decode session on the unified fork-AR engine.
 
-The fork-attention lifecycle (``set_context`` / ``forward`` / ``sample``
-/ ``reset_context``) lives in ``engine/stage_runner.py::StageRunner`` —
-shared by any family that uses fork attention. This module is the
-MiniMind-O specific decode dance: vendor ``stream_generate`` prefill +
-AR loop with the post-EOS filler clocking, plus the one-shot full-
-sequence prefill that replaces the paged-KV bridge so the talker sees
-bit-equal rows.
+The fork-attention lifecycle lives in ``engine/stage_runner.py``. This
+module owns the MiniMind-O token and bridge state around that runner.
 
 The decode is continuous: ``ThinkerDecodeSession`` owns one fork
 ``Scheduler`` for the life of the batch, and ``step`` advances it by one
@@ -21,11 +16,9 @@ things make that safe per request:
 - the bridge rows are accumulated per sequence, so a batched step
   appends one row per sequence instead of only row 0.
 
-We compose on top of ``StageRunner`` rather than subclassing, so the
-engine has one cohesive AR adapter and model families stay side-effect
-free at import time. ``decode_minimind`` / ``decode_minimind_mlx`` are
-the one-shot drains built on the session; the stage calls ``step``
-directly so new requests can join mid-generation.
+``decode_minimind`` drains one session. The stage calls ``step`` directly
+so requests can join mid-generation. The MLX wrapper lives in
+``decode_mlx.py``.
 
 The MLX track shares the scheduler with the CUDA track and forks only at
 the physical step: MLX has no paged KV, so a joining request is prefilled
@@ -38,6 +31,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from .bridge import recapture_bridge_minimind
 
 
 @dataclass(frozen=True)
@@ -207,7 +202,7 @@ class ThinkerDecodeSession:
         if backend == "mlx":
             import mlx.core as mx
 
-            from nanovllm_omni.backend.mlx_backend import _make_sampler, _seed_key
+            from nanovllm_omni.backend.mlx_runner import _make_sampler, _seed_key
 
             self._mx = mx
             self._make_sampler = _make_sampler
@@ -321,6 +316,8 @@ class ThinkerDecodeSession:
     def _collect_bridge_mlx(self, seqs: list[Any], is_prefill: bool) -> None:
         import torch
 
+        from .decode_mlx import _mx_to_torch
+
         bridge = self._runner.bridge_hidden()
         for index, sequence in enumerate(seqs):
             if bridge is None:
@@ -368,6 +365,9 @@ class ThinkerDecodeSession:
         logits: Any,
     ) -> list[int]:
         """Append this step's token per sequence and apply the stop rules."""
+        if self._backend == "mlx":
+            from .decode_mlx import _mx_to_torch
+
         effective_ids = []
         for position, (sequence, sampled_id) in enumerate(zip(seqs, token_ids, strict=True)):
             state = self._states[sequence]
@@ -421,6 +421,8 @@ class ThinkerDecodeSession:
     def _result(self, state: _SeqState) -> ThinkerDecoded:
         full_ids = list(state.request.token_ids) + list(state.generated)
         if self._backend == "mlx":
+            from .decode_mlx import _mx_to_torch
+
             # The decode loop forwarded one token per step against the
             # dense cache, but the vendor runs full-sequence attention
             # every step. The rows are not bit-equal and the talker
@@ -480,114 +482,3 @@ def decode_minimind(
         talker_tail=talker_tail,
     )
     return _drain_session(session, requests)
-
-
-def recapture_bridge_minimind(
-    stage_runner: Any,
-    full_ids: list[int],
-    bridge_hidden: Any,
-) -> Any:
-    """One full-sequence prefill to replace the paged-KV bridge.
-
-    The decode loop forwards one token per step (paged KV cache),
-    but vendor ``MiniMindOmni`` runs full-sequence attention each
-    step (``use_cache=False``). The rows are not bit-equal, and the
-    talker cross-attends to them — so re-run the full sequence once
-    and take that bridge instead.
-
-    The re-run detaches the paged KV tensors first. A request can finish
-    while others are still decoding, and a prefill writes the KV it
-    computes; with the paged cache attached that write would land on
-    slots owned by the running sequences. With the cache detached the
-    attention uses the freshly computed K/V and writes nothing.
-    """
-    import torch
-
-    if not full_ids or bridge_hidden is None:
-        return bridge_hidden
-    model = stage_runner.model
-    n_total = len(full_ids)
-    dev = bridge_hidden.device
-    caches = [
-        (module, module.k_cache, module.v_cache)
-        for module in model.modules()
-        if hasattr(module, "k_cache") and hasattr(module, "v_cache")
-    ]
-    empty = torch.tensor([])
-    stage_runner.set_context(
-        is_prefill=True,
-        cu_seqlens_q=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
-        cu_seqlens_k=torch.tensor([0, n_total], dtype=torch.int32, device=dev),
-        max_seqlen_q=n_total,
-        max_seqlen_k=n_total,
-        slot_mapping=torch.arange(n_total, dtype=torch.int32, device=dev),
-        context_lens=None,
-        block_tables=None,
-    )
-    try:
-        for module, _, _ in caches:
-            module.k_cache = module.v_cache = empty
-        with torch.no_grad():
-            _in = torch.tensor(full_ids, dtype=torch.int64, device=dev)
-            _pos = torch.arange(n_total, dtype=torch.int64, device=dev)
-            _ = model(_in, _pos)
-        _full_bridge = stage_runner.bridge_hidden()
-        if _full_bridge is not None:
-            # The buffer holds ``max_position`` rows; only the first
-            # ``n_total`` carry this sequence. The talker embeds every
-            # row it gets, so the trailing zero rows must not travel.
-            bridge_hidden = _full_bridge[:n_total].detach().to(dev).clone()
-    finally:
-        for module, k_cache, v_cache in caches:
-            module.k_cache = k_cache
-            module.v_cache = v_cache
-        stage_runner.reset_context()
-    return bridge_hidden
-
-
-def _mx_to_torch(array: Any) -> Any:
-    """An MLX array as a float32 torch tensor."""
-    import mlx.core as mx
-    import numpy as np
-    import torch
-
-    return torch.from_numpy(np.asarray(array.astype(mx.float32)))
-
-
-def decode_minimind_mlx(
-    stage_runner: Any,
-    requests: list[ThinkerDecode],
-    *,
-    eos_id: int | None = None,
-    enter_token: int = 0,
-    pad_token: int = 0,
-    talker_tail: int = 8,
-) -> list[ThinkerDecoded]:
-    """Decode requests with the fork Scheduler and MLX cache rows.
-
-    One-shot drain of ``ThinkerDecodeSession``. Sampling matches the CUDA
-    thinker's temperature, repetition penalty, top-p, and per-request RNG
-    keys. The bridge rows come from a full-sequence re-run per request,
-    the same way the CUDA track gets them.
-    """
-    if not requests:
-        return []
-    session = ThinkerDecodeSession(
-        stage_runner,
-        backend="mlx",
-        eos_id=eos_id,
-        enter_token=enter_token,
-        pad_token=pad_token,
-        talker_tail=talker_tail,
-    )
-    return _drain_session(session, requests)
-
-
-__all__ = [
-    "ThinkerDecode",
-    "ThinkerDecodeSession",
-    "ThinkerDecoded",
-    "decode_minimind",
-    "decode_minimind_mlx",
-    "recapture_bridge_minimind",
-]

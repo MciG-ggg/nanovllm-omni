@@ -257,7 +257,7 @@ block table 非连续且带 `-1` 洞）：
 
 ### 未做
 
-- **kernel 还没接进 `MlxStageRunner`**（本轮刻意不碰 `mlx_backend.py`，避免和另一个
+- **kernel 还没接进 `MlxStageRunner`**（本轮刻意不碰 `mlx_runner.py`，避免和另一个
   subagent 撞文件）。接线是下一轮。
 - prefill 的 varlen kernel 没写（本轮只做 decode）。
 - 上面说的「8 池各自 rebind」的测量没做。
@@ -265,13 +265,14 @@ block table 非连续且带 `-1` 洞）：
 
 ### talker 的 MLX 版（2026-11-10 补）
 
-- `backend/mlx_talker.py`：`MiniMindTalker` 的 MLX 移植（fp32 的 RMSNorm、
+- `models/minimind_omni/talker_mlx.py` + `talker_mlx_runner.py`：`MiniMindTalker`
+  的 MLX 移植（fp32 的 RMSNorm、
   GQA + 逐头 q/k RMSNorm、rotate-half RoPE、SwiGLU、8 码本的 embed/head
   适配器、`embed_proj`/`codec_proj`/`spk_proj`、两个标量 scale）加上
   `MlxTalkerRunner`。调度、发射门、top-50 + 抽样、逐码本 last-3 的
-  repetition penalty 都与 `backend/torch_talker.py` 一致；`talker_kv="windowed"`
+  repetition penalty 都与 `models/minimind_omni/talker_torch.py` 一致；`talker_kv="windowed"`
   也接上了。
-- `backend/mlx_backend.py`：`MlxBackend.make_talker_runner`；`MlxStageRunner.forward`
+- `backend/mlx_runner.py`：`MlxStageRunner.forward`
   改成先跑 body（`model.model`）再跑 head，body 的 hidden states 留在 runner 上，
   `bridge_hidden()` 返回它们（`[B, T, hidden]`）。
 - 权重：`scripts/convert_minimind_talker_mlx.py` 把 checkpoint 里的 `talker.*`
@@ -295,7 +296,7 @@ ADR 0022 记的 teacher-forced 基线也是 0.0625。窗口版与 dense 版在�
   绝对差 **0.25**（幅值 10128，相对 2.5e-05），见 `tests/test_mlx_bridge.py`。
 - `models/minimind_omni/stage_runner.py::decode_minimind_mlx`：MLX 版的 vendor
   decode 舞步——一个 dense batch（左补齐），采样配方复用
-  `backend/mlx_backend.py::_make_sampler`（temperature、full-history
+  `backend/mlx_runner.py::_make_sampler`（temperature、full-history
   repetition penalty、top-p、每序列一个 RNG key），post-EOS 的 filler clocking
   （先 `enter_token` 再 `pad_token`）与 `talker_tail` 停止条件与 CUDA 轨一致。
   MLX 的 recorder 只留最后一次 forward 的行，所以 bridge 来自一次全序列

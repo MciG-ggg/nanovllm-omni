@@ -19,7 +19,7 @@ images are passed via ``SamplingParams.extra["images"]`` as a list of
 
 Two tracks share this stage. The torch track keeps its own processor and
 its own image merge (``TorchVlmSupport`` below); the MLX track gets both
-from mlx-vlm (``backend/mlx_vlm.py::MlxVlmSupport``), because mlx-vlm's
+from mlx-vlm (``vlm_mlx.py::MlxVlmSupport``), because mlx-vlm's
 processor expands the image placeholder differently from transformers'.
 The stage itself only talks to that support object, so the decode loop
 below is the same on both tracks.
@@ -215,7 +215,7 @@ class SmolVLMStage(StageEngine):
         # 2) Processor + image-token metadata. The MLX track takes both
         # from mlx-vlm; the torch track keeps transformers'.
         if backend.name == "mlx-vlm":
-            from nanovllm_omni.backend.mlx_vlm import MlxVlmSupport
+            from .vlm_mlx import MlxVlmSupport
 
             self.vlm = MlxVlmSupport(self.stage_runner)
         else:

@@ -20,7 +20,7 @@ from nanovllm_omni.config.registry import (
 _MINIMIND_OMNI_FAMILY = "nanovllm_omni.models.minimind_omni"
 _THINKER_MODEL = "MiniMindThinker"
 _THINKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".thinker", "_thinker_stage")
-_TALKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".stage", "_talker_stage")
+_TALKER_FACTORY = (_MINIMIND_OMNI_FAMILY + ".talker_stage", "_talker_stage")
 _CODE2WAV_FACTORY = (_MINIMIND_OMNI_FAMILY + ".code2wav", "_code2wav_stage")
 _PROCESSOR_MODULE = _MINIMIND_OMNI_FAMILY + ".stage_processors"
 

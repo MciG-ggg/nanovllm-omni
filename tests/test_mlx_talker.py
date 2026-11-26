@@ -33,16 +33,16 @@ import mlx.core as mx  # noqa: E402
 
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.backend.base import TalkerRequest  # noqa: E402
-from nanovllm_omni.backend.mlx_talker import (  # noqa: E402
+from nanovllm_omni.models.minimind_omni.talker_mlx import (  # noqa: E402
     MlxTalkerKVCache,
-    MlxTalkerRunner,
     load_mlx_talker,
 )
-from nanovllm_omni.backend.talker_recipe import (  # noqa: E402
+from nanovllm_omni.models.minimind_omni.talker_mlx_runner import MlxTalkerRunner  # noqa: E402
+from nanovllm_omni.models.minimind_omni.talker_recipe import (  # noqa: E402
     AUDIO_PAD_TOKEN,
     AUDIO_STOP_TOKEN,
     NUM_CODEBOOKS,
+    TalkerRequest,
 )
 
 SOURCE = os.environ.get("MINIMIND_PARITY_MODEL_DIR", os.path.expanduser("~/models/minimind-3o"))

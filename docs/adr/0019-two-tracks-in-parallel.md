@@ -35,7 +35,7 @@ attention 的接口留出 varlen 的位置。
 ## 后果
 
 - **两条轨的代码所有权要分清**，否则会出现两个方向同时改 `backend/` 与 stage 层。
-  建议：`nanovllm_omni/backend/mlx_backend.py` 与 MLX 的 kernel 子目录归 MLX 轨；
+  建议：`nanovllm_omni/backend/mlx_runner.py` 与 MLX 的 kernel 子目录归 MLX 轨；
   `backend/base.py`（协议）与 `engine/` 归两边共同维护，改协议要两边都同意。
 - **协议是共享边界，不是共享实现**。ADR 0013 的 `StageRunner` 协议在两条轨上
   都成立，但 MLX 侧因为要 varlen，会需要协议加成员。加协议成员是一次显式的协商，

@@ -227,7 +227,7 @@ def talker2code2wav(payload: Any, prompt: str = "") -> Code2WavInputPayload:
     del prompt
     if isinstance(payload, Code2WavInputPayload):
         return payload
-    from .stage import TalkerOutput
+    from .talker_stage import TalkerOutput
 
     if not isinstance(payload, TalkerOutput):
         raise TypeError(f"talker2code2wav expects TalkerOutput, got {type(payload).__name__}")

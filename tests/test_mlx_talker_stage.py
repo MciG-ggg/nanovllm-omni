@@ -21,10 +21,11 @@ import pytest
 pytest.importorskip("mlx")
 torch = pytest.importorskip("torch")
 
-from nanovllm_omni.backend.base import TalkerRequest  # noqa: E402
-from nanovllm_omni.backend.mlx_backend import MlxBackend  # noqa: E402
-from nanovllm_omni.backend.mlx_talker import MlxTalkerRunner  # noqa: E402
-from nanovllm_omni.backend.talker_recipe import NUM_CODEBOOKS  # noqa: E402
+from nanovllm_omni.models.minimind_omni.talker_mlx_runner import MlxTalkerRunner  # noqa: E402
+from nanovllm_omni.models.minimind_omni.talker_recipe import (  # noqa: E402
+    NUM_CODEBOOKS,
+    TalkerRequest,
+)
 
 MODEL_DIR = os.path.expanduser("~/models/minimind-3o")
 MLX_TALKER = os.path.join(MODEL_DIR, "mlx-talker")
@@ -103,10 +104,10 @@ def _payload():
 def mlx_runner() -> MlxTalkerRunner:
     """One converted MLX talker, dense KV; the runner the stage is supposed to build."""
     _require_checkpoint()
-    return MlxBackend().make_talker_runner(MLX_TALKER, kv="dense")
+    return MlxTalkerRunner(MLX_TALKER, kv="dense")
 
 
-def test_the_mlx_backend_builds_an_mlx_talker_runner(mlx_runner) -> None:
+def test_the_mlx_talker_runner_is_built(mlx_runner) -> None:
     assert isinstance(mlx_runner, MlxTalkerRunner)
 
 
@@ -120,11 +121,11 @@ def test_the_frames_are_eight_codes_and_reproduce_for_a_seed(mlx_runner) -> None
 
 def test_the_frame_count_matches_the_torch_runner(mlx_runner) -> None:
     """Same schedule on both sides: the counts agree though the draws do not."""
-    from nanovllm_omni.backend.torch_backend import TorchBackend
+    from nanovllm_omni.models.minimind_omni.talker_torch import TorchTalkerRunner
 
     _require_checkpoint()
-    torch_runner = TorchBackend(device="cpu", dtype="float16").make_talker_runner(
-        MODEL_DIR, impl="rewritten", kv="dense"
+    torch_runner = TorchTalkerRunner(
+        MODEL_DIR, device="cpu", dtype="float16", impl="rewritten", kv="dense"
     )
 
     torch_frames = torch_runner.generate(_request())
@@ -133,33 +134,27 @@ def test_the_frame_count_matches_the_torch_runner(mlx_runner) -> None:
     assert len(mlx_frames) == len(torch_frames) == EXPECTED_FRAMES
 
 
-def test_the_stage_routes_through_the_mlx_backend(monkeypatch) -> None:
-    """``extra['backend']='mlx'`` reaches ``get_backend('mlx')`` with the MLX directory."""
-    from nanovllm_omni.models.minimind_omni import stage as stage_module
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
+def test_the_stage_builds_the_mlx_runner_with_the_converted_directory(monkeypatch) -> None:
+    """``extra['backend']='mlx'`` makes the stage pick the MLX runner and directory."""
+    from nanovllm_omni.models.minimind_omni import talker_mlx_runner
+    from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
 
     _require_checkpoint()
     consulted: dict[str, object] = {}
 
-    class _FakeBackend:
-        def make_talker_runner(self, model_path, **kwargs):
+    class _FakeRunner:
+        def __init__(self, model_path, **kwargs):
             consulted["running"] = model_path
-            return object()
 
-    def _get_backend(name=None, **kwargs):
-        consulted["name"] = name
-        return _FakeBackend()
-
-    monkeypatch.setattr(stage_module, "get_backend", _get_backend)
+    monkeypatch.setattr(talker_mlx_runner, "MlxTalkerRunner", _FakeRunner)
     TalkerStage(deploy=None, args=_Args())._ensure_runner()
 
-    assert consulted["name"] == "mlx"
     assert consulted["running"] == MLX_TALKER
 
 
 def test_the_stage_can_build_its_mlx_talker_runner_unpatched() -> None:
     """``extra['backend']='mlx'`` must build ``MlxTalkerRunner`` with no local shim."""
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
+    from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
 
     _require_checkpoint()
 

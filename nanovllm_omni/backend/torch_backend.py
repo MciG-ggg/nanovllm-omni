@@ -61,16 +61,5 @@ class TorchBackend:
 
         return StageRunner(model_class=model_class, config=config)
 
-    def make_talker_runner(self, model_path: str, **kwargs: Any) -> Any:
-        """Build the torch talker runner."""
-        from .torch_talker import TorchTalkerRunner
-
-        return TorchTalkerRunner(
-            model_path,
-            device=kwargs.pop("device", None) or self.device,
-            dtype=kwargs.pop("dtype", None) or self.dtype,
-            **kwargs,
-        )
-
 
 __all__ = ["TorchBackend"]

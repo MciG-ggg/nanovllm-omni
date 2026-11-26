@@ -72,11 +72,8 @@ def main() -> None:
 
     import mlx.core as mx
 
-    from nanovllm_omni.backend.mlx_backend import (
-        MlxBackend,
-        generate_mlx,
-        generate_mlx_batch,
-    )
+    from nanovllm_omni.backend.mlx_backend import MlxBackend
+    from nanovllm_omni.backend.mlx_runner import generate_mlx, generate_mlx_batch
     from nanovllm_omni.config.params import SamplingParams
 
     backend = MlxBackend(dtype=args.dtype)

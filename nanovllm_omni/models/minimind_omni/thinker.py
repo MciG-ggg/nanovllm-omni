@@ -60,6 +60,7 @@ class ThinkerAttention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000,
+        attention_cls: type | None = None,
     ) -> None:
         super().__init__()
         tp_size = dist.get_world_size()
@@ -92,9 +93,12 @@ class ThinkerAttention(nn.Module):
             max_position=max_position,
             base=rope_theta,
         )
-        from nanovllm.layers.attention import Attention
+        if attention_cls is None:
+            from nanovllm.layers.attention import Attention
 
-        self.attn = Attention(
+            attention_cls = Attention
+
+        self.attn = attention_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -155,6 +159,7 @@ class ThinkerBlock(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000,
+        attention_cls: type | None = None,
     ) -> None:
         super().__init__()
         self.self_attn = ThinkerAttention(
@@ -165,6 +170,7 @@ class ThinkerBlock(nn.Module):
             head_dim,
             rms_norm_eps,
             rope_theta,
+            attention_cls=attention_cls,
         )
         self.mlp = ThinkerMLP(hidden_size, intermediate_size)
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
@@ -207,6 +213,7 @@ class MiniMindThinkerBackbone(nn.Module):
         rms_norm_eps: float,
         rope_theta: float,
         head_dim: int | None,
+        attention_cls: type | None = None,
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(vocab_size, hidden_size)
@@ -221,6 +228,7 @@ class MiniMindThinkerBackbone(nn.Module):
                     head_dim,
                     rms_norm_eps,
                     rope_theta,
+                    attention_cls=attention_cls,
                 )
                 for _ in range(num_layers)
             ]
@@ -244,12 +252,12 @@ class MiniMindThinker(nn.Module):
     the plain-loader branch.
     """
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, attention_cls: type | None = None) -> None:
         """HF config in, same contract as ``Qwen3ForCausalLM(hf_config)``.
 
-        ``ModelRunner`` always calls ``model_class(hf_config)``. Keyword
-        construction is gone on purpose — a second signature would drift
-        from the fork.
+        ``ModelRunner`` calls ``model_class(hf_config)``; a backend that
+        needs other attention binds ``attention_cls`` with
+        ``functools.partial`` instead of changing the call.
         """
         super().__init__()
         vocab_size = config.vocab_size
@@ -286,6 +294,7 @@ class MiniMindThinker(nn.Module):
             rms_norm_eps=rms_norm_eps,
             rope_theta=rope_theta,
             head_dim=head_dim,
+            attention_cls=attention_cls,
         )
         self.lm_head = ParallelLMHead(vocab_size, hidden_size)
         # minimind-3o ships with ``tie_word_embeddings=True``; alias

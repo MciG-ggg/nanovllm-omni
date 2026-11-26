@@ -1,7 +1,7 @@
-"""The MLX-VLM backend: SmolVLM's vision tower and text decoder on MLX.
+"""SmolVLM's MLX track: the vision tower and text decoder on MLX.
 
 mlx-vlm ships SmolVLM as a subclass of its Idefics3 model -- the 500M
-checkpoint declares ``model_type: idefics3`` -- so this backend drives
+checkpoint declares ``model_type: idefics3`` -- so this track drives
 mlx-vlm's model, processor and KV cache instead of porting the SigLIP
 tower by hand. The vision tower and the connector run in MLX:
 ``Model.get_input_embeddings`` returns the merged text+image embedding,
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .base import BackendCapabilities
+from ...backend.base import BackendCapabilities
 
 
 @dataclass
@@ -243,10 +243,6 @@ class MlxVlmBackend:
 
     def make_stage_runner(self, model_class: type, config: Any) -> MlxVlmStageRunner:
         return MlxVlmStageRunner(model_class=model_class, config=config)
-
-    def make_talker_runner(self, model_path: str, **kwargs: Any) -> Any:
-        """SmolVLM has no talker stage."""
-        raise NotImplementedError("the MLX VLM backend has no talker runner")
 
 
 __all__ = [

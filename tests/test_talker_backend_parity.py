@@ -1,7 +1,7 @@
 """The talker runner must reproduce the frames the stage used to emit.
 
 The fixture was captured from the stage's own decode loop before the
-loop moved into the backend. Bitwise equality here is the evidence that
+loop moved into the runner. Bitwise equality here is the evidence that
 the move changed nothing -- the CUDA gates cannot run on a Mac, so this
 is the local half of the same question.
 """
@@ -42,13 +42,14 @@ def _bridge(seed: int, length: int) -> torch.Tensor:
 @pytest.mark.parametrize("case", CASES)
 def test_runner_reproduces_the_pre_backend_frames(case: str) -> None:
     """BUILD / OPERATE / CHECK: the runner's frames equal the captured ones."""
-    from nanovllm_omni.backend import get_backend
-    from nanovllm_omni.backend.base import TalkerRequest
+    from nanovllm_omni.models.minimind_omni.talker_recipe import TalkerRequest
+    from nanovllm_omni.models.minimind_omni.talker_torch import TorchTalkerRunner
 
     entry = _fixture()[case]
     model_dir = _require_checkpoint()
-    backend = get_backend("torch", device="cpu", dtype="float16")
-    runner = backend.make_talker_runner(model_dir, impl="rewritten", kv=entry["kv"])
+    runner = TorchTalkerRunner(
+        model_dir, device="cpu", dtype="float16", impl="rewritten", kv=entry["kv"]
+    )
 
     bridge = _bridge(entry["bridge_seed"], PROMPT_LEN + entry["num_steps"])
     frames = runner.generate(
@@ -66,10 +67,10 @@ def test_runner_reproduces_the_pre_backend_frames(case: str) -> None:
 
 def test_the_stage_and_the_runner_agree() -> None:
     """The stage is a thin shell: it must produce the runner's frames."""
-    from nanovllm_omni.backend import get_backend
-    from nanovllm_omni.backend.base import TalkerRequest
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
     from nanovllm_omni.models.minimind_omni.stage_processors import TalkerInputPayload
+    from nanovllm_omni.models.minimind_omni.talker_recipe import TalkerRequest
+    from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
+    from nanovllm_omni.models.minimind_omni.talker_torch import TorchTalkerRunner
 
     entry = _fixture()["dense_seed42_steps12"]
     model_dir = _require_checkpoint()
@@ -97,8 +98,9 @@ def test_the_stage_and_the_runner_agree() -> None:
     stage = TalkerStage(deploy=None, args=_Args())
     stage_output = stage(payload, _Sampling())
 
-    backend = get_backend("torch", device="cpu", dtype="float16")
-    runner = backend.make_talker_runner(model_dir, impl="rewritten", kv="dense")
+    runner = TorchTalkerRunner(
+        model_dir, device="cpu", dtype="float16", impl="rewritten", kv="dense"
+    )
     frames = runner.generate(
         TalkerRequest(
             bridge=bridge,

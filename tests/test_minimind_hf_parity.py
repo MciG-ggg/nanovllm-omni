@@ -96,7 +96,8 @@ def _vendor_text_and_bridge(torch, prompt_ids: list[int]):
 def _ours_text_bridge_and_codes(torch, prompt: str):
     """Greedy text tokens, bridge rows, and audio codes from this repo."""
     from nanovllm_omni import Omni, SamplingParams
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage, ThinkerStage
+    from nanovllm_omni.models.minimind_omni.stage import ThinkerStage
+    from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
 
     torch.manual_seed(SEED)
     omni = Omni(MODEL_DIR, mimi_model_id=MIMI_DIR, device="cuda")

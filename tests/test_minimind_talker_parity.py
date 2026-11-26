@@ -31,13 +31,13 @@ from nanovllm_omni.models.minimind_omni.code2wav import (  # noqa: E402
     MiniMindOmniCode2Wav,
     load_mimi_codec,
 )
-from nanovllm_omni.models.minimind_omni.stage import TalkerStage  # noqa: E402
 from nanovllm_omni.models.minimind_omni.stage_processors import (  # noqa: E402
     Code2WavInputPayload,
     TalkerInputPayload,
     ThinkerStageOutput,
     thinker2talker,
 )
+from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage  # noqa: E402
 
 MODEL = os.environ.get("MINIMIND_PARITY_MODEL_DIR", os.path.expanduser("~/models/minimind-3o"))
 MIMI = os.environ.get("MINIMIND_PARITY_MIMI_DIR", os.path.expanduser("~/models/mimi"))
@@ -72,8 +72,8 @@ import sys
 import torch
 
 from nanovllm_omni import Omni, SamplingParams
-from nanovllm_omni.backend.torch_talker import TorchTalkerRunner
-from nanovllm_omni.models.minimind_omni.stage import TalkerStage
+from nanovllm_omni.models.minimind_omni.talker_torch import TorchTalkerRunner
+from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
 
 codes = []
 topk_candidates = []
@@ -302,9 +302,8 @@ def test_rewritten_audio_logits_match_vendor() -> None:
     if not os.path.isdir(MODEL):
         pytest.skip(f"MiniMind weights not found: {MODEL}")
 
-    from nanovllm_omni.backend.base import TalkerRequest
-    from nanovllm_omni.backend.talker_recipe import NUM_CODEBOOKS
-    from nanovllm_omni.backend.torch_talker import TorchTalkerRunner
+    from nanovllm_omni.models.minimind_omni.talker_recipe import NUM_CODEBOOKS, TalkerRequest
+    from nanovllm_omni.models.minimind_omni.talker_torch import TorchTalkerRunner
 
     vendor = TorchTalkerRunner(MODEL, device="cuda", dtype="float16", impl="vendor")
     rewritten = TorchTalkerRunner(MODEL, device="cuda", dtype="float16", impl="rewritten")

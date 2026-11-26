@@ -138,7 +138,7 @@ forward，所以它没有 row。
 CUDA 轨早就有这个问题的解法（`recapture_bridge_minimind`）：decode 结束后，对每条
 请求**整条序列重跑一次 prefill**，取那一层的 hidden。MLX 侧照做。
 
-`MlxStageRunner.recapture_bridge`（`backend/mlx_backend.py`）做这件事，关键是它用
+`MlxStageRunner.recapture_bridge`（`backend/mlx_runner.py`）做这件事，关键是它用
 **一份全新的 cache**，不碰 `self._cache`——正在跑的 decode 状态不受影响。
 
 实测（M2 Air，8 层 checkpoint，prompt 22 token + 生成 16 token）：

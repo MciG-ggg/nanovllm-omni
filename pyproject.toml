@@ -83,7 +83,7 @@ mlx = [
     "Pillow>=10.0",
     "numpy>=1.24",
     "safetensors>=0.4",
-    # `_as_mx` in backend/mlx_talker.py goes through numpy, and code2wav
+    # `_as_mx` in models/minimind_omni/talker_mlx_runner.py goes through numpy, and code2wav
     # still needs torch + transformers for the Mimi codec (ADR 0024).
     "torch>=2.0",
     # mlx-lm 0.32.2 imports transformers' nested `rope_parameters` shape;

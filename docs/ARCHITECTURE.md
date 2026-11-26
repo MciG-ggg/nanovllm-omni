@@ -72,11 +72,13 @@ rebuilt.
 | `engine/runner.py` | Sequential stage execution and deploy merge | Single-replica in-process runner |
 | `engine/executor.py` | Thread-pool and semaphore wrapper | Async transport around the runner |
 | `engine/stage_runner.py` | Fork-AR adapter (`StageRunner`, `get_stage_config`, `_ensure_dist`) — composes fork `ModelRunner` + `Sampler` and exposes the fork-attention lifecycle as discrete methods | New — fork has no local equivalent |
-| `nanovllm_omni/backend/` | Backend protocols, registry, and Torch / MLX AR and talker runners | Local framework-specific stage seam |
+| `nanovllm_omni/backend/` | Backend protocols, registry, and the Torch / MLX AR runners — the seam only; model-family code lives under `models/<family>/` | Local framework-specific stage seam |
 | `nanovllm_omni/backend/mlx_kernel/` | Metal paged decode attention and KV-store kernels with a compile gate; not yet wired into `MlxStageRunner` | Standalone MLX kernel implementation; numerical gate in `tests/test_mlx_kernel.py` |
 | `models/minimind_omni/bundle.py` | Bundle loader: HF model + Mimi codec + tokenizer into one `MinimindBundle` | MiniMind-O only |
 | `models/minimind_omni/thinker.py` | `MiniMindThinker`: 12-layer AR stack on fork layers; bridge hidden state capture into a registered buffer | MiniMind-O only |
 | `models/minimind_omni/talker.py` | Repository-owned MiniMind talker rewrite; dense is the default and windowed KV is optional | MiniMind-O only |
+| `models/minimind_omni/talker_recipe.py` | Talker contract: the emission gate, the token constants, `TalkerRequest` / `TalkerRunner` — framework-free | MiniMind-O only |
+| `models/minimind_omni/talker_torch.py`, `talker_mlx.py`, `talker_mlx_runner.py` | The talker's per-device arms: the torch runner, the MLX model port and the MLX runner | MiniMind-O only |
 | `models/minimind_omni/code2wav.py` | Mimi codec decode + WAV envelope | MiniMind-O only |
 | `models/minimind_omni/pipeline.py` | Three-stage `PipelineConfig` declaration | MiniMind-O only |
 | `models/minimind_omni/stage.py` | `ThinkerStage` / `TalkerStage` — high-level stage classes; the repository rewrite is the default talker, with the vendor arm available for parity checks | MiniMind-O only |
@@ -84,6 +86,7 @@ rebuilt.
 | `models/minimind_omni/stage_processors.py` | `ThinkerStageOutput` / `TalkerInputPayload` / `Code2WavInputPayload` — frozen dataclasses + pure-function converters | MiniMind-O only |
 | `models/minimind_omni/hf_config.py` | `MiniMindOConfig` — the repo's own config class for `model_type: minimind-o`; registered so the hub's `auto_map` file never runs | MiniMind-O only |
 | `models/smolvlm/{smolvlm.py, stage.py, pipeline.py}` | Complete SmolVLM (`SigLIP` vision tower + fork-style `SmolLM2` text stack + connector), prefill/decode stage, single-stage `LLM_AR` pipeline | SmolVLM only |
+| `models/smolvlm/vlm_mlx.py` | SmolVLM's MLX track: the mlx-vlm stage runner, the processor + image merge, and the `mlx-vlm` backend the registry names | SmolVLM only |
 | `models/sd_turbo/{stage.py, pipeline.py}` | SD-Turbo 1-step image generation as a `DIFFUSION`-kind stage implementing the 4-method contract (`prepare_encode` / `denoise_step` / `step_scheduler` / `post_decode`) | SD-Turbo only |
 | `models/smolvla/{vlm_stage.py, action_stage.py, stage_processors.py, pipeline.py, policy.py}` | Two-stage VLA: `vlm` (`LLM_AR`) → bridge payload → `action` (`DIFFUSION`, flow-matching Euler over the action expert) | SmolVLA only |
 | `diffusion/interface.py` | `DiffusionPipeline` Protocol / `StepState` / `DiffusionOutput` — 4-method contract for DIFFUSION-kind stages | New — fork has no equivalent |

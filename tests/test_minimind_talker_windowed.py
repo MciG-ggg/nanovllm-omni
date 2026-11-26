@@ -47,7 +47,7 @@ def _require_checkpoint() -> None:
 
 
 def _stage(kv: str):
-    from nanovllm_omni.models.minimind_omni.stage import TalkerStage
+    from nanovllm_omni.models.minimind_omni.talker_stage import TalkerStage
 
     return TalkerStage(
         deploy=None,

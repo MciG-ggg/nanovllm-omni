@@ -89,7 +89,7 @@ def check(source: str, output: str) -> float:
     """Compare the converted model's logits against the torch model's."""
     import mlx.core as mx
 
-    from nanovllm_omni.backend.mlx_talker import load_mlx_talker
+    from nanovllm_omni.models.minimind_omni.talker_mlx import load_mlx_talker
     from nanovllm_omni.models.minimind_omni.talker import load_talker
 
     torch_model = load_talker(source, device="cpu", dtype=torch.float16)

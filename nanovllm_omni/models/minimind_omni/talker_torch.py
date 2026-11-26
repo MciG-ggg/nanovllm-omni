@@ -1,8 +1,8 @@
 """The MiniMind talker on torch: the model plus the staggered decode loop.
 
 The loop is the vendor's ``stream_generate`` schedule, moved out of the
-stage so the stage can pick a backend the way it does for the thinker.
-It lives here rather than in the family because the same schedule on MLX
+stage so the stage can pick a runner the way it does for the thinker.
+It lives here rather than in the stage because the same schedule on MLX
 needs different array ops, and a runner per device is the honest form.
 
 The recipe itself -- eight codebooks, the emission gate, the token
@@ -14,12 +14,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .base import TalkerRequest
 from .talker_recipe import (
     AUDIO_PAD_TOKEN,
     AUDIO_SPK_TOKEN,
     AUDIO_STOP_TOKEN,
     NUM_CODEBOOKS,
+    TalkerRequest,
     can_emit_frame,
 )
 
@@ -55,7 +55,7 @@ class TorchTalkerRunner:
         import torch
 
         if self._impl == "rewritten":
-            from ..models.minimind_omni.talker import load_talker
+            from .talker import load_talker
 
             return load_talker(model_path, device=device, dtype=getattr(torch, dtype))
 
@@ -157,7 +157,7 @@ class TorchTalkerRunner:
 
         cache = None
         if self._kv == "windowed":
-            from ..models.minimind_omni.talker import TalkerKVCache
+            from .talker import TalkerKVCache
 
             cache = TalkerKVCache(len(model.layers))
 

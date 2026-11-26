@@ -1,4 +1,4 @@
-"""The MiniMind talker decode recipe, shared by every backend.
+"""The MiniMind talker contract, shared by every device track.
 
 Framework-free on purpose: the MLX runner imports this module, and
 importing torch on the Mac track would pull a second array framework
@@ -10,6 +10,9 @@ the step reaches ``i``; a frame is emitted once all eight are active.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
 NUM_CODEBOOKS = 8
 AUDIO_PAD_TOKEN = 2049
@@ -34,6 +37,40 @@ def can_emit_frame(stop_positions: list[int | None], step: int) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class TalkerRequest:
+    """One talker decode: the thinker's bridge rows in, audio codes out."""
+
+    bridge: Any
+    """Bridge hidden states, ``[T, hidden]`` -- one row per thinker position."""
+
+    num_steps: int
+    """How many decode steps to run; the emission gate opens at step 8."""
+
+    start_pos: int
+    """Where the generated rows start; the prompt occupies everything before."""
+
+    temperature: float = 0.2
+    """Audio temperature. The vendor default is 0.2, not the text one."""
+
+    seed: int | None = None
+    """Seed for the audio draw; ``None`` leaves the device's own stream."""
+
+    speaker_embedding: Any | None = None
+    """Optional speaker embedding, used at the speaker-token positions."""
+
+    repetition_penalty: float = 1.05
+    """Vendor's last-3 penalty, applied per codebook."""
+
+
+@runtime_checkable
+class TalkerRunner(Protocol):
+    """Decodes one talker request on one device."""
+
+    def generate(self, request: TalkerRequest) -> list[list[int]]:
+        """Return the emitted frames; one list of eight codes per frame."""
+
+
 __all__ = [
     "AUDIO_PAD_TOKEN",
     "AUDIO_REPETITION_PENALTY",
@@ -41,5 +78,7 @@ __all__ = [
     "AUDIO_STOP_TOKEN",
     "AUDIO_VENDOR_TEMPERATURE",
     "NUM_CODEBOOKS",
+    "TalkerRequest",
+    "TalkerRunner",
     "can_emit_frame",
 ]

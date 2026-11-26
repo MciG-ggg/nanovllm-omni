@@ -46,3 +46,6 @@ backend 抽象做完之后，两条路摆在面前：
 - Mac 轨的模型覆盖面天然更小：4 族里只有 MiniMind-O 的 thinker 与 SmolVLM 的语言侧
   有 MLX 等价物；talker、code2wav（Mimi）、SD-Turbo（diffusers）、SmolVLA（lerobot）没有。
 - "都要优化"意味着 Mac 轨不接受 dense padded 的降级方案，见 ADR 0015。
+  > 已被 ADR 0027 修订（2026-11-11）：实测显示 MiniMind-O 尺寸上 padding 的代价
+  > 远小于 ADR 0015 引的 +143%，Mac 轨改为「不接受**无上界**的 padded」，
+  > 上界由长度分桶与 max context 给。

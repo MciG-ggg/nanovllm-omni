@@ -259,6 +259,9 @@ block table 非连续且带 `-1` 洞）：
 
 - **kernel 还没接进 `MlxStageRunner`**（本轮刻意不碰 `mlx_runner.py`，避免和另一个
   subagent 撞文件）。接线是下一轮。
+  > 已被 ADR 0027 修订（2026-11-11）：实测三臂后，**暂不接线**。我们的 paged kernel
+  > 每 head-key 比 MLX 的 SDPA 贵 1.5–21 倍，接进去 Mac 轨会变慢。
+  > 接线门槛：paged 的每 head-key 成本要低于 SDPA 的一半。
 - prefill 的 varlen kernel 没写（本轮只做 decode）。
 - 上面说的「8 池各自 rebind」的测量没做。
 - trace 次数没测。

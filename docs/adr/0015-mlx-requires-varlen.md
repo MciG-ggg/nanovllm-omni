@@ -1,7 +1,8 @@
 # ADR 0015: MLX backend 必须有 varlen——移植 vllm-metal 的 attention 子系统
 
 - Status: Accepted（**实现路径已被 ADR 0021 取代**：不移植 `vllm-metal`，改为自研最小集；
-  本文「MLX 必须有 varlen」的结论不变）
+  **本文「MLX 必须有 varlen」的结论已被 ADR 0027 修订**：在 MiniMind-O 的尺寸上实测，
+  padding 的代价远小于本文引的 +143%，Mac 轨改为「不接受无上界的 padded」）
 - Date: 2026-11-09
 - 关联: ADR 0013（backend 接缝）、0014（双轨目标）、0021（kernel 自研最小集）
 

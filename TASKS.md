@@ -40,7 +40,7 @@
 
 - [x] **CB-3 接上 `BatchKVCache.extend`**
   新请求单独 prefill，`MlxStageRunner.forward` 在 `is_prefill` 且已有 cache 时
-  走 extend（`backend/mlx_backend.py:199`）；右对齐补齐由 MLX 的 `extend` 完成。
+  走 extend（`backend/mlx_runner.py`）；右对齐补齐由 MLX 的 `extend` 完成。
   调用方是 `ThinkerDecodeSession`。测试：
   `tests/test_mlx_backend.py::test_mlx_session_extends_a_running_cache_when_a_request_joins`
   （extend 后 2 行，offset `[4,2]`，left_padding `[0,2]`）。
@@ -126,29 +126,32 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
 - [ ] **MX-1 把 Metal kernel 接进 `MlxStageRunner`**
   `backend/mlx_kernel/` 有 352 行（`kernels.py` 168 + `build.py` 158），但
   **kernel 尚未接进 `MlxStageRunner`**。ADR 0023 明确记了这条「未做」。
+  **ADR 0027 实测后暂缓**：paged kernel 每 head-key 比 MLX SDPA 贵 1.5–21 倍，
+  16 个格子里 paged 一个都没赢。门槛：paged 成本要低于 SDPA 的一半才接。
   证据：`docs/adr/0023-mlx-track-order.md:101`、`docs/adr/0023-mlx-track-order.md`「未做」
 
 - [ ] **MX-2 写 prefill 的 varlen kernel**
   ADR 0021 的自研最小集里，decode 已做、prefill 没写。ADR 0023「未做」明列。
+  ADR 0027：decode 侧都没有划算的证据，prefill 侧先不做。
   证据：`docs/adr/0023-mlx-track-order.md`「未做」
 
 - [ ] **MX-3 `MlxVlmBackend` 只能单序列，要能批**
-  `max_batch=1`（`nanovllm_omni/backend/mlx_vlm.py:220`），单序列没有调度可言。
+  `max_batch=1`（`nanovllm_omni/models/smolvlm/vlm_mlx.py:220`），单序列没有调度可言。
   ADR 0025 边界里明确「不改 `MlxVlmBackend`」。
   依赖：CB-3（要有 join 机制）。
-  证据：`nanovllm_omni/backend/mlx_vlm.py:220`
+  证据：`nanovllm_omni/models/smolvlm/vlm_mlx.py:220`
 
 - [ ] **MX-4 抽 `MlxRunnerBase`，消掉两个 MLX runner 的重复**
-  `mlx_vlm.py` 与 `mlx_backend.py` 有 14 个同名方法，`prepare_prefill` /
+  `vlm_mlx.py` 与 `mlx_runner.py` 有 14 个同名方法，`prepare_prefill` /
   `prepare_decode` / `prepare_sample` / `sample` / `set_context` / `reset_context`
   基本逐行一样。`mlx_vlm.py` 245 行里约一半是拷贝，能省 ~100 行。
   根因是按库切开而没按能力切——正确切法是按能力抽基类，子类只覆写 `__init__`
   （加载）和 `forward`（cache 类型不同）。
-  证据：`backend/mlx_vlm.py:76-134` 对 `backend/mlx_backend.py:142-209`
+  证据：`models/smolvlm/vlm_mlx.py:76-134` 对 `backend/mlx_runner.py`
 
 - [ ] **MX-5 合并两处采样配方**
   `_apply_repetition_penalty` + top-p 在 `nanovllm_omni/models/minimind_omni/stage_runner.py:83`（`_apply_repetition_penalty`）
-  与 `nanovllm_omni/backend/mlx_backend.py:327`（mlx 侧）各写了一遍。
+  与 `nanovllm_omni/backend/mlx_runner.py`（mlx 侧）各写了一遍。
   ADR 0021 说 token 级一致靠「采样参数与停止条件的精确对齐」，但现在对齐全靠人眼比对两份代码。
   这条直接关系到项目承诺的正确性。
   证据：以上两处
@@ -179,6 +182,7 @@ ADR 0018 定了三步，顺序是「权重 mmap → 量化 → KV cache SSD」�
 
 - [x] **DR-1 ADR 0013 的 backend 表没提 `mlx-vlm`** —— 已修（`0ce7896`）
   补了 `mlx-vlm` backend、`make_talker_runner`、模型族与 backend 的组合边界。
+  2026-11-11：`make_talker_runner` 已从 `Backend` 协议删掉，talker 臂归 MiniMind 族。
 
 - [x] **DR-2 ADR 0013 的工作量表已过期** —— 已修（`0ce7896`）
   标了部分完成并指向 ADR 0025。

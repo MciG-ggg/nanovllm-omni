@@ -92,6 +92,7 @@
 
 | 文件 | 内容 |
 |---|---|
+| [`ascend-runbook.md`](dev/ascend-runbook.md) | 昇腾 910B 第三轨的操作步骤（租机、环境、bench、产物回收） |
 | [`mlx-track.md`](dev/mlx-track.md) | Mac 轨怎么装 mlx / mlx-lm、怎么跑、怎么装 Metal Toolchain |
 | [`mlx-varlen-kernel-interface.md`](dev/mlx-varlen-kernel-interface.md) | 自研 Metal varlen kernel 的接口设计（尚未实现） |
 | [`nanovllm-omni-paged-engine.md`](dev/nanovllm-omni-paged-engine.md) | paged 引擎的形态 |

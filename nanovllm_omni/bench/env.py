@@ -26,25 +26,46 @@ def git_commit() -> str:
 
 
 def gpu_label() -> str:
-    """``"<name> (<mem> GB, driver <ver>)"`` or ``"cpu"`` when CUDA isn't present."""
+    """``"<name> (<mem> GB, driver <ver>)"`` or ``"cpu"`` when no accelerator is present."""
     try:
         import torch
     except ImportError:
         return "cpu"
-    if not torch.cuda.is_available():
-        return "cpu"
-    name = torch.cuda.get_device_name(0)
-    try:
-        driver = (
-            subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-                stderr=subprocess.DEVNULL,
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        try:
+            driver = (
+                subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode("ascii")
+                .strip()
+                .splitlines()[0]
             )
-            .decode("ascii")
-            .strip()
-            .splitlines()[0]
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError, IndexError):
-        driver = "?"
-    mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    return f"{name} ({mem_gb:.0f} GB, driver {driver})"
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError, IndexError):
+            driver = "?"
+        mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        return f"{name} ({mem_gb:.0f} GB, driver {driver})"
+    try:
+        # ``torch.npu`` exists only after torch_npu registers it.
+        import torch_npu  # noqa: F401
+    except ImportError:
+        return "cpu"
+    if not torch.npu.is_available():
+        return "cpu"
+    name = torch.npu.get_device_name(0)
+    mem_gb = torch.npu.get_device_properties(0).total_memory / (1024**3)
+    return f"npu: {name} ({mem_gb:.0f} GB, driver {_npu_driver()})"
+
+
+def _npu_driver() -> str:
+    """Best-effort version line from ``npu-smi info``, or ``"?"``."""
+    try:
+        out = subprocess.check_output(["npu-smi", "info"], stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "?"
+    for line in out.decode("utf-8", "replace").splitlines():
+        if "Version" in line:
+            return line.split(":", 1)[-1].strip()
+    return "?"

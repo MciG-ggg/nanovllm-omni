@@ -94,18 +94,33 @@ class RunResult:
         return row
 
 
-def _maybe_reset_cuda_peak() -> None:
+def _device_module(device: str | None) -> Any:
+    """``torch.npu`` for an NPU device, ``torch.cuda`` otherwise.
+
+    Every non-NPU device keeps the legacy CUDA-only behaviour, so CUDA and
+    MLX numbers are unchanged.
+    """
     import torch
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+    if device is not None and device.startswith("npu"):
+        try:
+            import torch_npu  # noqa: F401
+        except ImportError:
+            return None
+        return torch.npu if torch.npu.is_available() else None
+    return torch.cuda if torch.cuda.is_available() else None
 
 
-def _vram_peak_mb() -> float:
-    import torch
+def _maybe_reset_peak(device: str | None = None) -> None:
+    module = _device_module(device)
+    if module is not None:
+        module.reset_peak_memory_stats()
 
-    if torch.cuda.is_available():
-        return torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+
+def _peak_mem_mb(device: str | None = None) -> float:
+    module = _device_module(device)
+    if module is not None:
+        return module.max_memory_allocated() / (1024.0 * 1024.0)
     return 0.0
 
 
@@ -115,25 +130,25 @@ def _normalize_prompt(prompt: BenchPrompt | str) -> BenchPrompt:
     return BenchPrompt(id="ad-hoc", text=str(prompt))
 
 
-def _cuda_event_pair() -> tuple[Any, Any]:
-    """Return ``(start_event, end_event)`` or ``(None, None)`` if CUDA is unavailable."""
-    import torch
-
-    if not torch.cuda.is_available():
+def _device_event_pair(device: str | None = None) -> tuple[Any, Any]:
+    """Return ``(start_event, end_event)`` or ``(None, None)`` if unavailable."""
+    module = _device_module(device)
+    if module is None:
         return None, None
     return (
-        torch.cuda.Event(enable_timing=True),
-        torch.cuda.Event(enable_timing=True),
+        module.Event(enable_timing=True),
+        module.Event(enable_timing=True),
     )
 
 
-def _measure_cuda_ms(start: Any, end: Any) -> float:
-    """Return milliseconds between two CUDA events; 0 if either is None."""
-    import torch
-
+def _measure_device_ms(start: Any, end: Any, device: str | None = None) -> float:
+    """Return milliseconds between two device events; 0 if either is None."""
     if start is None or end is None:
         return 0.0
-    torch.cuda.synchronize()
+    module = _device_module(device)
+    if module is None:
+        return 0.0
+    module.synchronize()
     return float(start.elapsed_time(end))
 
 
@@ -152,9 +167,9 @@ def run_one(
     """Drive one prompt through the four helpers and record per-stage times.
 
     Seeds torch's RNG so repeated calls with the same ``seed`` produce the
-    same audio bytes. Resets and reads the CUDA peak memory counter when
-    CUDA is available. Wraps the ``generate`` and ``decode`` helper calls
-    with ``torch.cuda.Event`` to capture GPU-only time per stage.
+    same audio bytes. Resets and reads the device peak memory counter when
+    one is available. Wraps the ``generate`` and ``decode`` helper calls
+    with device events to capture accelerator-only time per stage.
 
     Raises ``ValueError`` if the model yields more than ``max_tokens +
     max_tokens_tolerance`` audio frames.
@@ -165,7 +180,8 @@ def run_one(
 
     p = _normalize_prompt(prompt)
     torch.manual_seed(seed)
-    _maybe_reset_cuda_peak()
+    device = bundle.device
+    _maybe_reset_peak(device)
 
     eos_token_id = getattr(bundle.tokenizer, "eos_token_id", None)
 
@@ -183,7 +199,7 @@ def run_one(
         input_ids_t = torch.tensor(input_ids, device=bundle.device)
         t_tokenize_ms = (time.perf_counter() - t0) * 1000.0
 
-        gen_start, gen_end = _cuda_event_pair()
+        gen_start, gen_end = _device_event_pair(device)
         if gen_start is not None:
             gen_start.record()
         t0 = time.perf_counter()
@@ -201,13 +217,13 @@ def run_one(
         t_generate_ms = (time.perf_counter() - t0) * 1000.0
         if gen_end is not None:
             gen_end.record()
-        t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
+        t_generate_cuda_ms = _measure_device_ms(gen_start, gen_end, device)
 
         if not frames:
             t_decode_ms = 0.0
             t_decode_cuda_ms = 0.0
         else:
-            dec_start, dec_end = _cuda_event_pair()
+            dec_start, dec_end = _device_event_pair(device)
             if dec_start is not None:
                 dec_start.record()
             t0 = time.perf_counter()
@@ -215,7 +231,7 @@ def run_one(
             t_decode_ms = (time.perf_counter() - t0) * 1000.0
             if dec_end is not None:
                 dec_end.record()
-            t_decode_cuda_ms = _measure_cuda_ms(dec_start, dec_end)
+            t_decode_cuda_ms = _measure_device_ms(dec_start, dec_end, device)
 
     if len(frames) > max_tokens + max_tokens_tolerance:
         raise ValueError(
@@ -243,7 +259,7 @@ def run_one(
             decode_cuda_ms=t_decode_cuda_ms,
         ),
         frames=len(frames),
-        vram_peak_mb=_vram_peak_mb(),
+        vram_peak_mb=_peak_mem_mb(device),
         audio_bytes=wav_bytes,
     )
 
@@ -257,6 +273,7 @@ def run_one_full(
     temperature: float = 0.7,
     top_p: float = 0.9,
     run_idx: int = 0,
+    device: str | None = None,
 ) -> RunResult:
     """Time the full three-stage E2E through ``Omni.generate`` (real weights).
 
@@ -272,9 +289,9 @@ def run_one_full(
 
     p = _normalize_prompt(prompt)
     torch.manual_seed(seed)
-    _maybe_reset_cuda_peak()
+    _maybe_reset_peak(device)
 
-    gen_start, gen_end = _cuda_event_pair()
+    gen_start, gen_end = _device_event_pair(device)
     if gen_start is not None:
         gen_start.record()
     t0 = time.perf_counter()
@@ -299,11 +316,11 @@ def run_one_full(
             run_idx=run_idx,
             times=StageTimes(generate_ms=t_generate_ms, wall_ms=t_generate_ms),
             frames=0,
-            vram_peak_mb=_vram_peak_mb(),
+            vram_peak_mb=_peak_mem_mb(device),
         )
     if gen_end is not None:
         gen_end.record()
-    t_generate_cuda_ms = _measure_cuda_ms(gen_start, gen_end)
+    t_generate_cuda_ms = _measure_device_ms(gen_start, gen_end, device)
 
     # Per-stage wall ms ride on the outputs' public ``custom_output`` seam:
     # the entrypoint copies ``PipelineRunner.run``'s stage_ms dict onto
@@ -352,7 +369,7 @@ def run_one_full(
             wall_ms=t_wall_ms,
         ),
         frames=frames,
-        vram_peak_mb=_vram_peak_mb(),
+        vram_peak_mb=_peak_mem_mb(device),
         audio_bytes=wav_bytes,
         stage_ms=stage_ms,
     )
@@ -380,6 +397,7 @@ def run_batch(
     max_tokens: int = 16,
     temperature: float = 0.7,
     top_p: float = 0.9,
+    device: str | None = None,
 ) -> dict[str, Any]:
     """Time one call that submits every prompt at once.
 
@@ -393,7 +411,7 @@ def run_batch(
     from nanovllm_omni import SamplingParams
 
     torch.manual_seed(seed)
-    _maybe_reset_cuda_peak()
+    _maybe_reset_peak(device)
     sp = SamplingParams(
         max_tokens=max_tokens,
         temperature=temperature,
@@ -417,7 +435,7 @@ def run_batch(
         "wall_ms": wall_ms,
         "per_request_ms": wall_ms / len(prompts),
         "req_per_s": 1000.0 * len(prompts) / wall_ms,
-        "vram_peak_mb": _vram_peak_mb(),
+        "vram_peak_mb": _peak_mem_mb(device),
         "stage_ms": stage_ms,
         "audios": audios,
     }

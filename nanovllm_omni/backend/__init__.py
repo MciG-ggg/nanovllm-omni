@@ -1,11 +1,12 @@
 """Backend registry: pick the array framework a stage runs on.
 
-Two implementations exist -- ``torch`` (the fork's CUDA path) and ``mlx``
-(Apple Silicon). Both are imported lazily inside their own module, so
-importing this package pulls in neither torch nor mlx.
+Three implementations exist -- ``torch`` (the fork's CUDA path), ``mlx``
+(Apple Silicon) and ``ascend`` (Ascend NPU through ``torch_npu``). All
+are imported lazily inside their own module, so importing this package
+pulls in no framework.
 
-The default is ``torch``, and selecting it must leave the pipeline
-byte-identical to the pre-backend code path.
+The default is ``torch`` unless ``torch.npu`` is live, and selecting
+``torch`` must leave the pipeline byte-identical to the pre-backend path.
 
 This package holds the seam and nothing else: a backend answers "which
 device, which dtype, which shapes can one forward carry". Model-family
@@ -43,19 +44,37 @@ def get_backend(name: str | None = None, **kwargs: Any) -> Backend:
     run a Mac request on CUDA and fail much later, further from the cause.
     """
     if name is None:
-        name = "torch"
+        name = _default_backend_name()
     if name not in _FACTORIES:
         raise ValueError(f"unknown backend {name!r}; available: {available_backends()}")
     return _FACTORIES[name](**kwargs)
 
 
+def _default_backend_name() -> str:
+    """Pick ``ascend`` when ``torch.npu`` is live, ``torch`` otherwise."""
+    try:
+        import torch
+    except ImportError:
+        return "torch"
+    try:
+        # ``torch.npu`` exists only after torch_npu registers it.
+        import torch_npu  # noqa: F401
+    except ImportError:
+        return "torch"
+    if torch.npu.is_available():
+        return "ascend"
+    return "torch"
+
+
 def _register_builtin_backends() -> None:
+    from .ascend_backend import AscendBackend
     from .mlx_backend import MlxBackend
     from .torch_backend import TorchBackend
 
     register_backend("torch", TorchBackend)
     register_backend("mlx", MlxBackend)
     register_backend("mlx-vlm", _mlx_vlm_backend)
+    register_backend("ascend", AscendBackend)
 
 
 def _mlx_vlm_backend(**kwargs: Any) -> Backend:

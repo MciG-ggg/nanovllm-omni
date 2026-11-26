@@ -88,17 +88,40 @@ def _run_all(
     return results
 
 
-def _make_full_omni(args: argparse.Namespace):
-    """Build the full three-stage ``Omni`` the E2E measurements run on."""
+def _default_device() -> str:
+    """``cuda`` > ``npu`` > ``cpu``; ``torch_npu`` loads only when CUDA is absent."""
     import torch
 
+    if torch.cuda.is_available():
+        return "cuda"
+    try:
+        import torch_npu  # noqa: F401
+    except ImportError:
+        return "cpu"
+    return "npu" if torch.npu.is_available() else "cpu"
+
+
+def _resolve_device(args: argparse.Namespace) -> str:
+    return args.device or _default_device()
+
+
+def _dtype_for(device: str) -> str:
+    if device.startswith("cuda"):
+        return "float16"
+    if device.startswith("npu"):
+        return "bfloat16"
+    return "float32"
+
+
+def _make_full_omni(args: argparse.Namespace):
+    """Build the full three-stage ``Omni`` the E2E measurements run on."""
     from nanovllm_omni import Omni
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = _resolve_device(args)
     return Omni(
         model=args.model,
         device=device,
-        dtype="float16" if device.startswith("cuda") else "float32",
+        dtype=_dtype_for(device),
         trust_remote_code=True,
         pipeline="minimind_o",
         extra=_extra_overrides(args),
@@ -125,6 +148,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "device": _resolve_device(args),
     }
     sizes = [int(s) for s in args.batch_sizes.split(",") if s.strip()]
 
@@ -188,25 +212,25 @@ def cmd_time(args: argparse.Namespace) -> int:
     prompts = _resolve_prompts(args.prompts)
 
     if args.pipeline == "full":
-        import torch
-
         from nanovllm_omni import Omni
         from nanovllm_omni.bench.runner import run_n_full
 
-        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = _resolve_device(args)
         kwargs = _kwargs(args)
         kwargs.pop("open_thinking", None)  # Omni.generate has no open-thinking switch
         omni = Omni(
             model=args.model,
             device=device,
-            dtype="float16" if device.startswith("cuda") else "float32",
+            dtype=_dtype_for(device),
             trust_remote_code=True,
             pipeline="minimind_o",
             **_graph_overrides(args),
         )
         results: list[RunResult] = []
         for prompt in prompts:
-            results.extend(run_n_full(omni, prompt, n=args.runs, warmup=args.warmup, **kwargs))
+            results.extend(
+                run_n_full(omni, prompt, n=args.runs, warmup=args.warmup, device=device, **kwargs)
+            )
     else:
         bundle = _load_bundle(args)
         results = _run_all(
@@ -353,7 +377,6 @@ def cmd_trace_torch(args: argparse.Namespace) -> int:
 
 
 def cmd_profile_detail(args: argparse.Namespace) -> int:
-    """Capture a torch.profiler trace AND a parsed per-stage kernel breakdown."""
     from .profile_cli import profile_detail
 
     return profile_detail(

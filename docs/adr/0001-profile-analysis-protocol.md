@@ -60,6 +60,20 @@ Phase 1 已在 WSL RTX 3050 4GB 上为三个模型完成重跑，并使用 `prof
 - Three models can run Phase 1 in parallel (no cross-model data dependency); Phase 2 happens per-model after Phase 1.
 - Lock-in cost is real: any change to the protocol (cell matrix timing, merging phases, dropping the per-model NVTX schema) requires a new ADR.
 
+## NPU variant (Ascend 910B)
+
+第三轨（ADR 0028）沿用同一套四阶段协议，只换设备 API：
+
+| CUDA | Ascend |
+|---|---|
+| `torch.cuda.Event` / `synchronize` | `torch.npu.Event` / `torch.npu.synchronize` |
+| `torch.cuda.max_memory_allocated` | `torch.npu.max_memory_allocated` |
+| `nvidia-smi` | `npu-smi info` |
+| Nsight Systems / nsys | `torch_npu.profiler` / msprof（里程碑 1 不接） |
+
+口径不变：每条数字必须带硬件、CANN / `torch_npu` 版本、代码 commit、输入、
+采样配置、runs、warmup。与 3050 的数字只并列，不跨机相减（ADR 0014）。
+
 ## Open
 
 - LIBERO task + demo episode for `nanovllm_omni/bench/smolvla_prompts.py` (currently empty tuple with TODO).
